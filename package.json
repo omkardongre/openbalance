@@ -1,0 +1,21 @@
+{
+  "name": "openbalance",
+  "version": "0.0.0",
+  "private": true,
+  "packageManager": "pnpm@12.3.4",
+  "engines": {
+    "node": ">=24.21.0 <25",
+    "pnpm": ">=12.3.4 <13"
+  },
+  "scripts": {
+    "build": "turbo run build && forge build --root contracts",
+    "check": "biome check . && turbo run check && forge fmt --root contracts --check",
+    "dev": "turbo run dev",
+    "test": "turbo run test && forge test --root contracts"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.13",
+    "turbo": "2.10.12",
+    "typescript": "7.0.2"
+  }
+}

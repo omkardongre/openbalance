@@ -1,0 +1,38 @@
+# Dependencies and package-manager state
+node_modules/
+.pnpm-store/
+
+# Build, test, and framework output
+.next/
+.turbo/
+dist/
+out/
+cache/
+coverage/
+*.tsbuildinfo
+
+# Smart-contract deployment output
+broadcast/
+deployments/local/
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+credentials/
+secrets/
+
+# Logs and temporary files
+*.log
+.tmp/
+.cache/
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
