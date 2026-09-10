@@ -1,7 +1,30 @@
+import { Pool } from "pg";
 import { buildApp } from "./app.js";
 import { loadEnvironment } from "./config.js";
+import { EnrollmentService } from "./enrollment.js";
 
 const environment = loadEnvironment(process.env);
-const app = await buildApp();
+const pool = environment.DATABASE_URL
+  ? new Pool({
+      connectionString: environment.DATABASE_URL,
+      max: 10,
+      connectionTimeoutMillis: 5000,
+      statement_timeout: 10000,
+    })
+  : undefined;
+const service =
+  pool && environment.WEBAUTHN_RP_ID && environment.WEBAUTHN_ORIGIN
+    ? new EnrollmentService(pool, {
+        rpId: environment.WEBAUTHN_RP_ID,
+        origin: environment.WEBAUTHN_ORIGIN,
+      })
+    : undefined;
+if (pool) await pool.query("SELECT id FROM account_enrollments LIMIT 0");
+const app = await buildApp(service, environment.WEBAUTHN_ORIGIN);
+if (pool) app.addHook("onClose", async () => pool.end());
+for (const signal of ["SIGTERM", "SIGINT"] as const)
+  process.once(signal, () => {
+    void app.close();
+  });
 
 await app.listen({ host: environment.HOST, port: environment.PORT });

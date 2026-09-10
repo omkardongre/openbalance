@@ -2,6 +2,7 @@
   "$schema": "https://turborepo.com/schema.json",
   "tasks": {
     "build": {
+      "env": ["NEXT_PUBLIC_API_URL"],
       "dependsOn": ["^build"],
       "outputs": [".next/**", "!.next/cache/**", "dist/**"]
     },
@@ -13,6 +14,8 @@
       "persistent": true
     },
     "test": {
+      "cache": false,
+      "passThroughEnv": ["ENROLLMENT_TEST_DATABASE_URL"],
       "dependsOn": ["^build"],
       "outputs": []
     }
