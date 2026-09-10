@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+export * from "./accounts.js";
+
 export const monadChains = {
   mainnet: 143,
   testnet: 10_143,
