@@ -4,7 +4,8 @@ The `/enroll` web route creates an ES256 resident credential, then asks the same
 sign a fresh challenge. The service validates registration and proof with SimpleWebAuthn,
 extracts P256 coordinates from the verified COSE key, and checks that the assertion matches
 the account's strict JSON/authenticator-data profile. An enrollment is not a login session or
-an account deployment authorization. Deployment binding remains a separate implementation step.
+an account deployment authorization by itself. The deployment service derives a fixed owner
+configuration from verified enrollment; see `DEPLOYMENT.md` for its separate checks and limitations.
 
 ## Configuration
 
@@ -43,4 +44,5 @@ rejection, expiry, token isolation, and HTTP origin enforcement. Without the var
 PostgreSQL integration tests are explicitly skipped. Unit tests still run.
 
 The browser route builds successfully but an actual browser/device ceremony has not been run.
-No account creation, funding, authentication session, or production deployment is claimed.
+Account creation from verified enrollment is tested locally as described in `DEPLOYMENT.md`.
+No funding, authentication session, or production deployment is claimed.

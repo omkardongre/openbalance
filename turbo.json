@@ -15,7 +15,7 @@
     },
     "test": {
       "cache": false,
-      "passThroughEnv": ["ENROLLMENT_TEST_DATABASE_URL"],
+      "passThroughEnv": ["ENROLLMENT_TEST_DATABASE_URL", "DEPLOYMENT_TEST_RPC_URL"],
       "dependsOn": ["^build"],
       "outputs": []
     }

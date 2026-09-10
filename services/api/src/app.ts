@@ -3,9 +3,15 @@ import rateLimit from "@fastify/rate-limit";
 import type { AuthenticationResponseJSON, RegistrationResponseJSON } from "@simplewebauthn/server";
 import Fastify from "fastify";
 import { z } from "zod";
+import { DeploymentMismatch } from "./deployment-chain.js";
+import type { DeploymentService } from "./deployments.js";
 import { EnrollmentRejected, type EnrollmentService } from "./enrollment.js";
 
-export async function buildApp(enrollment?: EnrollmentService, origin?: string) {
+export async function buildApp(
+  enrollment?: EnrollmentService,
+  origin?: string,
+  deployment?: DeploymentService,
+) {
   const app = Fastify({ logger: false, bodyLimit: 32_768 });
 
   await app.register(cors, {
@@ -50,6 +56,27 @@ export async function buildApp(enrollment?: EnrollmentService, origin?: string) 
       }
     });
     app.post("/v1/accounts/enrollment-challenges", async () => enrollment.begin());
+    if (deployment) {
+      for (const operation of ["prepare", "confirm"] as const) {
+        app.post(`/v1/accounts/deployments/${operation}`, async (request, reply) => {
+          const parsed = z
+            .object({ token: z.string().regex(/^[A-Za-z0-9_-]{43}$/) })
+            .strict()
+            .safeParse(request.body);
+          if (!parsed.success) return reply.code(400).send({ error: "invalid_deployment_request" });
+          try {
+            return await deployment.process(parsed.data.token, operation === "confirm");
+          } catch (error) {
+            if (error instanceof EnrollmentRejected)
+              return reply.code(403).send({ error: "enrollment_required" });
+            if (error instanceof DeploymentMismatch)
+              return reply.code(409).send({ error: "deployment_mismatch" });
+            // RPC errors can embed credential-bearing URLs; keep details out of HTTP responses.
+            return reply.code(503).send({ error: "deployment_unavailable" });
+          }
+        });
+      }
+    }
     for (const kind of ["register", "prove"] as const) {
       app.post(`/v1/accounts/enrollments/${kind}`, async (request, reply) => {
         const parsed = bodySchema.safeParse(request.body);

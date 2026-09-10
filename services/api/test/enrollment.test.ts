@@ -1,9 +1,21 @@
 import { createHash, generateKeyPairSync, randomBytes, sign } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { accountFactoryAbi } from "@openbalance/protocol";
 import type { AuthenticationResponseJSON, RegistrationResponseJSON } from "@simplewebauthn/server";
 import { Pool } from "pg";
+import {
+  type Address,
+  createPublicClient,
+  createTestClient,
+  createWalletClient,
+  type Hex,
+  http,
+  keccak256,
+} from "viem";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildApp } from "../src/app.js";
+import { DeploymentChain, DeploymentMismatch } from "../src/deployment-chain.js";
+import { DeploymentService } from "../src/deployments.js";
 import {
   EnrollmentRejected,
   EnrollmentService,
@@ -121,6 +133,12 @@ describe.skipIf(!process.env.ENROLLMENT_TEST_DATABASE_URL)(
         await readFile(new URL("../migrations/001_enrollment.sql", import.meta.url), "utf8"),
       );
       service = new EnrollmentService(pool, policy);
+      await pool.query(
+        await readFile(
+          new URL("../migrations/002_account_deployments.sql", import.meta.url),
+          "utf8",
+        ),
+      );
     });
     afterAll(async () => {
       if (pool) {
@@ -147,6 +165,121 @@ describe.skipIf(!process.env.ENROLLMENT_TEST_DATABASE_URL)(
         EnrollmentRejected,
       );
     });
+
+    it.skipIf(!process.env.DEPLOYMENT_TEST_RPC_URL)(
+      "deploys verified enrollment once across retries and verifies finalized ownership",
+      async () => {
+        const rpc = process.env.DEPLOYMENT_TEST_RPC_URL as string;
+        const client = createPublicClient({ transport: http(rpc) });
+        if ((await client.getChainId()) !== 31337)
+          throw new Error("Deployment tests require local Anvil");
+        const wallet = createWalletClient({ transport: http(rpc) });
+        const miner = createTestClient({ mode: "anvil", transport: http(rpc) });
+        const [payer] = await wallet.getAddresses();
+        if (!payer) throw new Error("Missing local test payer");
+        const artifact = JSON.parse(
+          await readFile(
+            new URL(
+              "../../../contracts/out/AccountFactory.sol/AccountFactory.json",
+              import.meta.url,
+            ),
+            "utf8",
+          ),
+        );
+        const receipt = await client.waitForTransactionReceipt({
+          hash: await wallet.deployContract({
+            account: payer,
+            chain: null,
+            abi: artifact.abi,
+            bytecode: artifact.bytecode.object,
+          }),
+        });
+        const factory = receipt.contractAddress as Address;
+        await miner.mine({ blocks: 64 });
+        const implementation = await client.readContract({
+          address: factory,
+          abi: accountFactoryAbi,
+          functionName: "implementation",
+        });
+        const manifest = {
+          version: 1,
+          chainId: 31337,
+          factory,
+          implementation,
+          factoryCodeHash: keccak256((await client.getCode({ address: factory })) as Hex),
+          implementationCodeHash: keccak256(
+            (await client.getCode({ address: implementation })) as Hex,
+          ),
+        };
+        const chain = new DeploymentChain(manifest, rpc);
+        const deployments = new DeploymentService(pool, chain, policy);
+        const start = await service.begin();
+        await expect(deployments.process(start.token)).rejects.toBeInstanceOf(EnrollmentRejected);
+        const f = fixture(start.options.challenge);
+        const registration = await service.verify(start.token, "register", f.registration);
+        if (!registration.options) throw new Error("Missing proof options");
+        await service.verify(start.token, "prove", f.proof(registration.options.challenge));
+        await expect(deployments.process(start.token, true)).rejects.toBeInstanceOf(
+          EnrollmentRejected,
+        );
+        const [first, retry] = await Promise.all([
+          deployments.process(start.token),
+          deployments.process(start.token),
+        ]);
+        expect(first).toEqual(retry);
+        expect(first.status).toBe("pending");
+        expect(first.parameters.owners.primary.x).toBe(f.x);
+        expect(first.parameters.owners.recovery).toBe("0x0000000000000000000000000000000000000000");
+        expect((await pool.query("SELECT count(*) FROM account_deployments")).rows[0].count).toBe(
+          "1",
+        );
+        const hash = await wallet.sendTransaction({
+          account: payer,
+          chain: null,
+          to: first.transaction.to,
+          data: first.transaction.data,
+          value: 0n,
+        });
+        await client.waitForTransactionReceipt({ hash });
+        expect((await deployments.process(start.token, true)).status).toBe("pending");
+        await miner.mine({ blocks: 64 });
+        const restarted = new DeploymentService(pool, new DeploymentChain(manifest, rpc), policy);
+        const confirmed = await restarted.process(start.token, true);
+        expect(confirmed.status).toBe("confirmed");
+        expect(confirmed.account).toBe(first.account);
+        expect((await restarted.process(start.token)).status).toBe("confirmed");
+        await expect(
+          restarted.process(randomBytes(32).toString("base64url")),
+        ).rejects.toBeInstanceOf(EnrollmentRejected);
+        const wrongChain = new DeploymentChain({ ...manifest, chainId: 10143 }, rpc);
+        await expect(wrongChain.checkpoint()).rejects.toBeInstanceOf(DeploymentMismatch);
+        const wrongCode = new DeploymentChain(
+          { ...manifest, factoryCodeHash: `0x${"11".repeat(32)}` },
+          rpc,
+        );
+        await expect(wrongCode.checkpoint()).rejects.toBeInstanceOf(DeploymentMismatch);
+        await expect(
+          new DeploymentService(pool, wrongCode, policy).process(start.token),
+        ).rejects.toBeInstanceOf(DeploymentMismatch);
+        const app = await buildApp(service, policy.origin, restarted);
+        const tampered = await app.inject({
+          method: "POST",
+          url: "/v1/accounts/deployments/prepare",
+          headers: { origin: policy.origin },
+          payload: { token: start.token, primary: f.x },
+        });
+        expect(tampered.statusCode).toBe(400);
+        const verified = await app.inject({
+          method: "POST",
+          url: "/v1/accounts/deployments/confirm",
+          headers: { origin: policy.origin },
+          payload: { token: start.token },
+        });
+        expect(verified.statusCode).toBe(200);
+        expect(verified.json().status).toBe("confirmed");
+        await app.close();
+      },
+    );
 
     it("rejects wrong challenge, origin, missing verification and forged signatures without advancing state", async () => {
       const start = await service.begin();
