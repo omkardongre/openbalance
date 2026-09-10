@@ -89,10 +89,19 @@ export function accountCommandDigest(input: Parameters<typeof accountCommand>[0]
   return hashTypedData(accountCommand(input));
 }
 export const accountAbi = parseAbi([
+  "function rpIdHash() view returns (bytes32)",
+  "function origin() view returns (string)",
+  "function factory() view returns (address)",
   "function epoch() view returns (uint256)",
   "function nonce() view returns (uint256)",
   "function recoveryNonce() view returns (uint256)",
   "function ownership() view returns ((bytes32 x, bytes32 y) primary, (bytes32 x, bytes32 y) backup, address recovery)",
   "function commandDigest(bytes32 action, bytes32 terms, uint256 deadline) view returns (bytes32)",
   "function recover(((bytes32 x, bytes32 y) primary, (bytes32 x, bytes32 y) backup, address recovery) owners, uint256 deadline, bytes signature)",
+]);
+
+export const accountFactoryAbi = parseAbi([
+  "function implementation() view returns (address)",
+  "function predict(((bytes32 x,bytes32 y) primary,(bytes32 x,bytes32 y) backup,address recovery) owners,bytes32 rp,string site,bytes32 userSalt) view returns (address)",
+  "function create(((bytes32 x,bytes32 y) primary,(bytes32 x,bytes32 y) backup,address recovery) owners,bytes32 rp,string site,bytes32 userSalt) returns (address)",
 ]);
