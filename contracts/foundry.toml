@@ -9,6 +9,8 @@ optimizer = true
 optimizer_runs = 10_000
 bytecode_hash = "none"
 cbor_metadata = false
+remappings = ["@openzeppelin/contracts/=../node_modules/@openzeppelin/contracts/"]
+allow_paths = ["../node_modules"]
 
 [fmt]
 line_length = 100
