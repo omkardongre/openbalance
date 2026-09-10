@@ -39,7 +39,9 @@ recovery signatures, transfer rollback, and fuzzed token conservation.
 
 This is a locally tested ownership core. Browser registration and proof of key possession are
 not performed by the factory; public keys alone are insufficient enrollment evidence. Browser
-assertion compatibility, hardware-wallet signing, testnet deployment, independent recovery client,
-ERC-1271 consumer restrictions, online sessions, payments, and reserve commands remain unimplemented
-or unproven. No production readiness or audit is claimed. Since clones are immutable, later account
+assertion compatibility, hardware-wallet signing, and testnet deployment remain unproven. The
+independent recovery client and its local Anvil proof are described in
+`apps/web/scripts/RECOVERY.md`; database-backed enrollment is in `services/api/ENROLLMENT.md`.
+ERC-1271 consumer restrictions, online sessions, payments, and reserve commands remain unimplemented.
+No production readiness or audit is claimed. Since clones are immutable, later account
 implementations require new deployments; these development accounts are not a final funding target.

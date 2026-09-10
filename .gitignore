@@ -25,6 +25,8 @@ deployments/local/
 *.pfx
 credentials/
 secrets/
+recovery-requests/
+recovery-envelopes/
 
 # Logs and temporary files
 *.log
