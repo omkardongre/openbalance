@@ -11,6 +11,8 @@ contract EventRegistry {
         uint48 validUntil;
         uint16 organizerFeeBps;
         uint16 platformFeeBps;
+        uint48 maximumAcceptanceDuration;
+        uint48 maximumSubmissionDelay;
         address organizerDestination;
         address platformDestination;
         bytes32 termsHash;
@@ -33,6 +35,19 @@ contract EventRegistry {
         uint48 validAfter;
         uint48 validUntil;
         bool enabled;
+    }
+
+    struct ReserveTermsRequest {
+        bytes32 vendorId;
+        uint256 destinationVersion;
+        bytes32 terminalId;
+        uint256 terminalVersion;
+        uint256 configVersion;
+        uint16 organizerFeeBps;
+        uint16 platformFeeBps;
+        uint48 acceptFrom;
+        uint48 acceptUntil;
+        uint48 submitUntil;
     }
 
     bytes32 private constant DOMAIN_TYPE = keccak256(
@@ -95,6 +110,7 @@ contract EventRegistry {
             version == 0 || configs[version].validUntil != 0
                 || config.validAfter >= config.validUntil
                 || uint256(config.organizerFeeBps) + config.platformFeeBps > maximumFeeBps
+                || config.maximumAcceptanceDuration == 0 || config.maximumSubmissionDelay == 0
                 || config.organizerDestination == address(0)
                 || config.platformDestination == address(0) || config.termsHash == 0
         ) revert InvalidPolicy();
@@ -240,6 +256,44 @@ contract EventRegistry {
         );
     }
 
+    function reserveTerms(ReserveTermsRequest calldata request)
+        external
+        view
+        returns (
+            address terminalSigner,
+            address vendorDestination,
+            address organizerDestination,
+            address platformDestination
+        )
+    {
+        Config memory config = configs[request.configVersion];
+        Vendor memory vendor = vendors[request.vendorId];
+        Destination memory destination = destinations[request.vendorId][request.destinationVersion];
+        Terminal memory terminal = terminals[request.terminalId][request.terminalVersion];
+        if (
+            onlinePaused || !config.enabled || !vendor.enabled || !destination.enabled
+                || !terminal.enabled || terminal.vendorId != request.vendorId
+                || block.timestamp < config.validAfter || block.timestamp >= config.validUntil
+                || block.timestamp < terminal.validAfter || block.timestamp >= terminal.validUntil
+                || request.acceptFrom < terminal.validAfter
+                || request.acceptUntil > terminal.validUntil || request.acceptFrom < block.timestamp
+                || request.acceptFrom < config.validAfter
+                || request.acceptFrom >= request.acceptUntil
+                || request.acceptUntil >= request.submitUntil
+                || request.acceptUntil > config.validUntil
+                || request.acceptUntil - request.acceptFrom > config.maximumAcceptanceDuration
+                || request.submitUntil - request.acceptUntil > config.maximumSubmissionDelay
+                || config.organizerFeeBps != request.organizerFeeBps
+                || config.platformFeeBps != request.platformFeeBps
+        ) revert Unavailable();
+        return (
+            terminal.signer,
+            destination.account,
+            config.organizerDestination,
+            config.platformDestination
+        );
+    }
+
     function historicalTerminalSigner(bytes32 terminalId, uint256 version, bytes32 vendorId)
         external
         view
@@ -248,6 +302,10 @@ contract EventRegistry {
         Terminal memory terminal = terminals[terminalId][version];
         if (terminal.vendorId != vendorId) return address(0);
         return terminal.signer;
+    }
+
+    function historicalVendorAuthority(bytes32 vendorId) external view returns (address) {
+        return vendors[vendorId].authority;
     }
 
     function _authorizeStatus(bool enabled) private view {
