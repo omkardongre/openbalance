@@ -43,6 +43,7 @@ They exercise restart persistence, concurrent replay, challenge/origin/signature
 rejection, expiry, token isolation, and HTTP origin enforcement. Without the variable the three
 PostgreSQL integration tests are explicitly skipped. Unit tests still run.
 
-The browser route builds successfully but an actual browser/device ceremony has not been run.
-Account creation from verified enrollment is tested locally as described in `DEPLOYMENT.md`.
-No funding, authentication session, or production deployment is claimed.
+The browser routes build successfully but an actual browser/device ceremony has not been run.
+Account creation from verified enrollment is tested locally as described in `DEPLOYMENT.md`, and
+subsequent passkey authentication is described in `ACCOUNT_ACCESS.md`. No funding or production
+deployment is claimed.

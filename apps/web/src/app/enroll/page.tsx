@@ -21,12 +21,12 @@ type Deployment = {
   parameters: { salt: Hex };
   manifest: { chainId: number; factory: Address };
 };
-async function post(path: string, body: unknown) {
+async function post(path: string, body: unknown, headers?: Record<string, string>) {
   const api = process.env.NEXT_PUBLIC_API_URL;
   if (!api) throw new Error("Enrollment service is not configured.");
   const response = await fetch(`${api}${path}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...headers },
     body: JSON.stringify(body),
     cache: "no-store",
     signal: AbortSignal.timeout(30000),
@@ -48,6 +48,7 @@ export default function EnrollPage() {
   const [verifiedKey, setVerifiedKey] = useState<Enrollment>();
   const [deployment, setDeployment] = useState<Deployment>();
   const [submitted, setSubmitted] = useState(false);
+  const [sponsorshipKey, setSponsorshipKey] = useState<string>();
   async function enroll() {
     setBusy(true);
     setRecord(undefined);
@@ -55,6 +56,7 @@ export default function EnrollPage() {
     setVerifiedKey(undefined);
     setDeployment(undefined);
     setSubmitted(false);
+    setSponsorshipKey(undefined);
     setStatus("Create your passkey, then confirm it.");
     try {
       const start = await post("/v1/accounts/enrollment-challenges", {});
@@ -77,6 +79,48 @@ export default function EnrollPage() {
       );
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Enrollment failed.");
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function sponsor() {
+    if (!token) return;
+    setBusy(true);
+    const key = sponsorshipKey ?? `account-deployment:${crypto.randomUUID()}`;
+    setSponsorshipKey(key);
+    try {
+      const relayer = process.env.NEXT_PUBLIC_RELAYER_URL;
+      if (!relayer) throw new Error("Account sponsorship is not configured.");
+      const response = await fetch(`${relayer}/v1/accounts/deployments/sponsor`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Idempotency-Key": key },
+        body: JSON.stringify({ token }),
+        cache: "no-store",
+        signal: AbortSignal.timeout(30_000),
+      });
+      if (!response.ok)
+        throw new Error("Sponsorship is unavailable. Retry the same request later.");
+      const result = await response.json();
+      setDeployment((current) =>
+        current
+          ? {
+              ...current,
+              account: result.account,
+              status: result.status === "confirmed" ? "confirmed" : "pending",
+            }
+          : current,
+      );
+      setStatus(
+        result.status === "confirmed"
+          ? "Account verified onchain. Set up recovery before adding funds."
+          : "Deployment submitted with bounded sponsorship. Check again for finality.",
+      );
+    } catch (error) {
+      setStatus(
+        error instanceof Error
+          ? error.message
+          : "Sponsorship is unavailable. Your passkey and account parameters are unchanged.",
+      );
     } finally {
       setBusy(false);
     }
@@ -163,16 +207,26 @@ export default function EnrollPage() {
         {token && (
           <section aria-label="Account deployment">
             <p>
-              Test deployment: a helper wallet pays the network fee. Your passkey owns the account.
-              Backup and recovery are not enrolled yet.
+              Your passkey owns the account. Sponsorship pays only the bounded account-creation
+              network fee. Backup and recovery are not enrolled yet.
             </p>
             <button
               type="button"
-              disabled={busy || submitted || deployment?.status === "confirmed"}
-              onClick={() => deploy(true)}
+              disabled={busy || deployment?.status === "confirmed"}
+              onClick={sponsor}
             >
-              Deploy test account
+              Deploy account
             </button>
+            <details>
+              <summary>Pay deployment gas from a test wallet</summary>
+              <button
+                type="button"
+                disabled={busy || submitted || deployment?.status === "confirmed"}
+                onClick={() => deploy(true)}
+              >
+                Deploy test account
+              </button>
+            </details>
             <button type="button" disabled={busy} onClick={() => deploy(false)}>
               Check account
             </button>

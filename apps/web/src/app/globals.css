@@ -51,3 +51,25 @@ h1 {
   font-size: clamp(1.1rem, 2vw, 1.4rem);
   line-height: 1.6;
 }
+
+label {
+  display: block;
+  margin-top: 2rem;
+  color: #b9d5cb;
+}
+
+input {
+  display: block;
+  width: 100%;
+  margin: 0.5rem 0 1rem;
+  padding: 0.9rem 1rem;
+  border: 1px solid #397564;
+  border-radius: 0.75rem;
+  background: #07110f;
+  color: inherit;
+  font: inherit;
+}
+
+button {
+  margin: 0.5rem 0.5rem 0.5rem 0;
+}

@@ -1,7 +1,8 @@
 # Verified enrollment to account deployment
 
-Apply migrations `001_enrollment.sql` and `002_account_deployments.sql` in order with a
-migration identity. The runtime needs SELECT/INSERT/UPDATE on both tables, without schema privileges.
+Apply migrations `001_enrollment.sql` through `004_deployment_sponsorship.sql` in order with a
+migration identity. The runtime needs SELECT/INSERT/UPDATE on the runtime tables, without schema
+privileges.
 Configure `ACCOUNT_MANIFEST_PATH` and `ACCOUNT_RPC_URL` together with the enrollment variables.
 Without the deployment pair, enrollment works but deployment routes are absent. Partial configuration,
 missing tables, an incorrect chain, or mismatched factory/implementation code prevents startup.
@@ -24,7 +25,7 @@ finalized; if manifest extraction fails, retry that read, not the deployment tra
 
 1. Complete registration and the separate key-possession proof.
 2. POST `/v1/accounts/deployments/prepare` with `{ "token": "ENROLLMENT_TOKEN" }`.
-3. Review and submit the returned factory transaction using a gas-paying helper wallet.
+3. Request bounded sponsorship, or review and submit the transaction using a gas-paying wallet.
 4. POST `/v1/accounts/deployments/confirm` with the same token until it reports `confirmed`.
 
 The endpoints accept no caller-supplied owner, recovery key, salt, address, or transaction hash.
@@ -34,10 +35,11 @@ and manifest binding produce the same address and transaction on retries and ser
 A changed manifest fails closed instead of silently creating a different account. Recovery setup
 remains a separate owner-authorized workflow and should precede funding.
 
-The browser independently reconstructs the transaction from its verified public key and rejects
+The browser independently reconstructs a manual transaction from its verified public key and rejects
 altered calldata, native value, domain, or chain. A helper wallet pays only deployment gas and
-does not become an owner. Automatic gas sponsorship is not implemented in this slice. The UI
-retains submission ambiguity and offers a separate Check account action. An explicit retry can
+does not become an owner. The primary browser action requests bounded gas sponsorship; permissionless
+wallet submission remains an explicit alternate path. The UI retains submission ambiguity and offers
+a separate Check account action. An explicit manual retry can
 pay gas twice, but the idempotent factory cannot create two accounts for the same parameters.
 
 Confirmation reads actual finalized account state, not a browser-reported transaction hash.
@@ -46,12 +48,42 @@ factory, RP hash, and origin, and stores the observed block number/hash. It neve
 `latest` for an unsupported `finalized` tag. A mined but unfinalized account remains `pending`.
 Every confirmation rechecks chain state; an RPC outage never returns an earlier cached success.
 Post-recovery ownership is intentionally a mismatch for this initial-deployment verifier, not an
-account health assessment. A general authenticated account-status API remains separate work.
+account health assessment.
 
-The enrollment bearer token permits this flow for 30 minutes after verification and is held
+## Bounded sponsorship
+
+Set every sponsorship variable or none: `SPONSOR_PRIVATE_KEY_PATH`,
+`SPONSOR_DAILY_DEPLOYMENTS`, `SPONSOR_MAX_DEPLOYMENT_GAS`,
+`SPONSOR_MAX_FEE_PER_GAS_WEI`, and `SPONSOR_MAX_COST_WEI`. The key path must be a regular,
+non-symlink file inaccessible to group and other users. Mount it from a managed secret; never place a
+private key in an environment variable, image, repository, command line, or log. The sponsor address
+must be funded only with the bounded operational gas budget.
+
+These variables and the signing key belong only to the separately started `@openbalance/relayer`
+service. The consumer API process never loads the key. Route the sponsorship endpoint to that
+service through deployment ingress and set `NEXT_PUBLIC_RELAYER_URL` to its public origin for the
+browser build. Keep API and relayer runtime identities, secret access, and deployment permissions
+separate.
+
+`POST /v1/accounts/deployments/sponsor` requires the verified enrollment token and an
+`Idempotency-Key`. The caller cannot provide a destination, calldata, value, owner, nonce, gas, or fee.
+The service reconstructs the exact configured factory `create` call, simulates gas, applies gas, fee,
+and total-cost ceilings, and enforces the UTC daily deployment quota under a PostgreSQL advisory lock.
+It reserves a signer nonce and stores the signed transaction and expected hash before broadcasting.
+Retries either read finalized account state, observe the same transaction, or rebroadcast the exact
+stored bytes. A changed idempotency key conflicts; it never creates another sponsored account.
+
+The stored signed transaction is public-chain material but can be rebroadcast until mined, so restrict
+database access and retention. A reverted transaction is recorded and never reported as successful.
+RPC failure leaves a durable signed or submitted state for retry; it does not fall back to arbitrary
+wallet calls or cached confirmation. Dedicate the signer to this service because its nonce coordinator
+cannot account for transactions produced elsewhere. Horizontally scaled instances must share the same
+PostgreSQL database and signer policy.
+
+The enrollment bearer token permits deployment for 30 minutes after verification and is held
 only in browser memory. The database retains parameters afterward; the token does not provide
 indefinite access. After a reload or expired token, independent account/address verification
-is required; login and recovery of the browser onboarding session are not implemented here.
+is required. Passkey login and revocable sessions are documented in `ACCOUNT_ACCESS.md`.
 
 ## Local evidence and remaining proof
 
