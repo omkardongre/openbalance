@@ -7,6 +7,7 @@ import { ERC20 } from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import { AccountFactory } from "../src/accounts/AccountFactory.sol";
 import { OpenBalanceAccount } from "../src/accounts/OpenBalanceAccount.sol";
 import { PaymentTypes } from "../src/payments/PaymentTypes.sol";
+import { EventFactory } from "../src/payments/EventFactory.sol";
 import { EventRegistry } from "../src/payments/EventRegistry.sol";
 import { SettlementLedger } from "../src/payments/SettlementLedger.sol";
 import { ExactPayRouter } from "../src/payments/ExactPayRouter.sol";
@@ -18,6 +19,7 @@ interface VmPayment {
     function sign(uint256 key, bytes32 digest) external pure returns (uint8, bytes32, bytes32);
     function expectRevert(bytes4 selector) external;
     function prank(address sender) external;
+    function warp(uint256 timestamp) external;
 }
 
 contract PaymentToken is ERC20 {
@@ -34,8 +36,11 @@ contract ExactPaymentTest {
     uint256 private constant OWNER_KEY = 42;
     uint256 private constant VENDOR_KEY = 81;
     uint256 private constant TERMINAL_KEY = 82;
+    uint256 private constant SESSION_KEY = 83;
+    uint256 private constant RECOVERY_KEY = 84;
     uint256 private constant DEADLINE = 1000;
     bytes32 private constant EVENT_ID = keccak256("event:market-2026");
+    bytes32 private constant SESSION_ID = keccak256("session:attendee-device:1");
     bytes32 private constant VENDOR_ID = keccak256("vendor:noodles");
     bytes32 private constant TERMINAL_ID = keccak256("terminal:noodles:1");
     address private constant VENDOR_DESTINATION = address(0x1001);
@@ -57,10 +62,12 @@ contract ExactPaymentTest {
             )
         );
         token.mint(address(account), 1_000_000);
-        registry = new EventRegistry(EVENT_ID, address(token), address(this), address(0x999), 500);
-        ledger = new SettlementLedger(address(registry), address(token));
-        router = new ExactPayRouter(address(registry), address(ledger));
-        ledger.bindRouter(address(router));
+        EventFactory eventFactory = new EventFactory();
+        EventFactory.Deployment memory deployment =
+            eventFactory.deployEvent(EVENT_ID, address(token), address(0x999), 500);
+        registry = EventRegistry(deployment.registry);
+        ledger = SettlementLedger(deployment.ledger);
+        router = ExactPayRouter(deployment.router);
 
         registry.registerConfig(
             1,
@@ -91,6 +98,7 @@ contract ExactPaymentTest {
     function owners() private pure returns (OpenBalanceAccount.Ownership memory value) {
         (uint256 x, uint256 y) = vm.publicKeyP256(OWNER_KEY);
         value.primary = OpenBalanceAccount.Key(bytes32(x), bytes32(y));
+        value.recovery = vm.addr(RECOVERY_KEY);
     }
 
     function assertion(bytes32 digest) private pure returns (WebAuthn.WebAuthnAuth memory auth) {
@@ -181,6 +189,63 @@ contract ExactPaymentTest {
             account.CANCEL(), keccak256(abi.encode(address(router), digest)), DEADLINE
         );
         auth = assertion(command);
+    }
+
+    function sessionConfig(uint256 maxPerPayment, uint256 maxTotal)
+        private
+        view
+        returns (OpenBalanceAccount.OnlineSessionConfig memory config)
+    {
+        (uint256 x, uint256 y) = vm.publicKeyP256(SESSION_KEY);
+        config = OpenBalanceAccount.OnlineSessionConfig({
+            sessionId: SESSION_ID,
+            signer: OpenBalanceAccount.Key(bytes32(x), bytes32(y)),
+            eventId: EVENT_ID,
+            router: address(router),
+            asset: address(token),
+            maxPerPayment: maxPerPayment,
+            maxTotal: maxTotal,
+            validAfter: 0,
+            validUntil: 800
+        });
+    }
+
+    function setSession(OpenBalanceAccount.OnlineSessionConfig memory config) private {
+        bytes32 digest = account.commandDigest(
+            account.SET_SESSION(), account.onlineSessionTermsHash(config), DEADLINE
+        );
+        account.setOnlineSession(config, DEADLINE, false, assertion(digest));
+    }
+
+    function revokeSession(uint256 revision) private {
+        bytes32 digest = account.commandDigest(
+            account.REVOKE_SESSION(), keccak256(abi.encode(SESSION_ID, revision)), DEADLINE
+        );
+        account.revokeOnlineSession(SESSION_ID, revision, DEADLINE, false, assertion(digest));
+    }
+
+    function sessionSignature(PaymentTypes.Intent memory value, uint256 revision)
+        private
+        view
+        returns (bytes32 r, bytes32 s)
+    {
+        return vm.signP256(
+            SESSION_KEY,
+            account.sessionPaymentDigest(SESSION_ID, revision, router.intentDigest(value))
+        );
+    }
+
+    function sessionPay(PaymentTypes.Intent memory value, uint256 revision) private {
+        (bytes32 r, bytes32 s) = sessionSignature(value, revision);
+        account.payWithOnlineSession(SESSION_ID, abi.encode(value), terminalSignature(value), r, s);
+    }
+
+    function sessionState()
+        private
+        view
+        returns (uint256 spentGross, uint256 revision, bool active, uint256 accountEpoch)
+    {
+        return account.onlineSessionState(SESSION_ID);
     }
 
     function testExactPaymentAllocatesAndClearsAllowance() public {
@@ -285,6 +350,139 @@ contract ExactPaymentTest {
         vm.expectRevert(EventRegistry.Unauthorized.selector);
         registry.setTerminalEnabled(TERMINAL_ID, 1, true);
         registry.setTerminalEnabled(TERMINAL_ID, 1, true);
+    }
+
+    function testOnlineSessionEnforcesPerPaymentAndTotalCaps() public {
+        setSession(sessionConfig(13_000, 20_000));
+        PaymentTypes.Intent memory first = intent(keccak256("payment:session:1"));
+        sessionPay(first, 1);
+        PaymentTypes.Intent memory second = intent(keccak256("payment:session:2"));
+        second.grossUnits = 7_655;
+        sessionPay(second, 1);
+        (uint256 spent, uint256 revision, bool active, uint256 accountEpoch) = sessionState();
+        assert(spent == 20_000 && revision == 1 && active && accountEpoch == account.epoch());
+        assert(account.nonce() == 1 && token.allowance(address(account), address(router)) == 0);
+
+        PaymentTypes.Intent memory overTotal = intent(keccak256("payment:session:over-total"));
+        overTotal.grossUnits = 1;
+        (bytes32 r, bytes32 s) = sessionSignature(overTotal, 1);
+        bytes memory encoded = abi.encode(overTotal);
+        bytes memory terminal = terminalSignature(overTotal);
+        vm.expectRevert(OpenBalanceAccount.Unauthorized.selector);
+        account.payWithOnlineSession(SESSION_ID, encoded, terminal, r, s);
+        (spent,,,) = sessionState();
+        assert(spent == 20_000);
+
+        OpenBalanceAccount.OnlineSessionConfig memory perPayment = sessionConfig(12_000, 20_000);
+        revokeSession(1);
+        setSession(perPayment);
+        PaymentTypes.Intent memory tooLarge = intent(keccak256("payment:session:over-per-payment"));
+        (r, s) = sessionSignature(tooLarge, 3);
+        encoded = abi.encode(tooLarge);
+        terminal = terminalSignature(tooLarge);
+        vm.expectRevert(OpenBalanceAccount.Unauthorized.selector);
+        account.payWithOnlineSession(SESSION_ID, encoded, terminal, r, s);
+    }
+
+    function testOnlineSessionScopeAndAtomicRollback() public {
+        OpenBalanceAccount.OnlineSessionConfig memory invalid = sessionConfig(13_000, 20_000);
+        invalid.eventId = keccak256("event:other");
+        bytes32 invalidDigest = account.commandDigest(
+            account.SET_SESSION(), account.onlineSessionTermsHash(invalid), DEADLINE
+        );
+        WebAuthn.WebAuthnAuth memory invalidAuth = assertion(invalidDigest);
+        vm.expectRevert(OpenBalanceAccount.InvalidPolicy.selector);
+        account.setOnlineSession(invalid, DEADLINE, false, invalidAuth);
+
+        setSession(sessionConfig(13_000, 20_000));
+        PaymentTypes.Intent memory value = intent(keccak256("payment:session:rollback"));
+        (bytes32 r, bytes32 s) = sessionSignature(value, 1);
+        bytes memory encoded = abi.encode(value);
+        bytes memory wrongTerminal = ecdsaSignature(VENDOR_KEY, router.intentDigest(value));
+        vm.expectRevert(ExactPayRouter.InvalidTerminalSignature.selector);
+        account.payWithOnlineSession(SESSION_ID, encoded, wrongTerminal, r, s);
+        (uint256 spent,,,) = sessionState();
+        assert(spent == 0 && token.allowance(address(account), address(router)) == 0);
+
+        (r, s) = vm.signP256(
+            SESSION_KEY + 1, account.sessionPaymentDigest(SESSION_ID, 1, router.intentDigest(value))
+        );
+        bytes memory terminal = terminalSignature(value);
+        vm.expectRevert(OpenBalanceAccount.Unauthorized.selector);
+        account.payWithOnlineSession(SESSION_ID, encoded, terminal, r, s);
+        (spent,,,) = sessionState();
+        assert(spent == 0);
+
+        (bytes32 boundR, bytes32 boundS) = sessionSignature(value, 1);
+        value.paymentId = keccak256("payment:session:altered");
+        encoded = abi.encode(value);
+        terminal = terminalSignature(value);
+        vm.expectRevert(OpenBalanceAccount.Unauthorized.selector);
+        account.payWithOnlineSession(SESSION_ID, encoded, terminal, boundR, boundS);
+    }
+
+    function testRevocationAndRecoveryInvalidateSessionSignatures() public {
+        OpenBalanceAccount.OnlineSessionConfig memory config = sessionConfig(13_000, 20_000);
+        setSession(config);
+        PaymentTypes.Intent memory revoked = intent(keccak256("payment:session:revoked"));
+        (bytes32 oldR, bytes32 oldS) = sessionSignature(revoked, 1);
+        bytes memory encodedRevoked = abi.encode(revoked);
+        bytes memory revokedTerminal = terminalSignature(revoked);
+        revokeSession(1);
+        vm.expectRevert(OpenBalanceAccount.Unauthorized.selector);
+        account.payWithOnlineSession(SESSION_ID, encodedRevoked, revokedTerminal, oldR, oldS);
+
+        setSession(config);
+        vm.expectRevert(OpenBalanceAccount.Unauthorized.selector);
+        account.payWithOnlineSession(SESSION_ID, encodedRevoked, revokedTerminal, oldR, oldS);
+
+        PaymentTypes.Intent memory recovered = intent(keccak256("payment:session:recovered"));
+        (bytes32 recoveryR, bytes32 recoveryS) = sessionSignature(recovered, 3);
+        OpenBalanceAccount.Ownership memory next = owners();
+        bytes32 recoveryDigest =
+            account.commandDigest(account.RECOVER(), keccak256(abi.encode(next)), DEADLINE);
+        account.recover(next, DEADLINE, ecdsaSignature(RECOVERY_KEY, recoveryDigest));
+        bytes memory encodedRecovered = abi.encode(recovered);
+        bytes memory recoveredTerminal = terminalSignature(recovered);
+        vm.expectRevert(OpenBalanceAccount.Unauthorized.selector);
+        account.payWithOnlineSession(
+            SESSION_ID, encodedRecovered, recoveredTerminal, recoveryR, recoveryS
+        );
+    }
+
+    function testExpiredOnlineSessionCannotPay() public {
+        setSession(sessionConfig(13_000, 20_000));
+        PaymentTypes.Intent memory value = intent(keccak256("payment:session:expired"));
+        value.expiresAt = 850;
+        (bytes32 r, bytes32 s) = sessionSignature(value, 1);
+        bytes memory encoded = abi.encode(value);
+        bytes memory terminal = terminalSignature(value);
+        vm.warp(800);
+        vm.expectRevert(OpenBalanceAccount.Unauthorized.selector);
+        account.payWithOnlineSession(SESSION_ID, encoded, terminal, r, s);
+    }
+
+    function testOnlineSessionTermsHashMatchesSharedVector() public view {
+        OpenBalanceAccount.OnlineSessionConfig memory config = OpenBalanceAccount.OnlineSessionConfig({
+            sessionId: keccak256("session:attendee-device:1"),
+            signer: OpenBalanceAccount.Key(
+                bytes32(
+                    uint256(0x1111111111111111111111111111111111111111111111111111111111111111)
+                ),
+                bytes32(uint256(0x2222222222222222222222222222222222222222222222222222222222222222))
+            ),
+            eventId: keccak256("event:market-2026"),
+            router: address(0x0101),
+            asset: address(0x0303),
+            maxPerPayment: 13_000,
+            maxTotal: 20_000,
+            validAfter: 100,
+            validUntil: 800
+        });
+        assert(
+            account.onlineSessionTermsHash(config)
+                == 0xb70e058329e6eda61d7ab51be697828426d3df8387a6db3c89e41e53775e52e3
+        );
     }
 
     function testCanonicalIntentStructHashMatchesSharedVector() public view {

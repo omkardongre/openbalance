@@ -2,6 +2,7 @@ import { decodeAbiParameters, keccak256, stringToHex } from "viem";
 import { describe, expect, it } from "vitest";
 import {
   encodePaymentIntent,
+  eventFactoryAbi,
   type PaymentIntent,
   paymentIntentDigest,
   paymentIntentFields,
@@ -60,5 +61,19 @@ describe("payment intent", () => {
     expect(paymentIntentStructHash(intent)).toBe(
       "0x43dafb74a49c5b8df4499917fd6b9b96af7ce26e59c53bd4eb1d0e8bad56928c",
     );
+  });
+});
+
+describe("event factory ABI", () => {
+  it("exposes atomic deployment and read-back", () => {
+    expect(
+      eventFactoryAbi.some((item) => item.type === "function" && item.name === "deployEvent"),
+    ).toBe(true);
+    expect(
+      eventFactoryAbi.some((item) => item.type === "function" && item.name === "getDeployment"),
+    ).toBe(true);
+    expect(
+      eventFactoryAbi.some((item) => item.type === "event" && item.name === "EventDeployed"),
+    ).toBe(true);
   });
 });

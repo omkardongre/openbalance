@@ -110,6 +110,7 @@ const intentTuple =
   "(uint32 schemaVersion,uint256 chainId,address router,bytes32 eventId,bytes32 paymentId,address payerAccount,bytes32 orderRefHash,bytes32 vendorId,uint256 vendorDestinationVersion,bytes32 terminalInstanceId,address asset,uint256 grossUnits,uint16 organizerFeeBps,uint16 platformFeeBps,uint256 configVersion,bytes32 receiptCommitment,uint48 validAfter,uint48 expiresAt,uint256 terminalKeyVersion)";
 
 export const exactPayRouterAbi = parseAbi([
+  "function eventId() view returns (bytes32)",
   `function quote(bytes encodedIntent) view returns (bytes32 digest,address token,uint256 gross,address payer)`,
   `function intentDigest(${intentTuple} intent) view returns (bytes32)`,
   `function intentStructHash(${intentTuple} intent) pure returns (bytes32)`,
@@ -125,4 +126,11 @@ export const settlementLedgerAbi = parseAbi([
   "function credits(bytes32 beneficiaryId) view returns (uint256)",
   "function beneficiaryDestinations(bytes32 beneficiaryId) view returns (address)",
   "function withdrawFor(bytes32 beneficiaryId) returns (uint256 amount)",
+]);
+
+export const eventFactoryAbi = parseAbi([
+  "function key(address organizer,bytes32 eventId) pure returns (bytes32)",
+  "function getDeployment(address organizer,bytes32 eventId) view returns ((address registry,address ledger,address router) deployment)",
+  "function deployEvent(bytes32 eventId,address asset,address riskOperator,uint16 maximumFeeBps) returns ((address registry,address ledger,address router) deployment)",
+  "event EventDeployed(address indexed organizer,bytes32 indexed eventId,address indexed registry,address ledger,address router,address asset,address riskOperator,uint16 maximumFeeBps)",
 ]);

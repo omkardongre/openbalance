@@ -13,6 +13,32 @@ export type Ownership = {
   backup: { x: Hex; y: Hex };
   recovery: Address;
 };
+export type OnlineSessionConfig = {
+  sessionId: Hex;
+  signer: { x: Hex; y: Hex };
+  eventId: Hex;
+  router: Address;
+  asset: Address;
+  maxPerPayment: bigint;
+  maxTotal: bigint;
+  validAfter: number;
+  validUntil: number;
+};
+const keyComponents = [
+  { name: "x", type: "bytes32" },
+  { name: "y", type: "bytes32" },
+] as const;
+export const onlineSessionConfigComponents = [
+  { name: "sessionId", type: "bytes32" },
+  { name: "signer", type: "tuple", components: keyComponents },
+  { name: "eventId", type: "bytes32" },
+  { name: "router", type: "address" },
+  { name: "asset", type: "address" },
+  { name: "maxPerPayment", type: "uint256" },
+  { name: "maxTotal", type: "uint256" },
+  { name: "validAfter", type: "uint48" },
+  { name: "validUntil", type: "uint48" },
+] as const;
 export const ownershipComponents = [
   {
     name: "primary",
@@ -58,6 +84,67 @@ export function validatorCallHash(validator: Address, purpose: Hex, payloadHash:
     ),
   );
 }
+export function onlineSessionTermsHash(config: OnlineSessionConfig): Hex {
+  validateOnlineSessionConfig(config);
+  return keccak256(
+    encodeAbiParameters([{ type: "tuple", components: onlineSessionConfigComponents }], [config]),
+  );
+}
+export function sessionPaymentDigest(input: {
+  chainId: number;
+  account: Address;
+  sessionId: Hex;
+  revision: bigint;
+  intentDigest: Hex;
+  accountEpoch: bigint;
+}): Hex {
+  if (!Number.isSafeInteger(input.chainId) || input.chainId <= 0)
+    throw new Error("Invalid chain ID");
+  for (const value of [input.revision, input.accountEpoch]) {
+    if (value < 0n || value >= 1n << 256n) throw new Error("Invalid session integer");
+  }
+  return hashTypedData({
+    domain: {
+      name: "OpenBalanceAccount",
+      version: "1",
+      chainId: input.chainId,
+      verifyingContract: input.account,
+    },
+    types: {
+      SessionPayment: [
+        { name: "sessionId", type: "bytes32" },
+        { name: "revision", type: "uint256" },
+        { name: "intentDigest", type: "bytes32" },
+        { name: "accountEpoch", type: "uint256" },
+      ],
+    },
+    primaryType: "SessionPayment",
+    message: {
+      sessionId: input.sessionId,
+      revision: input.revision,
+      intentDigest: input.intentDigest,
+      accountEpoch: input.accountEpoch,
+    },
+  });
+}
+function validateOnlineSessionConfig(config: OnlineSessionConfig) {
+  const uint256Limit = 1n << 256n;
+  const uint48Limit = 2 ** 48;
+  if (
+    config.sessionId === `0x${"0".repeat(64)}` ||
+    config.eventId === `0x${"0".repeat(64)}` ||
+    config.maxPerPayment <= 0n ||
+    config.maxPerPayment >= uint256Limit ||
+    config.maxTotal < config.maxPerPayment ||
+    config.maxTotal >= uint256Limit ||
+    !Number.isSafeInteger(config.validAfter) ||
+    !Number.isSafeInteger(config.validUntil) ||
+    config.validAfter < 0 ||
+    config.validUntil >= uint48Limit ||
+    config.validAfter >= config.validUntil
+  )
+    throw new Error("Invalid online session config");
+}
 export type WebAuthnAuth = {
   r: Hex;
   s: Hex;
@@ -98,7 +185,16 @@ export function encodeValidatorSignature(input: {
 export function accountCommand(input: {
   chainId: number;
   account: Address;
-  action: "WITHDRAW" | "ROTATE" | "RECOVER" | "SET_VALIDATOR" | "ERC1271_CALL" | "PAY" | "CANCEL";
+  action:
+    | "WITHDRAW"
+    | "ROTATE"
+    | "RECOVER"
+    | "SET_VALIDATOR"
+    | "ERC1271_CALL"
+    | "PAY"
+    | "CANCEL"
+    | "SET_SESSION"
+    | "REVOKE_SESSION";
   terms: Hex;
   epoch: bigint;
   nonce: bigint;
@@ -147,11 +243,18 @@ export const accountAbi = parseAbi([
   "function recoveryNonce() view returns (uint256)",
   "function validators(address validator) view returns (bool)",
   "function ownership() view returns ((bytes32 x, bytes32 y) primary, (bytes32 x, bytes32 y) backup, address recovery)",
+  "function sessionRevisions(bytes32 sessionId) view returns (uint256)",
+  "function onlineSessionState(bytes32 sessionId) view returns (uint256 spentGross,uint256 revision,bool active,uint256 accountEpoch)",
   "function commandDigest(bytes32 action, bytes32 terms, uint256 deadline) view returns (bytes32)",
   "function setValidator(address validator, bool enabled, uint256 deadline, bool backup, (bytes32 r,bytes32 s,uint256 challengeIndex,uint256 typeIndex,bytes authenticatorData,string clientDataJSON) auth)",
   "function isValidSignature(bytes32 hash, bytes signature) view returns (bytes4)",
   "function pay(address router, bytes intent, bytes terminalSignature, uint256 deadline, bool backup, (bytes32 r,bytes32 s,uint256 challengeIndex,uint256 typeIndex,bytes authenticatorData,string clientDataJSON) auth)",
   "function cancelPayment(address router, bytes intent, bytes terminalSignature, uint256 deadline, bool backup, (bytes32 r,bytes32 s,uint256 challengeIndex,uint256 typeIndex,bytes authenticatorData,string clientDataJSON) auth)",
+  "function onlineSessionTermsHash((bytes32 sessionId,(bytes32 x,bytes32 y) signer,bytes32 eventId,address router,address asset,uint256 maxPerPayment,uint256 maxTotal,uint48 validAfter,uint48 validUntil) config) pure returns (bytes32)",
+  "function sessionPaymentDigest(bytes32 sessionId,uint256 revision,bytes32 intentDigest) view returns (bytes32)",
+  "function setOnlineSession((bytes32 sessionId,(bytes32 x,bytes32 y) signer,bytes32 eventId,address router,address asset,uint256 maxPerPayment,uint256 maxTotal,uint48 validAfter,uint48 validUntil) config,uint256 deadline,bool backup,(bytes32 r,bytes32 s,uint256 challengeIndex,uint256 typeIndex,bytes authenticatorData,string clientDataJSON) auth)",
+  "function revokeOnlineSession(bytes32 sessionId,uint256 expectedRevision,uint256 deadline,bool backup,(bytes32 r,bytes32 s,uint256 challengeIndex,uint256 typeIndex,bytes authenticatorData,string clientDataJSON) auth)",
+  "function payWithOnlineSession(bytes32 sessionId,bytes intent,bytes terminalSignature,bytes32 r,bytes32 s)",
   "function recover(((bytes32 x, bytes32 y) primary, (bytes32 x, bytes32 y) backup, address recovery) owners, uint256 deadline, bytes signature)",
 ]);
 

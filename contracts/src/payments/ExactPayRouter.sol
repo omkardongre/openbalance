@@ -68,6 +68,10 @@ contract ExactPayRouter {
         entered = false;
     }
 
+    function eventId() external view returns (bytes32) {
+        return registry.eventId();
+    }
+
     function quote(bytes calldata encodedIntent)
         external
         view
