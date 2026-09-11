@@ -28,8 +28,11 @@ secrets/
 recovery-requests/
 recovery-envelopes/
 
-# Logs and temporary files
+# Logs, local databases, and temporary files
 *.log
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
 .tmp/
 .cache/
 
