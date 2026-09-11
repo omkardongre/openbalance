@@ -6,6 +6,7 @@ import { EventFactory } from "../src/payments/EventFactory.sol";
 import { EventRegistry } from "../src/payments/EventRegistry.sol";
 import { ExactPayRouter } from "../src/payments/ExactPayRouter.sol";
 import { SettlementLedger } from "../src/payments/SettlementLedger.sol";
+import { ResilienceVault } from "../src/payments/ResilienceVault.sol";
 
 interface VmEventFactory {
     function expectRevert(bytes4 selector) external;
@@ -38,10 +39,12 @@ contract EventFactoryTest {
         assert(created.registry == stored.registry);
         assert(created.ledger == stored.ledger);
         assert(created.router == stored.router);
+        assert(created.vault == stored.vault);
 
         EventRegistry registry = EventRegistry(created.registry);
         SettlementLedger ledger = SettlementLedger(created.ledger);
         ExactPayRouter router = ExactPayRouter(created.router);
+        ResilienceVault vault = ResilienceVault(created.vault);
         assert(registry.eventId() == EVENT_ID);
         assert(registry.organizer() == address(this));
         assert(registry.riskOperator() == RISK_OPERATOR);
@@ -51,9 +54,13 @@ contract EventFactoryTest {
         assert(address(ledger.asset()) == address(token));
         assert(ledger.binder() == address(factory));
         assert(ledger.router() == address(router));
+        assert(ledger.vault() == address(vault));
         assert(address(router.registry()) == address(registry));
         assert(address(router.ledger()) == address(ledger));
         assert(address(router.asset()) == address(token));
+        assert(address(vault.registry()) == address(registry));
+        assert(address(vault.ledger()) == address(ledger));
+        assert(address(vault.asset()) == address(token));
 
         vm.expectRevert(SettlementLedger.Unauthorized.selector);
         ledger.bindRouter(address(0x1234));

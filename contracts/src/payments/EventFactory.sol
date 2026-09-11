@@ -6,6 +6,8 @@ import { EventRegistryDeployer } from "./EventRegistryDeployer.sol";
 import { ExactPayRouter } from "./ExactPayRouter.sol";
 import { ExactPayRouterDeployer } from "./ExactPayRouterDeployer.sol";
 import { SettlementLedger } from "./SettlementLedger.sol";
+import { ResilienceVault } from "./ResilienceVault.sol";
+import { ResilienceVaultDeployer } from "./ResilienceVaultDeployer.sol";
 
 /// @notice Atomically creates and permanently binds the online contracts for an organizer event.
 contract EventFactory {
@@ -13,10 +15,12 @@ contract EventFactory {
         address registry;
         address ledger;
         address router;
+        address vault;
     }
 
     EventRegistryDeployer private immutable registryDeployer;
     ExactPayRouterDeployer private immutable routerDeployer;
+    ResilienceVaultDeployer private immutable vaultDeployer;
     mapping(bytes32 deploymentKey => Deployment deployment) private deployments;
     bool private entered;
 
@@ -29,6 +33,7 @@ contract EventFactory {
         address indexed registry,
         address ledger,
         address router,
+        address vault,
         address asset,
         address riskOperator,
         uint16 maximumFeeBps
@@ -37,6 +42,7 @@ contract EventFactory {
     constructor() {
         registryDeployer = new EventRegistryDeployer();
         routerDeployer = new ExactPayRouterDeployer();
+        vaultDeployer = new ResilienceVaultDeployer();
     }
 
     function key(address organizer, bytes32 eventId) public pure returns (bytes32) {
@@ -64,7 +70,9 @@ contract EventFactory {
             registryDeployer.deploy(eventId, asset, msg.sender, riskOperator, maximumFeeBps);
         SettlementLedger ledger = new SettlementLedger(address(registry), asset);
         ExactPayRouter router = routerDeployer.deploy(address(registry), address(ledger));
+        ResilienceVault vault = vaultDeployer.deploy(address(registry), address(ledger));
         ledger.bindRouter(address(router));
+        ledger.bindVault(address(vault));
 
         if (
             registry.organizer() != msg.sender || registry.eventId() != eventId
@@ -72,12 +80,18 @@ contract EventFactory {
                 || registry.maximumFeeBps() != maximumFeeBps
                 || ledger.registry() != address(registry) || address(ledger.asset()) != asset
                 || ledger.binder() != address(this) || ledger.router() != address(router)
+                || ledger.vault() != address(vault)
                 || address(router.registry()) != address(registry)
                 || address(router.ledger()) != address(ledger) || address(router.asset()) != asset
+                || address(vault.registry()) != address(registry)
+                || address(vault.ledger()) != address(ledger) || address(vault.asset()) != asset
         ) revert InvalidDeployment();
 
         deployment = Deployment({
-            registry: address(registry), ledger: address(ledger), router: address(router)
+            registry: address(registry),
+            ledger: address(ledger),
+            router: address(router),
+            vault: address(vault)
         });
         deployments[deploymentKey] = deployment;
         entered = false;
@@ -87,6 +101,7 @@ contract EventFactory {
             deployment.registry,
             deployment.ledger,
             deployment.router,
+            deployment.vault,
             asset,
             riskOperator,
             maximumFeeBps

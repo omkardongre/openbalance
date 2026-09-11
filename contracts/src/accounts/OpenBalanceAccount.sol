@@ -8,6 +8,7 @@ import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import { IERC1271 } from "@openzeppelin/contracts/interfaces/IERC1271.sol";
 import { StrictWebAuthn } from "../StrictWebAuthn.sol";
+import { ResilienceVault } from "../payments/ResilienceVault.sol";
 
 interface IExactPayRouter {
     function eventId() external view returns (bytes32);
@@ -80,6 +81,7 @@ contract OpenBalanceAccount is IERC1271 {
     bytes32 public constant CANCEL = keccak256("CANCEL");
     bytes32 public constant SET_SESSION = keccak256("SET_SESSION");
     bytes32 public constant REVOKE_SESSION = keccak256("REVOKE_SESSION");
+    bytes32 public constant OPEN_CHANNEL = keccak256("OPEN_CHANNEL");
     bytes4 private constant INVALID_SIGNATURE = 0xffffffff;
     address public immutable factory;
     bool private initialized;
@@ -104,6 +106,9 @@ contract OpenBalanceAccount is IERC1271 {
     event ValidatorPermissionChanged(address indexed validator, bool enabled);
     event PaymentCommandExecuted(address indexed router, bytes32 indexed intentDigest);
     event CancellationCommandExecuted(address indexed router, bytes32 indexed intentDigest);
+    event ReserveChannelOpened(
+        address indexed vault, bytes32 indexed channelId, uint256 reserveUnits, bytes32 termsHash
+    );
     event OnlineSessionSet(
         bytes32 indexed sessionId,
         uint256 indexed revision,
@@ -254,6 +259,38 @@ contract OpenBalanceAccount is IERC1271 {
         _authorize(CANCEL, keccak256(abi.encode(router, intentDigest)), deadline, backup, auth);
         IExactPayRouter(router).cancel(intent, terminalSignature);
         emit CancellationCommandExecuted(router, intentDigest);
+    }
+
+    function openReserveChannel(
+        address vault,
+        ResilienceVault.ChannelConfig calldata config,
+        uint256 maximumTotalReserve,
+        uint256 deadline,
+        bool backup,
+        WebAuthn.WebAuthnAuth calldata auth
+    ) external locked {
+        if (vault.code.length == 0) revert InvalidPolicy();
+        (bytes32 termsHash, address token, uint256 reserveUnits, address originalAccount) =
+            ResilienceVault(vault).quoteChannel(config);
+        if (
+            token.code.length == 0 || reserveUnits == 0 || originalAccount != address(this)
+                || config.channelId == 0 || maximumTotalReserve < reserveUnits
+                || ResilienceVault(vault).reservedFor(address(this))
+                    > maximumTotalReserve - reserveUnits
+        ) revert InvalidPolicy();
+        _authorize(
+            OPEN_CHANNEL,
+            keccak256(
+                abi.encode(vault, config.channelId, reserveUnits, maximumTotalReserve, termsHash)
+            ),
+            deadline,
+            backup,
+            auth
+        );
+        IERC20(token).forceApprove(vault, reserveUnits);
+        ResilienceVault(vault).openChannel(config);
+        IERC20(token).forceApprove(vault, 0);
+        emit ReserveChannelOpened(vault, config.channelId, reserveUnits, termsHash);
     }
 
     function setOnlineSession(

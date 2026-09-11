@@ -7,6 +7,7 @@ import {
   parseAbi,
   stringToHex,
 } from "viem";
+import { reserveChannelTuple } from "./payments.js";
 
 export type Ownership = {
   primary: { x: Hex; y: Hex };
@@ -194,7 +195,8 @@ export function accountCommand(input: {
     | "PAY"
     | "CANCEL"
     | "SET_SESSION"
-    | "REVOKE_SESSION";
+    | "REVOKE_SESSION"
+    | "OPEN_CHANNEL";
   terms: Hex;
   epoch: bigint;
   nonce: bigint;
@@ -250,6 +252,7 @@ export const accountAbi = parseAbi([
   "function isValidSignature(bytes32 hash, bytes signature) view returns (bytes4)",
   "function pay(address router, bytes intent, bytes terminalSignature, uint256 deadline, bool backup, (bytes32 r,bytes32 s,uint256 challengeIndex,uint256 typeIndex,bytes authenticatorData,string clientDataJSON) auth)",
   "function cancelPayment(address router, bytes intent, bytes terminalSignature, uint256 deadline, bool backup, (bytes32 r,bytes32 s,uint256 challengeIndex,uint256 typeIndex,bytes authenticatorData,string clientDataJSON) auth)",
+  `function openReserveChannel(address vault,${reserveChannelTuple} config,uint256 maximumTotalReserve,uint256 deadline,bool backup,(bytes32 r,bytes32 s,uint256 challengeIndex,uint256 typeIndex,bytes authenticatorData,string clientDataJSON) auth)`,
   "function onlineSessionTermsHash((bytes32 sessionId,(bytes32 x,bytes32 y) signer,bytes32 eventId,address router,address asset,uint256 maxPerPayment,uint256 maxTotal,uint48 validAfter,uint48 validUntil) config) pure returns (bytes32)",
   "function sessionPaymentDigest(bytes32 sessionId,uint256 revision,bytes32 intentDigest) view returns (bytes32)",
   "function setOnlineSession((bytes32 sessionId,(bytes32 x,bytes32 y) signer,bytes32 eventId,address router,address asset,uint256 maxPerPayment,uint256 maxTotal,uint48 validAfter,uint48 validUntil) config,uint256 deadline,bool backup,(bytes32 r,bytes32 s,uint256 challengeIndex,uint256 typeIndex,bytes authenticatorData,string clientDataJSON) auth)",
