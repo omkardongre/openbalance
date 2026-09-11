@@ -183,6 +183,7 @@ contract ReserveChannelTest {
     }
 
     function settle(ResilienceVault.Voucher memory value) private {
+        if (block.timestamp < value.acceptedAt) vm.warp(value.acceptedAt);
         bytes32 digest = vault.voucherDigest(value);
         vault.settleVoucher(value, signature(CHANNEL_KEY, digest), signature(TERMINAL_KEY, digest));
     }
@@ -247,31 +248,45 @@ contract ReserveChannelTest {
         assert(ledger.credits(vendorBeneficiary) == 4_850);
     }
 
-    function testVoucherRejectsWrongSignaturesSequenceReplayAndCap() public {
+    function testVoucherRejectsWrongSignaturesAndFutureAcceptance() public {
         open(config());
+        vm.warp(150);
         ResilienceVault.Voucher memory first =
-            voucher(1, GENESIS, keccak256("offline-payment:bounds:1"), 4_000, 4_000);
+            voucher(1, GENESIS, keccak256("offline-payment:signature"), 4_000, 4_000);
         bytes32 digest = vault.voucherDigest(first);
         bytes memory attendee = signature(CHANNEL_KEY, digest);
         bytes memory terminal = signature(TERMINAL_KEY, digest);
-        bytes memory wrongAttendee = signature(VENDOR_KEY, digest);
         vm.expectRevert(ResilienceVault.InvalidAttendeeSignature.selector);
-        vault.settleVoucher(first, wrongAttendee, terminal);
-        bytes memory wrongTerminal = signature(VENDOR_KEY, digest);
+        vault.settleVoucher(first, signature(VENDOR_KEY, digest), terminal);
         vm.expectRevert(ResilienceVault.InvalidTerminalSignature.selector);
-        vault.settleVoucher(first, attendee, wrongTerminal);
+        vault.settleVoucher(first, attendee, signature(VENDOR_KEY, digest));
 
+        first.acceptedAt = 200;
+        digest = vault.voucherDigest(first);
+        attendee = signature(CHANNEL_KEY, digest);
+        terminal = signature(TERMINAL_KEY, digest);
+        vm.expectRevert(ResilienceVault.InvalidVoucher.selector);
+        vault.settleVoucher(first, attendee, terminal);
+    }
+
+    function testVoucherRejectsSequenceReplayPaymentReplayAndCap() public {
+        open(config());
+        ResilienceVault.Voucher memory first =
+            voucher(1, GENESIS, keccak256("offline-payment:bounds:1"), 4_000, 4_000);
         settle(first);
+        bytes32 digest = vault.voucherDigest(first);
+        bytes memory attendee = signature(CHANNEL_KEY, digest);
+        bytes memory terminal = signature(TERMINAL_KEY, digest);
         vm.expectRevert(ResilienceVault.InvalidVoucher.selector);
         vault.settleVoucher(first, attendee, terminal);
 
         ResilienceVault.Voucher memory duplicatePayment =
             voucher(2, digest, first.paymentId, 1_000, 5_000);
         bytes32 duplicateDigest = vault.voucherDigest(duplicatePayment);
-        bytes memory duplicateAttendee = signature(CHANNEL_KEY, duplicateDigest);
-        bytes memory duplicateTerminal = signature(TERMINAL_KEY, duplicateDigest);
+        attendee = signature(CHANNEL_KEY, duplicateDigest);
+        terminal = signature(TERMINAL_KEY, duplicateDigest);
         vm.expectRevert(SettlementLedger.InvalidPolicy.selector);
-        vault.settleVoucher(duplicatePayment, duplicateAttendee, duplicateTerminal);
+        vault.settleVoucher(duplicatePayment, attendee, terminal);
         (, uint256 spentAfterDuplicate, uint32 nextAfterDuplicate,,) =
             vault.channelState(CHANNEL_ID);
         assert(spentAfterDuplicate == 4_000 && nextAfterDuplicate == 2);
@@ -279,18 +294,18 @@ contract ReserveChannelTest {
         ResilienceVault.Voucher memory gap =
             voucher(3, digest, keccak256("offline-payment:gap"), 1_000, 5_000);
         bytes32 gapDigest = vault.voucherDigest(gap);
+        attendee = signature(CHANNEL_KEY, gapDigest);
+        terminal = signature(TERMINAL_KEY, gapDigest);
         vm.expectRevert(ResilienceVault.InvalidVoucher.selector);
-        vault.settleVoucher(
-            gap, signature(CHANNEL_KEY, gapDigest), signature(TERMINAL_KEY, gapDigest)
-        );
+        vault.settleVoucher(gap, attendee, terminal);
 
         ResilienceVault.Voucher memory overCap =
             voucher(2, digest, keccak256("offline-payment:cap"), 4_001, 8_001);
         bytes32 overDigest = vault.voucherDigest(overCap);
+        attendee = signature(CHANNEL_KEY, overDigest);
+        terminal = signature(TERMINAL_KEY, overDigest);
         vm.expectRevert(ResilienceVault.InvalidVoucher.selector);
-        vault.settleVoucher(
-            overCap, signature(CHANNEL_KEY, overDigest), signature(TERMINAL_KEY, overDigest)
-        );
+        vault.settleVoucher(overCap, attendee, terminal);
     }
 
     function testReclaimIsPermissionlessFinalAndPaysOriginalAccount() public {

@@ -385,6 +385,31 @@ contract ExactPaymentTest {
         );
     }
 
+    function testLedgerRejectsSelfBeneficiaryDestination() public {
+        registry.registerConfig(
+            2,
+            EventRegistry.Config({
+                validAfter: 0,
+                validUntil: 900,
+                organizerFeeBps: 200,
+                platformFeeBps: 100,
+                maximumAcceptanceDuration: 300,
+                maximumSubmissionDelay: 120,
+                organizerDestination: address(ledger),
+                platformDestination: PLATFORM_DESTINATION,
+                termsHash: keccak256("terms:self-destination"),
+                enabled: true
+            })
+        );
+        PaymentTypes.Intent memory value = intent(keccak256("payment:self-destination"));
+        value.configVersion = 2;
+        (bytes memory encoded, bytes memory terminal, WebAuthn.WebAuthnAuth memory auth) =
+            preparePay(value);
+        vm.expectRevert(SettlementLedger.InvalidPolicy.selector);
+        account.pay(address(router), encoded, terminal, DEADLINE, false, auth);
+        assert(token.balanceOf(address(ledger)) == 0 && ledger.totalLiability() == 0);
+    }
+
     function testRiskOperatorCanDisableButCannotEnableTerminal() public {
         address risk = address(0x999);
         vm.prank(risk);

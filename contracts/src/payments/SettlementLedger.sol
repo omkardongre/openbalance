@@ -212,7 +212,10 @@ contract SettlementLedger {
 
         uint256[3] memory amounts = [vendorNet, organizerFee, platformFee];
         for (uint256 i; i < 3; ++i) {
-            if (beneficiaryIds[i] == 0 || destinations[i] == address(0)) revert InvalidPolicy();
+            if (
+                beneficiaryIds[i] == 0 || destinations[i] == address(0)
+                    || destinations[i] == address(this)
+            ) revert InvalidPolicy();
             address current = beneficiaryDestinations[beneficiaryIds[i]];
             if (current != address(0) && current != destinations[i]) revert InvalidPolicy();
             beneficiaryDestinations[beneficiaryIds[i]] = destinations[i];

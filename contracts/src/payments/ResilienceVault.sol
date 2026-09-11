@@ -196,7 +196,7 @@ contract ResilienceVault {
                 || voucher.grossUnits > config.maxPerVoucher
                 || voucher.cumulativeGrossUnits != channel.spentGross + voucher.grossUnits
                 || voucher.cumulativeGrossUnits > config.reserveUnits
-                || voucher.sequence > config.maxVoucherCount
+                || voucher.sequence > config.maxVoucherCount || voucher.acceptedAt > block.timestamp
                 || voucher.acceptedAt < config.acceptFrom
                 || voucher.acceptedAt >= config.acceptUntil
                 || voucher.acceptUntil != config.acceptUntil

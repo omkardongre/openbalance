@@ -15,7 +15,8 @@ hash, and origin remain unchanged. A replacement with no backup/recovery explici
 
 Domain: name `OpenBalanceAccount`, version `1`, current chain ID and account address.
 Type: `Command(bytes32 action,bytes32 terms,uint256 epoch,uint256 nonce,uint256 deadline)`.
-Actions are keccak256 of the UTF-8 strings `WITHDRAW`, `ROTATE`, or `RECOVER`.
+Actions are keccak256 of the UTF-8 action names exposed by the account, including ownership,
+validator, payment, online-session, and reserve-channel commands.
 
 - Withdrawal terms: `keccak256(abi.encode(asset, recipient, amount))`.
 - Rotation/recovery terms: `keccak256(abi.encode(ownership))`; the tuple is
@@ -26,9 +27,10 @@ Actions are keccak256 of the UTF-8 strings `WITHDRAW`, `ROTATE`, or `RECOVER`.
 - All commands require current epoch and `block.timestamp < deadline`. Nonces advance on
   success; reverted transfers roll back consumption. Every ownership replacement advances epoch.
 
-Any gas-paying caller can relay these signed commands. No fee reimbursement or gas sponsorship
-service is implemented. The withdrawal path supports standard ERC-20 transfers; rebasing and
-fee-on-transfer tokens are outside the intended asset policy. There is no native-token withdrawal.
+Any gas-paying caller can relay signed commands. The isolated sponsorship service currently covers
+bounded account deployment; payment and reserve sponsorship remain pending. The withdrawal path
+supports standard ERC-20 transfers; rebasing and fee-on-transfer tokens are outside the intended
+asset policy. There is no native-token withdrawal.
 
 ## Verified scope
 
@@ -42,6 +44,7 @@ not performed by the factory; public keys alone are insufficient enrollment evid
 assertion compatibility, hardware-wallet signing, and testnet deployment remain unproven. The
 independent recovery client and its local Anvil proof are described in
 `apps/web/scripts/RECOVERY.md`; database-backed enrollment is in `services/api/ENROLLMENT.md`.
-ERC-1271 consumer restrictions, online sessions, payments, and reserve commands remain unimplemented.
-No production readiness or audit is claimed. Since clones are immutable, later account
-implementations require new deployments; these development accounts are not a final funding target.
+ERC-1271 restrictions, exact payments/cancellation, scoped online sessions, and exact reserve-channel
+opening are implemented and locally tested. End-user flows, public-network evidence, production
+readiness, and audit remain unproven. Since clones are immutable, later account implementations
+require new deployments; these development accounts are not a final funding target.
