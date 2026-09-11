@@ -76,6 +76,8 @@ contract ExactPaymentTest {
                 validUntil: 900,
                 organizerFeeBps: 200,
                 platformFeeBps: 100,
+                maximumAcceptanceDuration: 300,
+                maximumSubmissionDelay: 120,
                 organizerDestination: ORGANIZER_DESTINATION,
                 platformDestination: PLATFORM_DESTINATION,
                 termsHash: keccak256("terms:v1"),
@@ -248,6 +250,47 @@ contract ExactPaymentTest {
         return account.onlineSessionState(SESSION_ID);
     }
 
+    function refundIntent(
+        PaymentTypes.Intent memory payment,
+        bytes32 refundId,
+        uint256 refundUnits,
+        uint256 cumulativeRefundUnits,
+        uint256 vendorCreditUnits
+    ) private view returns (PaymentTypes.RefundIntent memory value) {
+        value = PaymentTypes.RefundIntent({
+            schemaVersion: 1,
+            chainId: block.chainid,
+            router: address(router),
+            eventId: EVENT_ID,
+            refundId: refundId,
+            paymentId: payment.paymentId,
+            payerAccount: address(account),
+            vendorId: VENDOR_ID,
+            asset: address(token),
+            refundUnits: refundUnits,
+            cumulativeRefundUnits: cumulativeRefundUnits,
+            vendorCreditUnits: vendorCreditUnits,
+            fundingSource: vm.addr(VENDOR_KEY),
+            validAfter: 0,
+            expiresAt: 500
+        });
+    }
+
+    function refund(PaymentTypes.RefundIntent memory value) private {
+        router.refund(value, ecdsaSignature(VENDOR_KEY, router.refundDigest(value)));
+    }
+
+    function fundRefunds(uint256 amount) private {
+        address vendor = vm.addr(VENDOR_KEY);
+        token.mint(vendor, amount);
+        vm.prank(vendor);
+        token.approve(address(router), amount);
+    }
+
+    function vendorBeneficiaryId() private pure returns (bytes32) {
+        return keccak256(abi.encode(EVENT_ID, keccak256("VENDOR"), VENDOR_ID, uint256(1)));
+    }
+
     function testExactPaymentAllocatesAndClearsAllowance() public {
         PaymentTypes.Intent memory value = intent(keccak256("payment:1"));
         pay(value);
@@ -350,6 +393,126 @@ contract ExactPaymentTest {
         vm.expectRevert(EventRegistry.Unauthorized.selector);
         registry.setTerminalEnabled(TERMINAL_ID, 1, true);
         registry.setTerminalEnabled(TERMINAL_ID, 1, true);
+    }
+
+    function testPartialRefundsUseVendorCreditAndExactFreshFunding() public {
+        PaymentTypes.Intent memory payment = intent(keccak256("payment:refund:mixed"));
+        pay(payment);
+        PaymentTypes.RefundIntent memory first =
+            refundIntent(payment, keccak256("refund:mixed:1"), 5_000, 5_000, 5_000);
+        refund(first);
+        assert(token.balanceOf(address(account)) == 992_655);
+        assert(ledger.credits(vendorBeneficiaryId()) == 6_976);
+        assert(ledger.totalLiability() == 7_345);
+
+        fundRefunds(369);
+        PaymentTypes.RefundIntent memory second =
+            refundIntent(payment, keccak256("refund:mixed:2"), 7_345, 12_345, 6_976);
+        refund(second);
+        (,,, uint256 refundedGross,) = ledger.refundTerms(payment.paymentId);
+        assert(refundedGross == payment.grossUnits);
+        assert(token.balanceOf(address(account)) == 1_000_000);
+        assert(token.balanceOf(address(ledger)) == 369);
+        assert(ledger.totalLiability() == 369);
+        assert(ledger.credits(vendorBeneficiaryId()) == 0);
+        assert(ledger.refunds(second.refundId) == payment.paymentId);
+    }
+
+    function testRefundRequiresVendorSignatureAndOriginalPayer() public {
+        PaymentTypes.Intent memory payment = intent(keccak256("payment:refund:authority"));
+        pay(payment);
+        PaymentTypes.RefundIntent memory value =
+            refundIntent(payment, keccak256("refund:authority"), 1_000, 1_000, 1_000);
+        bytes memory wrongSignature = ecdsaSignature(TERMINAL_KEY, router.refundDigest(value));
+        vm.expectRevert(ExactPayRouter.InvalidRefundAuthorization.selector);
+        router.refund(value, wrongSignature);
+
+        bytes memory vendorSignature = ecdsaSignature(VENDOR_KEY, router.refundDigest(value));
+        value.payerAccount = address(0x1234);
+        vm.expectRevert(ExactPayRouter.InvalidIntent.selector);
+        router.refund(value, vendorSignature);
+        assert(ledger.refunds(value.refundId) == 0);
+        assert(ledger.credits(vendorBeneficiaryId()) == 11_976);
+    }
+
+    function testRefundRejectsForeignDomainFundingSourceAndExpiry() public {
+        PaymentTypes.Intent memory payment = intent(keccak256("payment:refund:domain"));
+        pay(payment);
+        PaymentTypes.RefundIntent memory value =
+            refundIntent(payment, keccak256("refund:domain"), 1_000, 1_000, 1_000);
+        bytes memory signature = ecdsaSignature(VENDOR_KEY, router.refundDigest(value));
+
+        value.chainId += 1;
+        vm.expectRevert(ExactPayRouter.InvalidIntent.selector);
+        router.refund(value, signature);
+        value.chainId = block.chainid;
+        value.fundingSource = address(0x1234);
+        vm.expectRevert(ExactPayRouter.InvalidIntent.selector);
+        router.refund(value, signature);
+        value.fundingSource = vm.addr(VENDOR_KEY);
+        vm.warp(value.expiresAt);
+        vm.expectRevert(ExactPayRouter.InvalidIntent.selector);
+        router.refund(value, signature);
+        assert(ledger.refunds(value.refundId) == 0);
+    }
+
+    function testRefundRejectsOverRefundReplayAndInsufficientCredit() public {
+        PaymentTypes.Intent memory payment = intent(keccak256("payment:refund:bounds"));
+        pay(payment);
+        PaymentTypes.RefundIntent memory insufficient =
+            refundIntent(payment, keccak256("refund:insufficient"), 12_000, 12_000, 12_000);
+        bytes memory insufficientSignature =
+            ecdsaSignature(VENDOR_KEY, router.refundDigest(insufficient));
+        vm.expectRevert(SettlementLedger.InvalidPolicy.selector);
+        router.refund(insufficient, insufficientSignature);
+        assert(token.balanceOf(address(account)) == 987_655);
+
+        PaymentTypes.RefundIntent memory first =
+            refundIntent(payment, keccak256("refund:bounds:1"), 1_000, 1_000, 1_000);
+        refund(first);
+        PaymentTypes.RefundIntent memory replayedId =
+            refundIntent(payment, first.refundId, 1_000, 2_000, 1_000);
+        bytes memory replaySignature = ecdsaSignature(VENDOR_KEY, router.refundDigest(replayedId));
+        vm.expectRevert(SettlementLedger.InvalidPolicy.selector);
+        router.refund(replayedId, replaySignature);
+
+        PaymentTypes.RefundIntent memory over =
+            refundIntent(payment, keccak256("refund:over"), 11_346, 12_346, 10_976);
+        fundRefunds(370);
+        bytes memory overSignature = ecdsaSignature(VENDOR_KEY, router.refundDigest(over));
+        vm.expectRevert(ExactPayRouter.InvalidIntent.selector);
+        router.refund(over, overSignature);
+        assert(token.balanceOf(address(account)) == 988_655);
+        assert(ledger.credits(vendorBeneficiaryId()) == 10_976);
+    }
+
+    function testRefundContinuesWhileOnlineSalesPaused() public {
+        PaymentTypes.Intent memory payment = intent(keccak256("payment:refund:paused"));
+        pay(payment);
+        registry.pauseOnline();
+        PaymentTypes.RefundIntent memory value =
+            refundIntent(payment, keccak256("refund:paused"), 1_000, 1_000, 1_000);
+        refund(value);
+        assert(token.balanceOf(address(account)) == 988_655);
+    }
+
+    function testWithdrawnVendorCreditRequiresFreshRefundFunding() public {
+        PaymentTypes.Intent memory payment = intent(keccak256("payment:refund:withdrawn"));
+        pay(payment);
+        ledger.withdrawFor(vendorBeneficiaryId());
+        PaymentTypes.RefundIntent memory unavailable =
+            refundIntent(payment, keccak256("refund:withdrawn"), 1_000, 1_000, 1_000);
+        bytes memory unavailableSignature =
+            ecdsaSignature(VENDOR_KEY, router.refundDigest(unavailable));
+        vm.expectRevert(SettlementLedger.InvalidPolicy.selector);
+        router.refund(unavailable, unavailableSignature);
+
+        fundRefunds(1_000);
+        PaymentTypes.RefundIntent memory funded =
+            refundIntent(payment, unavailable.refundId, 1_000, 1_000, 0);
+        refund(funded);
+        assert(token.balanceOf(address(account)) == 988_655);
+        assert(ledger.totalLiability() == 369);
     }
 
     function testOnlineSessionEnforcesPerPaymentAndTotalCaps() public {
@@ -485,6 +648,30 @@ contract ExactPaymentTest {
         );
     }
 
+    function testRefundStructHashMatchesSharedVector() public view {
+        PaymentTypes.RefundIntent memory value = PaymentTypes.RefundIntent({
+            schemaVersion: 1,
+            chainId: 10_143,
+            router: address(0x0101),
+            eventId: keccak256("event:market-2026"),
+            refundId: keccak256("refund:1"),
+            paymentId: keccak256("payment:1"),
+            payerAccount: address(0x0202),
+            vendorId: keccak256("vendor:noodles"),
+            asset: address(0x0303),
+            refundUnits: 5_000_000,
+            cumulativeRefundUnits: 5_000_000,
+            vendorCreditUnits: 4_850_000,
+            fundingSource: address(0x0404),
+            validAfter: 1_800_000_100,
+            expiresAt: 1_800_003_600
+        });
+        assert(
+            router.refundStructHash(value)
+                == 0x22dbd5a9e0c5faa0c0357665dbdb86f4e03daecf5499a16ed554f4c95cd1cc88
+        );
+    }
+
     function testCanonicalIntentStructHashMatchesSharedVector() public view {
         PaymentTypes.Intent memory value = PaymentTypes.Intent({
             schemaVersion: 1,
@@ -511,6 +698,21 @@ contract ExactPaymentTest {
             router.intentStructHash(value)
                 == 0x43dafb74a49c5b8df4499917fd6b9b96af7ce26e59c53bd4eb1d0e8bad56928c
         );
+    }
+
+    function testFuzzCreditFundedRefundConserves(uint256 input) public {
+        uint256 amount = input % 11_976 + 1;
+        PaymentTypes.Intent memory payment =
+            intent(keccak256(abi.encode("payment:refund:fuzz", input)));
+        pay(payment);
+        PaymentTypes.RefundIntent memory value = refundIntent(
+            payment, keccak256(abi.encode("refund:fuzz", input)), amount, amount, amount
+        );
+        refund(value);
+        assert(token.balanceOf(address(account)) == 987_655 + amount);
+        assert(token.balanceOf(address(ledger)) == payment.grossUnits - amount);
+        assert(ledger.totalLiability() == payment.grossUnits - amount);
+        assert(ledger.credits(vendorBeneficiaryId()) == 11_976 - amount);
     }
 
     function testFuzzPaymentConservesAllocations(uint256 input) public {

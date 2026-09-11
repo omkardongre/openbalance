@@ -19,6 +19,9 @@ contract ExactPayRouter {
     bytes32 private constant INTENT_TYPE = keccak256(
         "PaymentIntent(uint32 schemaVersion,uint256 chainId,address router,bytes32 eventId,bytes32 paymentId,address payerAccount,bytes32 orderRefHash,bytes32 vendorId,uint256 vendorDestinationVersion,bytes32 terminalInstanceId,address asset,uint256 grossUnits,uint16 organizerFeeBps,uint16 platformFeeBps,uint256 configVersion,bytes32 receiptCommitment,uint48 validAfter,uint48 expiresAt,uint256 terminalKeyVersion)"
     );
+    bytes32 private constant REFUND_TYPE = keccak256(
+        "RefundIntent(uint32 schemaVersion,uint256 chainId,address router,bytes32 eventId,bytes32 refundId,bytes32 paymentId,address payerAccount,bytes32 vendorId,address asset,uint256 refundUnits,uint256 cumulativeRefundUnits,uint256 vendorCreditUnits,address fundingSource,uint48 validAfter,uint48 expiresAt)"
+    );
     bytes32 private constant VENDOR_ROLE = keccak256("VENDOR");
     bytes32 private constant ORGANIZER_ROLE = keccak256("ORGANIZER");
     bytes32 private constant PLATFORM_ROLE = keccak256("PLATFORM");
@@ -37,6 +40,7 @@ contract ExactPayRouter {
 
     error InvalidIntent();
     error InvalidTerminalSignature();
+    error InvalidRefundAuthorization();
     error PaymentResolved();
     error Reentrant();
     event PaymentCommitted(
@@ -50,6 +54,13 @@ contract ExactPayRouter {
         bytes32 receiptCommitment
     );
     event PaymentCancelled(bytes32 indexed paymentId, address indexed payer);
+    event RefundCommitted(
+        bytes32 indexed refundId,
+        bytes32 indexed paymentId,
+        address indexed payer,
+        uint256 amount,
+        uint256 vendorCreditUsed
+    );
 
     constructor(address registry_, address ledger_) {
         registry = EventRegistry(registry_);
@@ -162,6 +173,17 @@ contract ExactPayRouter {
         emit PaymentCancelled(intent.paymentId, intent.payerAccount);
     }
 
+    function refund(PaymentTypes.RefundIntent calldata intent, bytes calldata vendorSignature)
+        external
+        locked
+    {
+        _validateRefundDomain(intent);
+        address vendorAuthority = _validateRefundPayment(intent);
+        _checkRefundAuthorization(intent, vendorSignature, vendorAuthority);
+        _collectRefundFunding(intent);
+        _recordRefund(intent);
+    }
+
     function intentDigest(PaymentTypes.Intent memory intent) public view returns (bytes32) {
         bytes32 domain = keccak256(
             abi.encode(
@@ -177,6 +199,27 @@ contract ExactPayRouter {
 
     function intentStructHash(PaymentTypes.Intent memory intent) public pure returns (bytes32) {
         return keccak256(abi.encode(INTENT_TYPE, intent));
+    }
+
+    function refundDigest(PaymentTypes.RefundIntent memory intent) public view returns (bytes32) {
+        bytes32 domain = keccak256(
+            abi.encode(
+                DOMAIN_TYPE,
+                keccak256("OpenBalanceRefund"),
+                keccak256("1"),
+                block.chainid,
+                address(this)
+            )
+        );
+        return keccak256(abi.encodePacked("\x19\x01", domain, refundStructHash(intent)));
+    }
+
+    function refundStructHash(PaymentTypes.RefundIntent memory intent)
+        public
+        pure
+        returns (bytes32)
+    {
+        return keccak256(abi.encode(REFUND_TYPE, intent));
     }
 
     function _validateBase(PaymentTypes.Intent memory intent) private view {
@@ -195,6 +238,76 @@ contract ExactPayRouter {
                 || intent.eventId != registry.eventId() || intent.asset != address(asset)
                 || intent.paymentId == 0
         ) revert InvalidIntent();
+    }
+
+    function _validateRefundDomain(PaymentTypes.RefundIntent calldata intent) private view {
+        if (
+            intent.schemaVersion != PaymentTypes.REFUND_SCHEMA_VERSION
+                || intent.chainId != block.chainid || intent.router != address(this)
+                || intent.eventId != registry.eventId() || intent.asset != address(asset)
+                || intent.refundId == 0 || intent.paymentId == 0
+                || intent.payerAccount == address(0) || intent.vendorId == 0
+                || intent.refundUnits == 0 || intent.vendorCreditUnits > intent.refundUnits
+                || intent.fundingSource == address(0) || block.timestamp < intent.validAfter
+                || block.timestamp >= intent.expiresAt
+        ) revert InvalidIntent();
+    }
+
+    function _validateRefundPayment(PaymentTypes.RefundIntent calldata intent)
+        private
+        view
+        returns (address vendorAuthority)
+    {
+        (address payer, bytes32 vendorId, uint256 gross, uint256 refundedGross,) =
+            ledger.refundTerms(intent.paymentId);
+        if (
+            payer != intent.payerAccount || vendorId != intent.vendorId
+                || refundedGross + intent.refundUnits != intent.cumulativeRefundUnits
+                || intent.cumulativeRefundUnits > gross
+        ) revert InvalidIntent();
+        vendorAuthority = registry.historicalVendorAuthority(intent.vendorId);
+        if (vendorAuthority == address(0) || intent.fundingSource != vendorAuthority) {
+            revert InvalidIntent();
+        }
+    }
+
+    function _checkRefundAuthorization(
+        PaymentTypes.RefundIntent calldata intent,
+        bytes calldata signature,
+        address expected
+    ) private view {
+        (address signer, ECDSA.RecoverError err,) =
+            ECDSA.tryRecover(refundDigest(intent), signature);
+        if (err != ECDSA.RecoverError.NoError || signer != expected) {
+            revert InvalidRefundAuthorization();
+        }
+    }
+
+    function _collectRefundFunding(PaymentTypes.RefundIntent calldata intent) private {
+        uint256 freshUnits = intent.refundUnits - intent.vendorCreditUnits;
+        if (freshUnits == 0) return;
+        uint256 balanceBefore = asset.balanceOf(address(ledger));
+        asset.safeTransferFrom(intent.fundingSource, address(ledger), freshUnits);
+        if (asset.balanceOf(address(ledger)) - balanceBefore != freshUnits) revert InvalidIntent();
+    }
+
+    function _recordRefund(PaymentTypes.RefundIntent calldata intent) private {
+        ledger.recordRefund(
+            intent.refundId,
+            intent.paymentId,
+            intent.payerAccount,
+            intent.vendorId,
+            intent.refundUnits,
+            intent.cumulativeRefundUnits,
+            intent.vendorCreditUnits
+        );
+        emit RefundCommitted(
+            intent.refundId,
+            intent.paymentId,
+            intent.payerAccount,
+            intent.refundUnits,
+            intent.vendorCreditUnits
+        );
     }
 
     function _checkTerminal(bytes32 digest, bytes calldata signature, address expected)
