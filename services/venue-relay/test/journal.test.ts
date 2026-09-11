@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   InvalidTransition,
   ReceiptConflict,
+  receiptPayloadHash,
   VenueRelayJournal,
   type VoucherReceipt,
 } from "../src/journal.js";
@@ -70,6 +71,27 @@ describe("venue relay journal", () => {
     instance.close();
   });
 
+  it("persists terminal authentication nonce with the receipt atomically", () => {
+    const { instance } = journal();
+    const value = receipt(1, "a");
+    const ingress = {
+      nonce: hex32("9"),
+      payloadHash: receiptPayloadHash(value),
+      authenticatedAt: 100,
+    };
+    expect(instance.ingestAuthenticated(value, ingress, 100).created).toBe(true);
+    expect(instance.ingestAuthenticated(value, ingress, 101).created).toBe(false);
+    const changed = { ...value, receiptId: "receipt:changed" };
+    expect(() =>
+      instance.ingestAuthenticated(
+        changed,
+        { ...ingress, payloadHash: receiptPayloadHash(changed) },
+        102,
+      ),
+    ).toThrow(ReceiptConflict);
+    instance.close();
+  });
+
   it("leases only the earliest unresolved receipt per channel", () => {
     const { instance } = journal();
     instance.ingest(receipt(2, "b"), 101);
@@ -94,6 +116,22 @@ describe("venue relay journal", () => {
     expect(instance.leaseReady(1, "worker:2", 499, 1_000)).toEqual([]);
     expect(instance.leaseReady(1, "worker:2", 500, 1_000)[0]?.attempts).toBe(2);
     instance.close();
+  });
+
+  it("releases submitted receipts for reconciliation after restart", () => {
+    const { instance, path, key } = journal();
+    instance.ingest(receipt(1, "a"), 100);
+    instance.leaseReady(1, "worker:1", 200, 1_000);
+    instance.markSubmitted("receipt:a", "worker:1", hex32("d"), 201);
+    instance.close();
+
+    const reopened = new VenueRelayJournal(path, key);
+    const submitted = reopened.leaseReady(1, "worker:2", 202, 1_000);
+    expect(submitted[0]?.state).toBe("SUBMITTED");
+    reopened.deferSubmitted("receipt:a", "worker:2", 500, 203);
+    expect(reopened.leaseReady(1, "worker:3", 499, 1_000)).toEqual([]);
+    expect(reopened.leaseReady(1, "worker:3", 500, 1_000)[0]?.transactionHash).toBe(hex32("d"));
+    reopened.close();
   });
 
   it("quarantine blocks later channel receipts without deleting evidence", () => {

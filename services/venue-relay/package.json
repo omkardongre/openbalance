@@ -4,15 +4,29 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./dist/journal.js"
+    ".": "./dist/journal.js",
+    "./app": "./dist/app.js",
+    "./chain": "./dist/chain.js",
+    "./settlement": "./dist/settlement.js",
+    "./transport": "./dist/transport.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "check": "tsc --noEmit",
+    "dev": "tsx watch src/server.ts",
+    "start": "node dist/server.js",
     "test": "vitest run"
+  },
+  "dependencies": {
+    "@fastify/rate-limit": "11.2.0",
+    "@openbalance/protocol": "workspace:*",
+    "fastify": "5.12.3",
+    "viem": "2.56.3",
+    "zod": "4.6.1"
   },
   "devDependencies": {
     "@types/node": "24.13.4",
+    "tsx": "4.23.13",
     "typescript": "7.0.2",
     "vitest": "5.0.0"
   }

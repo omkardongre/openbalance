@@ -36,7 +36,7 @@ const hex32 = /^0x[0-9a-fA-F]{64}$/;
 const hexBytes = /^0x(?:[0-9a-fA-F]{2})+$/;
 const states = new Set<ReceiptState>(["PENDING", "RETRY", "SUBMITTED", "SETTLED", "QUARANTINED"]);
 
-function canonicalReceipt(receipt: VoucherReceipt): string {
+export function canonicalReceipt(receipt: VoucherReceipt): string {
   return JSON.stringify({
     receiptId: receipt.receiptId,
     terminalId: receipt.terminalId.toLowerCase(),
@@ -49,7 +49,7 @@ function canonicalReceipt(receipt: VoucherReceipt): string {
   });
 }
 
-function validateReceipt(receipt: VoucherReceipt): void {
+export function validateReceipt(receipt: VoucherReceipt): void {
   if (
     !/^[A-Za-z0-9][A-Za-z0-9:_-]{0,127}$/.test(receipt.receiptId) ||
     !hex32.test(receipt.terminalId) ||
@@ -64,6 +64,17 @@ function validateReceipt(receipt: VoucherReceipt): void {
   )
     throw new InvalidReceipt("Invalid voucher receipt");
 }
+
+export function receiptPayloadHash(receipt: VoucherReceipt): string {
+  validateReceipt(receipt);
+  return createHash("sha256").update(canonicalReceipt(receipt)).digest("hex");
+}
+
+export type AuthenticatedIngress = {
+  nonce: string;
+  payloadHash: string;
+  authenticatedAt: number;
+};
 
 function encrypt(
   key: Buffer,
@@ -146,6 +157,15 @@ export class VenueRelayJournal {
         ON voucher_receipts(state, next_attempt_at, lease_until, created_at);
       CREATE INDEX IF NOT EXISTS voucher_receipts_channel
         ON voucher_receipts(channel_id, sequence);
+      CREATE TABLE IF NOT EXISTS authenticated_ingress (
+        terminal_id TEXT NOT NULL,
+        nonce TEXT NOT NULL,
+        receipt_id TEXT NOT NULL,
+        payload_hash TEXT NOT NULL,
+        authenticated_at INTEGER NOT NULL,
+        PRIMARY KEY(terminal_id, nonce),
+        FOREIGN KEY(receipt_id) REFERENCES voucher_receipts(receipt_id)
+      );
     `);
   }
 
@@ -155,9 +175,68 @@ export class VenueRelayJournal {
   }
 
   ingest(receipt: VoucherReceipt, now = Date.now()): { created: boolean; record: JournalRecord } {
+    return this.#ingest(receipt, now);
+  }
+
+  ingestAuthenticated(
+    receipt: VoucherReceipt,
+    ingress: AuthenticatedIngress,
+    now = Date.now(),
+  ): { created: boolean; record: JournalRecord } {
+    validateReceipt(receipt);
+    if (
+      !hex32.test(ingress.nonce) ||
+      !/^[0-9a-f]{64}$/.test(ingress.payloadHash) ||
+      !Number.isSafeInteger(ingress.authenticatedAt) ||
+      ingress.authenticatedAt < 0 ||
+      receiptPayloadHash(receipt) !== ingress.payloadHash
+    )
+      throw new InvalidReceipt("Invalid authenticated ingress");
+    const terminalId = receipt.terminalId.toLowerCase();
+    this.#database.exec("BEGIN IMMEDIATE");
+    try {
+      const previous = this.#database
+        .prepare(
+          "SELECT receipt_id,payload_hash FROM authenticated_ingress WHERE terminal_id=? AND nonce=?",
+        )
+        .get(terminalId, ingress.nonce.toLowerCase()) as
+        | { receipt_id: string; payload_hash: string }
+        | undefined;
+      if (previous) {
+        if (
+          previous.receipt_id !== receipt.receiptId ||
+          previous.payload_hash !== ingress.payloadHash
+        )
+          throw new ReceiptConflict("Authenticated ingress replay conflict");
+        const record = this.get(receipt.receiptId);
+        this.#database.exec("COMMIT");
+        return { created: false, record };
+      }
+      const result = this.#ingest(receipt, now);
+      this.#database
+        .prepare(
+          `INSERT INTO authenticated_ingress
+            (terminal_id,nonce,receipt_id,payload_hash,authenticated_at) VALUES (?,?,?,?,?)`,
+        )
+        .run(
+          terminalId,
+          ingress.nonce.toLowerCase(),
+          receipt.receiptId,
+          ingress.payloadHash,
+          ingress.authenticatedAt,
+        );
+      this.#database.exec("COMMIT");
+      return result;
+    } catch (error) {
+      this.#database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  #ingest(receipt: VoucherReceipt, now: number): { created: boolean; record: JournalRecord } {
     validateReceipt(receipt);
     const canonical = canonicalReceipt(receipt);
-    const payloadHash = createHash("sha256").update(canonical).digest("hex");
+    const payloadHash = receiptPayloadHash(receipt);
     const existing = this.#row(receipt.receiptId);
     if (existing) {
       if (existing.payload_hash !== payloadHash) throw new ReceiptConflict("Receipt ID conflict");
@@ -226,7 +305,7 @@ export class VenueRelayJournal {
       const candidates = this.#database
         .prepare(
           `SELECT r.receipt_id FROM voucher_receipts r
-           WHERE r.state IN ('PENDING','RETRY') AND r.next_attempt_at <= ?
+           WHERE r.state IN ('PENDING','RETRY','SUBMITTED') AND r.next_attempt_at <= ?
              AND (r.lease_until IS NULL OR r.lease_until <= ?)
              AND NOT EXISTS (
                SELECT 1 FROM voucher_receipts p
@@ -238,7 +317,7 @@ export class VenueRelayJournal {
       const leased: JournalRecord[] = [];
       const update = this.#database.prepare(
         `UPDATE voucher_receipts SET lease_owner=?,lease_until=?,attempts=attempts+1,updated_at=?
-         WHERE receipt_id=? AND state IN ('PENDING','RETRY') AND (lease_until IS NULL OR lease_until<=?)`,
+         WHERE receipt_id=? AND state IN ('PENDING','RETRY','SUBMITTED') AND (lease_until IS NULL OR lease_until<=?)`,
       );
       for (const candidate of candidates) {
         const result = update.run(owner, now + leaseMilliseconds, now, candidate.receipt_id, now);
@@ -260,6 +339,25 @@ export class VenueRelayJournal {
   ): JournalRecord {
     if (!hex32.test(transactionHash)) throw new InvalidTransition("Invalid transaction hash");
     this.#transition(receiptId, owner, "SUBMITTED", now, transactionHash.toLowerCase(), null, now);
+    return this.get(receiptId);
+  }
+
+  deferSubmitted(
+    receiptId: string,
+    owner: string,
+    nextAttemptAt: number,
+    now: number,
+  ): JournalRecord {
+    if (!Number.isSafeInteger(nextAttemptAt) || nextAttemptAt <= now)
+      throw new InvalidTransition("Invalid submitted deferral");
+    const result = this.#database
+      .prepare(
+        `UPDATE voucher_receipts
+         SET next_attempt_at=?,lease_owner=NULL,lease_until=NULL,updated_at=?
+         WHERE receipt_id=? AND state='SUBMITTED' AND lease_owner=? AND lease_until>?`,
+      )
+      .run(nextAttemptAt, now, receiptId, owner, now);
+    if (result.changes !== 1) throw new InvalidTransition("Lease does not authorize deferral");
     return this.get(receiptId);
   }
 
@@ -295,7 +393,16 @@ export class VenueRelayJournal {
 
   quarantine(receiptId: string, owner: string, reason: string, now: number): JournalRecord {
     if (reason.length < 1 || reason.length > 500) throw new InvalidTransition("Invalid quarantine");
-    this.#transition(receiptId, owner, "QUARANTINED", now, null, reason, now);
+    const row = this.#row(receiptId);
+    this.#transition(
+      receiptId,
+      owner,
+      "QUARANTINED",
+      now,
+      row?.transaction_hash ?? null,
+      reason,
+      now,
+    );
     return this.get(receiptId);
   }
 
@@ -313,7 +420,7 @@ export class VenueRelayJournal {
       .prepare(
         `UPDATE voucher_receipts
          SET state=?,transaction_hash=?,last_error=?,next_attempt_at=?,lease_owner=NULL,lease_until=NULL,updated_at=?
-         WHERE receipt_id=? AND lease_owner=? AND lease_until>? AND state IN ('PENDING','RETRY')`,
+         WHERE receipt_id=? AND lease_owner=? AND lease_until>? AND state IN ('PENDING','RETRY','SUBMITTED')`,
       )
       .run(state, transactionHash, error, nextAttemptAt, now, receiptId, owner, now);
     if (result.changes !== 1) throw new InvalidTransition("Lease does not authorize transition");
