@@ -3,11 +3,11 @@ import {
   type AuthenticationResponseJSON,
   generateRegistrationOptions,
   type RegistrationResponseJSON,
-  verifyAuthenticationResponse,
   verifyRegistrationResponse,
 } from "@simplewebauthn/server";
 import { cose, decodeCredentialPublicKey } from "@simplewebauthn/server/helpers";
 import type { Pool } from "pg";
+import { PasskeyAssertionRejected, verifyStrictPasskeyAssertion } from "./webauthn.js";
 
 export class EnrollmentRejected extends Error {}
 async function verifyCeremony<T>(operation: () => Promise<T>): Promise<T> {
@@ -140,41 +140,26 @@ export class EnrollmentService {
           },
         };
       }
-      // Match the deployed strict assertion profile before accepting a usable account key.
       const proof = response as AuthenticationResponseJSON;
-      if (proof.id !== row.credential.id || proof.rawId !== row.credential.id)
-        throw new EnrollmentRejected();
-      const authData = Buffer.from(proof.response.authenticatorData ?? "", "base64url");
-      const json = Buffer.from(proof.response.clientDataJSON, "base64url").toString("utf8");
-      const expected = JSON.stringify({
-        type: "webauthn.get",
-        challenge: row.challenge,
-        origin: row.origin,
-      });
-      if (
-        authData.length !== 37 ||
-        ((authData[32] ?? 0) & 0xe2) !== 0 ||
-        Buffer.byteLength(json) > 512 ||
-        (json !== expected && json !== `${expected.slice(0, -1)},"crossOrigin":false}`)
-      )
-        throw new EnrollmentRejected();
-      const verified = await verifyCeremony(() =>
-        verifyAuthenticationResponse({
-          response: response as AuthenticationResponseJSON,
-          expectedChallenge: row.challenge,
-          expectedOrigin: row.origin,
-          expectedRPID: row.rp_id,
-          requireUserVerification: true,
-          credential: {
-            ...row.credential,
-            publicKey: Buffer.from(row.credential.publicKey, "base64url"),
-          },
-        }),
-      );
-      if (!verified.verified) throw new EnrollmentRejected();
+      let newCounter: number;
+      try {
+        newCounter = await verifyStrictPasskeyAssertion({
+          response: proof,
+          credential: row.credential,
+          challenge: row.challenge,
+          rpId: row.rp_id,
+          origin: row.origin,
+        });
+      } catch (error) {
+        if (error instanceof PasskeyAssertionRejected) throw new EnrollmentRejected();
+        throw error;
+      }
       const advanced = await db.query(
-        "UPDATE account_enrollments SET status='verified', verified_at=now(), challenge='' WHERE id=$1 AND expires_at > clock_timestamp()",
-        [row.id],
+        `UPDATE account_enrollments
+         SET status='verified', verified_at=now(), challenge='',
+             credential=jsonb_set(credential,'{counter}',to_jsonb($2::integer))
+         WHERE id=$1 AND expires_at > clock_timestamp()`,
+        [row.id, newCounter],
       );
       if (advanced.rowCount !== 1) throw new EnrollmentRejected();
       await db.query("COMMIT");

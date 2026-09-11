@@ -3,6 +3,7 @@ import rateLimit from "@fastify/rate-limit";
 import type { AuthenticationResponseJSON, RegistrationResponseJSON } from "@simplewebauthn/server";
 import Fastify from "fastify";
 import { z } from "zod";
+import { AccountAccessRejected, type AccountAccessService } from "./account-access.js";
 import { DeploymentMismatch } from "./deployment-chain.js";
 import type { DeploymentService } from "./deployments.js";
 import { EnrollmentRejected, type EnrollmentService } from "./enrollment.js";
@@ -11,10 +12,12 @@ export async function buildApp(
   enrollment?: EnrollmentService,
   origin?: string,
   deployment?: DeploymentService,
+  access?: AccountAccessService,
 ) {
   const app = Fastify({ logger: false, bodyLimit: 32_768 });
 
   await app.register(cors, {
+    allowedHeaders: ["Content-Type", "Authorization", "Idempotency-Key"],
     methods: ["GET", "POST"],
     origin: origin ?? false,
   });
@@ -56,6 +59,63 @@ export async function buildApp(
       }
     });
     app.post("/v1/accounts/enrollment-challenges", async () => enrollment.begin());
+    if (access) {
+      app.post("/v1/accounts/authentication-challenges", async (request, reply) => {
+        const parsed = z
+          .object({ account: z.string().regex(/^0x[0-9a-fA-F]{40}$/) })
+          .strict()
+          .safeParse(request.body);
+        if (!parsed.success)
+          return reply.code(400).send({ error: "invalid_authentication_request" });
+        try {
+          return await access.begin(parsed.data.account);
+        } catch (error) {
+          if (error instanceof AccountAccessRejected)
+            return reply.code(403).send({ error: "authentication_rejected" });
+          throw error;
+        }
+      });
+      app.post("/v1/accounts/authentications", async (request, reply) => {
+        const parsed = z
+          .object({
+            challengeToken: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+            response: bodySchema.shape.response,
+          })
+          .strict()
+          .safeParse(request.body);
+        if (!parsed.success)
+          return reply.code(400).send({ error: "invalid_authentication_request" });
+        try {
+          return await access.verify(
+            parsed.data.challengeToken,
+            parsed.data.response as AuthenticationResponseJSON,
+          );
+        } catch (error) {
+          if (error instanceof AccountAccessRejected)
+            return reply.code(403).send({ error: "authentication_rejected" });
+          throw error;
+        }
+      });
+      app.get("/v1/accounts/me", async (request, reply) => {
+        reply.header("Cache-Control", "no-store");
+        try {
+          return await access.me(request.headers.authorization);
+        } catch (error) {
+          if (error instanceof AccountAccessRejected)
+            return reply.code(401).send({ error: "session_invalid" });
+          throw error;
+        }
+      });
+      app.post("/v1/accounts/sessions/revoke", async (request, reply) => {
+        try {
+          return await access.revoke(request.headers.authorization);
+        } catch (error) {
+          if (error instanceof AccountAccessRejected)
+            return reply.code(401).send({ error: "session_invalid" });
+          throw error;
+        }
+      });
+    }
     if (deployment) {
       for (const operation of ["prepare", "confirm"] as const) {
         app.post(`/v1/accounts/deployments/${operation}`, async (request, reply) => {

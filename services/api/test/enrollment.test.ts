@@ -12,7 +12,9 @@ import {
   http,
   keccak256,
 } from "viem";
+import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { AccountAccessService } from "../src/account-access.js";
 import { buildApp } from "../src/app.js";
 import { DeploymentChain, DeploymentMismatch } from "../src/deployment-chain.js";
 import { DeploymentService } from "../src/deployments.js";
@@ -21,6 +23,11 @@ import {
   EnrollmentService,
   validateEnrollmentPolicy,
 } from "../src/enrollment.js";
+import {
+  DeploymentSponsorshipService,
+  SponsorshipConflict,
+  SponsorshipQuotaExceeded,
+} from "../src/sponsorship.js";
 
 // Minimal CBOR fixture encoder; real verification and signature checking run in the service.
 function cbor(value: number | string | Buffer | Map<unknown, unknown>): Buffer {
@@ -139,6 +146,15 @@ describe.skipIf(!process.env.ENROLLMENT_TEST_DATABASE_URL)(
           "utf8",
         ),
       );
+      await pool.query(
+        await readFile(new URL("../migrations/003_account_access.sql", import.meta.url), "utf8"),
+      );
+      await pool.query(
+        await readFile(
+          new URL("../migrations/004_deployment_sponsorship.sql", import.meta.url),
+          "utf8",
+        ),
+      );
     });
     afterAll(async () => {
       if (pool) {
@@ -213,6 +229,14 @@ describe.skipIf(!process.env.ENROLLMENT_TEST_DATABASE_URL)(
         };
         const chain = new DeploymentChain(manifest, rpc);
         const deployments = new DeploymentService(pool, chain, policy);
+        const sponsorAccount = privateKeyToAccount(generatePrivateKey());
+        await miner.setBalance({ address: sponsorAccount.address, value: 10n ** 18n });
+        const sponsorship = new DeploymentSponsorshipService(pool, deployments, sponsorAccount, {
+          dailyDeployments: 10,
+          maxGas: 2_000_000n,
+          maxFeePerGas: 100_000_000_000n,
+          maxCost: 100_000_000_000_000_000n,
+        });
         const start = await service.begin();
         await expect(deployments.process(start.token)).rejects.toBeInstanceOf(EnrollmentRejected);
         const f = fixture(start.options.challenge);
@@ -248,6 +272,110 @@ describe.skipIf(!process.env.ENROLLMENT_TEST_DATABASE_URL)(
         expect(confirmed.status).toBe("confirmed");
         expect(confirmed.account).toBe(first.account);
         expect((await restarted.process(start.token)).status).toBe("confirmed");
+        const access = new AccountAccessService(pool, policy, 1);
+        const authentication = await access.begin(confirmed.account);
+        const assertion = f.proof(authentication.options.challenge);
+        const attempts = await Promise.allSettled([
+          access.verify(authentication.challengeToken, assertion),
+          access.verify(authentication.challengeToken, assertion),
+        ]);
+        const accepted = attempts.find((attempt) => attempt.status === "fulfilled");
+        expect(attempts.filter((attempt) => attempt.status === "fulfilled")).toHaveLength(1);
+        if (accepted?.status !== "fulfilled") throw new Error("Missing account session");
+        expect(accepted.value.account).toBe(confirmed.account);
+        expect(await access.me(`Bearer ${accepted.value.sessionToken}`)).toEqual({
+          account: confirmed.account,
+        });
+        const authenticatedApp = await buildApp(service, policy.origin, restarted, access);
+        const me = await authenticatedApp.inject({
+          method: "GET",
+          url: "/v1/accounts/me",
+          headers: { authorization: `Bearer ${accepted.value.sessionToken}` },
+        });
+        expect(me.statusCode).toBe(200);
+        expect(me.headers["cache-control"]).toBe("no-store");
+        const revoked = await authenticatedApp.inject({
+          method: "POST",
+          url: "/v1/accounts/sessions/revoke",
+          headers: {
+            authorization: `Bearer ${accepted.value.sessionToken}`,
+            origin: policy.origin,
+          },
+          payload: {},
+        });
+        expect(revoked.statusCode).toBe(200);
+        expect(
+          (
+            await authenticatedApp.inject({
+              method: "GET",
+              url: "/v1/accounts/me",
+              headers: { authorization: `Bearer ${accepted.value.sessionToken}` },
+            })
+          ).statusCode,
+        ).toBe(401);
+        await authenticatedApp.close();
+
+        const sponsoredStart = await service.begin();
+        const sponsoredFixture = fixture(sponsoredStart.options.challenge);
+        const sponsoredRegistration = await service.verify(
+          sponsoredStart.token,
+          "register",
+          sponsoredFixture.registration,
+        );
+        if (!sponsoredRegistration.options) throw new Error("Missing sponsored proof options");
+        await service.verify(
+          sponsoredStart.token,
+          "prove",
+          sponsoredFixture.proof(sponsoredRegistration.options.challenge),
+        );
+        const idempotencyKey = `deployment:${randomBytes(16).toString("hex")}`;
+        const sponsored = await Promise.all([
+          sponsorship.process(sponsoredStart.token, idempotencyKey),
+          sponsorship.process(sponsoredStart.token, idempotencyKey),
+        ]);
+        expect(sponsored.every((result) => result.status === "submitted")).toBe(true);
+        const [firstSponsored, secondSponsored] = sponsored;
+        if (firstSponsored?.status !== "submitted" || secondSponsored?.status !== "submitted")
+          throw new Error("Sponsored deployment did not submit");
+        expect(firstSponsored.transactionHash).toBe(secondSponsored.transactionHash);
+        expect(
+          (await pool.query("SELECT count(*) FROM deployment_sponsorships")).rows[0].count,
+        ).toBe("1");
+        await expect(
+          sponsorship.process(sponsoredStart.token, `${idempotencyKey}:changed`),
+        ).rejects.toBeInstanceOf(SponsorshipConflict);
+        await miner.mine({ blocks: 64 });
+        expect((await sponsorship.process(sponsoredStart.token, idempotencyKey)).status).toBe(
+          "confirmed",
+        );
+        expect(await sponsorship.reconcilePending()).toEqual({
+          inspected: 0,
+          confirmed: 0,
+          pending: 0,
+          failed: 0,
+        });
+        const quotaStart = await service.begin();
+        const quotaFixture = fixture(quotaStart.options.challenge);
+        const quotaRegistration = await service.verify(
+          quotaStart.token,
+          "register",
+          quotaFixture.registration,
+        );
+        if (!quotaRegistration.options) throw new Error("Missing quota proof options");
+        await service.verify(
+          quotaStart.token,
+          "prove",
+          quotaFixture.proof(quotaRegistration.options.challenge),
+        );
+        const limited = new DeploymentSponsorshipService(pool, deployments, sponsorAccount, {
+          dailyDeployments: 1,
+          maxGas: 2_000_000n,
+          maxFeePerGas: 100_000_000_000n,
+          maxCost: 100_000_000_000_000_000n,
+        });
+        await expect(
+          limited.process(quotaStart.token, `deployment:${randomBytes(16).toString("hex")}`),
+        ).rejects.toBeInstanceOf(SponsorshipQuotaExceeded);
         await expect(
           restarted.process(randomBytes(32).toString("base64url")),
         ).rejects.toBeInstanceOf(EnrollmentRejected);
@@ -293,6 +421,7 @@ describe.skipIf(!process.env.ENROLLMENT_TEST_DATABASE_URL)(
         f.proof("wrong"),
         f.proof(challenge, "https://evil.invalid"),
         f.proof(challenge, policy.origin, 1),
+        f.proof(challenge, policy.origin, 0x15),
         forged,
       ])
         await expect(service.verify(start.token, "prove", proof)).rejects.toBeInstanceOf(

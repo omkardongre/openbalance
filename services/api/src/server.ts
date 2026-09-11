@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { Pool } from "pg";
+import { AccountAccessService } from "./account-access.js";
 import { buildApp } from "./app.js";
 import { loadEnvironment } from "./config.js";
 import { DeploymentChain } from "./deployment-chain.js";
@@ -24,6 +25,7 @@ const service =
     : undefined;
 if (pool) await pool.query("SELECT id FROM account_enrollments LIMIT 0");
 let deployment: DeploymentService | undefined;
+let access: AccountAccessService | undefined;
 if (
   pool &&
   environment.ACCOUNT_MANIFEST_PATH &&
@@ -37,12 +39,17 @@ if (
   );
   await chain.checkpoint();
   await pool.query("SELECT enrollment_id FROM account_deployments LIMIT 0");
+  await pool.query("SELECT id FROM account_sessions LIMIT 0");
   deployment = new DeploymentService(pool, chain, {
     rpId: environment.WEBAUTHN_RP_ID,
     origin: environment.WEBAUTHN_ORIGIN,
   });
+  access = new AccountAccessService(pool, {
+    rpId: environment.WEBAUTHN_RP_ID,
+    origin: environment.WEBAUTHN_ORIGIN,
+  });
 }
-const app = await buildApp(service, environment.WEBAUTHN_ORIGIN, deployment);
+const app = await buildApp(service, environment.WEBAUTHN_ORIGIN, deployment, access);
 if (pool) app.addHook("onClose", async () => pool.end());
 for (const signal of ["SIGTERM", "SIGINT"] as const)
   process.once(signal, () => {

@@ -3,6 +3,24 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "exports": {
+    "./deployment-chain": {
+      "types": "./src/deployment-chain.ts",
+      "default": "./dist/deployment-chain.js"
+    },
+    "./deployments": {
+      "types": "./src/deployments.ts",
+      "default": "./dist/deployments.js"
+    },
+    "./enrollment": {
+      "types": "./src/enrollment.ts",
+      "default": "./dist/enrollment.js"
+    },
+    "./sponsorship": {
+      "types": "./src/sponsorship.ts",
+      "default": "./dist/sponsorship.js"
+    }
+  },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "check": "tsc --noEmit",
