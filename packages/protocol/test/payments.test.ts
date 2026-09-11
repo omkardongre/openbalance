@@ -202,6 +202,18 @@ describe("reserve channel and offline voucher", () => {
     expect(() => validateOfflineVoucher({ ...offlineVoucher, sequence: 2 ** 32 })).toThrow(
       "Invalid sequence",
     );
+    expect(() =>
+      validateReserveChannelConfig({
+        ...reserveConfig,
+        terminalInstanceId: `0x${"00".repeat(32)}`,
+      }),
+    ).toThrow("Invalid reserve channel policy");
+    expect(() => validateOfflineVoucher({ ...offlineVoucher, protocolVersion: 2 })).toThrow(
+      "Invalid offline voucher",
+    );
+    expect(() =>
+      validateOfflineVoucher({ ...offlineVoucher, acceptedAt: offlineVoucher.acceptUntil }),
+    ).toThrow("Invalid offline voucher");
   });
 
   it("binds sequence, previous digest, amount, and deadlines", () => {

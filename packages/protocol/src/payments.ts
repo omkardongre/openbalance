@@ -1,8 +1,10 @@
 import {
   type Address,
+  decodeAbiParameters,
   encodeAbiParameters,
   type Hex,
   hashTypedData,
+  isAddress,
   keccak256,
   parseAbi,
   stringToHex,
@@ -89,6 +91,8 @@ export type OfflineVoucher = {
 
 const uint48Limit = 1n << 48n;
 const uint32Limit = 1n << 32n;
+const zeroHash = `0x${"00".repeat(32)}`;
+const zeroAddress = "0x0000000000000000000000000000000000000000";
 
 function validateUnsignedNumber(value: number, limit: bigint, field: string): void {
   if (!Number.isSafeInteger(value) || value < 0 || BigInt(value) >= limit)
@@ -106,12 +110,25 @@ export function validateReserveChannelConfig(config: ReserveChannelConfig): void
   validateUnsignedNumber(config.organizerFeeBps, 10_001n, "organizerFeeBps");
   validateUnsignedNumber(config.platformFeeBps, 10_001n, "platformFeeBps");
   if (
+    config.channelId.toLowerCase() === zeroHash ||
+    config.eventId.toLowerCase() === zeroHash ||
+    !isAddress(config.asset) ||
+    config.asset.toLowerCase() === zeroAddress ||
     config.reserveUnits <= 0n ||
+    config.vendorId.toLowerCase() === zeroHash ||
+    config.vendorDestinationVersion <= 0n ||
+    config.terminalInstanceId.toLowerCase() === zeroHash ||
+    config.terminalKeyVersion <= 0n ||
+    !isAddress(config.attendeeChannelSigner) ||
+    config.attendeeChannelSigner.toLowerCase() === zeroAddress ||
+    config.configVersion <= 0n ||
     config.maxPerVoucher <= 0n ||
     config.maxPerVoucher > config.reserveUnits ||
     config.maxVoucherCount === 0 ||
+    config.maxVoucherCount === 0xffff_ffff ||
     config.acceptFrom >= config.acceptUntil ||
-    config.acceptUntil >= config.submitUntil
+    config.acceptUntil >= config.submitUntil ||
+    config.genesisDigest.toLowerCase() === zeroHash
   )
     throw new Error("Invalid reserve channel policy");
 }
@@ -126,10 +143,21 @@ export function validateOfflineVoucher(voucher: OfflineVoucher): void {
   ] as const)
     validateUnsignedNumber(value, uint48Limit, field);
   if (
+    voucher.protocolVersion !== 1 ||
     voucher.chainId <= 0n ||
+    !isAddress(voucher.vault) ||
+    voucher.vault.toLowerCase() === zeroAddress ||
+    voucher.channelId.toLowerCase() === zeroHash ||
+    voucher.previousVoucherDigest.toLowerCase() === zeroHash ||
+    voucher.paymentId.toLowerCase() === zeroHash ||
+    voucher.orderRefHash.toLowerCase() === zeroHash ||
     voucher.grossUnits <= 0n ||
     voucher.cumulativeGrossUnits < voucher.grossUnits ||
-    voucher.sequence === 0
+    voucher.sequence === 0 ||
+    voucher.receiptCommitment.toLowerCase() === zeroHash ||
+    voucher.acceptedAt >= voucher.acceptUntil ||
+    voucher.acceptUntil >= voucher.submitUntil ||
+    voucher.configVersion <= 0n
   )
     throw new Error("Invalid offline voucher");
 }
@@ -387,6 +415,17 @@ export function offlineVoucherDigest(voucher: OfflineVoucher): Hex {
 export function encodeOfflineVoucher(voucher: OfflineVoucher): Hex {
   validateOfflineVoucher(voucher);
   return encodeAbiParameters([{ type: "tuple", components: offlineVoucherFields }], [voucher]);
+}
+
+export function decodeOfflineVoucher(encoded: Hex): OfflineVoucher {
+  let voucher: OfflineVoucher;
+  try {
+    [voucher] = decodeAbiParameters([{ type: "tuple", components: offlineVoucherFields }], encoded);
+  } catch {
+    throw new Error("Invalid offline voucher encoding");
+  }
+  validateOfflineVoucher(voucher);
+  return voucher;
 }
 
 const intentTuple =
