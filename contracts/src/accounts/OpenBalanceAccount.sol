@@ -6,10 +6,20 @@ import { WebAuthn } from "@openzeppelin/contracts/utils/cryptography/WebAuthn.so
 import { ECDSA } from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import { IERC1271 } from "@openzeppelin/contracts/interfaces/IERC1271.sol";
 import { StrictWebAuthn } from "../StrictWebAuthn.sol";
 
+interface IExactPayRouter {
+    function quote(bytes calldata intent)
+        external
+        view
+        returns (bytes32 digest, address asset, uint256 gross, address payer);
+    function pay(bytes calldata intent, bytes calldata terminalSignature) external;
+    function cancel(bytes calldata intent, bytes calldata terminalSignature) external;
+}
+
 /// @notice Immutable account ownership core. Any caller may relay an authorized command.
-contract OpenBalanceAccount {
+contract OpenBalanceAccount is IERC1271 {
     using SafeERC20 for IERC20;
 
     struct Key {
@@ -32,6 +42,11 @@ contract OpenBalanceAccount {
     bytes32 public constant WITHDRAW = keccak256("WITHDRAW");
     bytes32 public constant ROTATE = keccak256("ROTATE");
     bytes32 public constant RECOVER = keccak256("RECOVER");
+    bytes32 public constant SET_VALIDATOR = keccak256("SET_VALIDATOR");
+    bytes32 public constant ERC1271_CALL = keccak256("ERC1271_CALL");
+    bytes32 public constant PAY = keccak256("PAY");
+    bytes32 public constant CANCEL = keccak256("CANCEL");
+    bytes4 private constant INVALID_SIGNATURE = 0xffffffff;
     address public immutable factory;
     bool private initialized;
     bool private entered;
@@ -41,6 +56,7 @@ contract OpenBalanceAccount {
     uint256 public epoch;
     uint256 public nonce;
     uint256 public recoveryNonce;
+    mapping(address validator => bool enabled) public validators;
 
     error InvalidPolicy();
     error Unauthorized();
@@ -49,6 +65,9 @@ contract OpenBalanceAccount {
     event OwnershipChanged(uint256 indexed epoch, bytes32 ownershipHash);
     event CommandExecuted(bytes32 indexed digest, bytes32 indexed action);
     event Withdrawn(address indexed asset, address indexed recipient, uint256 amount);
+    event ValidatorPermissionChanged(address indexed validator, bool enabled);
+    event PaymentCommandExecuted(address indexed router, bytes32 indexed intentDigest);
+    event CancellationCommandExecuted(address indexed router, bytes32 indexed intentDigest);
 
     constructor() {
         factory = msg.sender;
@@ -135,6 +154,93 @@ contract OpenBalanceAccount {
         _validate(owners);
         _authorize(ROTATE, keccak256(abi.encode(owners)), deadline, backup, auth);
         _replace(owners);
+    }
+
+    /// @notice Grants or revokes one contract's ability to validate purpose-bound signatures.
+    function setValidator(
+        address validator,
+        bool enabled,
+        uint256 deadline,
+        bool backup,
+        WebAuthn.WebAuthnAuth calldata auth
+    ) external locked {
+        if (
+            validator == address(0) || validator == address(this)
+                || (enabled && validator.code.length == 0)
+        ) revert InvalidPolicy();
+        _authorize(SET_VALIDATOR, keccak256(abi.encode(validator, enabled)), deadline, backup, auth);
+        validators[validator] = enabled;
+        emit ValidatorPermissionChanged(validator, enabled);
+    }
+
+    /// @notice Executes one exact terminal intent with no persistent token allowance.
+    function pay(
+        address router,
+        bytes calldata intent,
+        bytes calldata terminalSignature,
+        uint256 deadline,
+        bool backup,
+        WebAuthn.WebAuthnAuth calldata auth
+    ) external locked {
+        if (router.code.length == 0) revert InvalidPolicy();
+        (bytes32 intentDigest, address token, uint256 gross, address payer) =
+            IExactPayRouter(router).quote(intent);
+        if (token.code.length == 0 || gross == 0 || payer != address(this)) revert InvalidPolicy();
+        _authorize(PAY, keccak256(abi.encode(router, intentDigest)), deadline, backup, auth);
+        IERC20(token).forceApprove(router, gross);
+        IExactPayRouter(router).pay(intent, terminalSignature);
+        IERC20(token).forceApprove(router, 0);
+        emit PaymentCommandExecuted(router, intentDigest);
+    }
+
+    /// @notice Cancels one payer-bound signed intent without granting spending authority.
+    function cancelPayment(
+        address router,
+        bytes calldata intent,
+        bytes calldata terminalSignature,
+        uint256 deadline,
+        bool backup,
+        WebAuthn.WebAuthnAuth calldata auth
+    ) external locked {
+        if (router.code.length == 0) revert InvalidPolicy();
+        (bytes32 intentDigest,,, address payer) = IExactPayRouter(router).quote(intent);
+        if (payer != address(this)) revert InvalidPolicy();
+        _authorize(CANCEL, keccak256(abi.encode(router, intentDigest)), deadline, backup, auth);
+        IExactPayRouter(router).cancel(intent, terminalSignature);
+        emit CancellationCommandExecuted(router, intentDigest);
+    }
+
+    /// @notice ERC-1271 validation is available only to explicitly authorized contracts.
+    /// @dev The caller must enforce replay protection for its purpose-specific payload.
+    function isValidSignature(bytes32 hash, bytes calldata signature)
+        external
+        view
+        returns (bytes4)
+    {
+        if (!validators[msg.sender]) return INVALID_SIGNATURE;
+        try this.validateErc1271(hash, signature, msg.sender) returns (bool valid) {
+            return valid ? IERC1271.isValidSignature.selector : INVALID_SIGNATURE;
+        } catch {
+            return INVALID_SIGNATURE;
+        }
+    }
+
+    /// @dev External self-call makes malformed ABI return the ERC-1271 invalid value, not a revert.
+    function validateErc1271(bytes32 hash, bytes calldata signature, address validator)
+        external
+        view
+        returns (bool)
+    {
+        if (msg.sender != address(this) || !validators[validator]) revert Unauthorized();
+        (bytes32 purpose, uint256 deadline, bool backup, WebAuthn.WebAuthnAuth memory auth) =
+            abi.decode(signature, (bytes32, uint256, bool, WebAuthn.WebAuthnAuth));
+        if (purpose == 0 || block.timestamp >= deadline) return false;
+        bytes32 digest = commandDigest(
+            ERC1271_CALL, keccak256(abi.encode(validator, purpose, hash)), deadline
+        );
+        Key memory key = backup ? ownership.backup : ownership.primary;
+        return epoch != 0 && (key.x != 0 || key.y != 0)
+            && StrictWebAuthn.verify(digest, auth, key.x, key.y, rpIdHash, origin);
     }
 
     /// @notice EIP-712 recovery can be submitted without the passkey origin or platform relayer.

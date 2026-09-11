@@ -4,6 +4,7 @@ pragma solidity 0.8.37;
 import { WebAuthn } from "@openzeppelin/contracts/utils/cryptography/WebAuthn.sol";
 import { Base64 } from "@openzeppelin/contracts/utils/Base64.sol";
 import { ERC20 } from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import { IERC1271 } from "@openzeppelin/contracts/interfaces/IERC1271.sol";
 import { OpenBalanceAccount } from "../src/accounts/OpenBalanceAccount.sol";
 import { AccountFactory } from "../src/accounts/AccountFactory.sol";
 
@@ -25,12 +26,24 @@ contract AccountToken is ERC20 {
     }
 }
 
+contract ValidatorConsumer {
+    function validate(OpenBalanceAccount account, bytes32 payloadHash, bytes calldata signature)
+        external
+        view
+        returns (bytes4)
+    {
+        return account.isValidSignature(payloadHash, signature);
+    }
+}
+
 contract OpenBalanceAccountTest {
     VmAccount private constant vm =
         VmAccount(address(uint160(uint256(keccak256("hevm cheat code")))));
     AccountFactory private factory;
     OpenBalanceAccount private account;
     AccountToken private token;
+    ValidatorConsumer private consumer;
+    ValidatorConsumer private otherConsumer;
     uint256 private constant DEADLINE = 1000;
     address private constant RECIPIENT = address(0xbeef);
 
@@ -59,6 +72,8 @@ contract OpenBalanceAccountTest {
             )
         );
         token = new AccountToken(address(account));
+        consumer = new ValidatorConsumer();
+        otherConsumer = new ValidatorConsumer();
     }
 
     function assertion(bytes32 digest, uint256 key)
@@ -98,6 +113,25 @@ contract OpenBalanceAccountTest {
             key, account.commandDigest(account.RECOVER(), keccak256(abi.encode(o)), DEADLINE)
         );
         return abi.encodePacked(r, s, v);
+    }
+
+    function setValidator(address validator, bool enabled) private {
+        bytes32 digest = account.commandDigest(
+            account.SET_VALIDATOR(), keccak256(abi.encode(validator, enabled)), DEADLINE
+        );
+        account.setValidator(validator, enabled, DEADLINE, false, assertion(digest, 42));
+    }
+
+    function validatorSignature(
+        address validator,
+        bytes32 purpose,
+        bytes32 payloadHash,
+        uint256 key
+    ) private view returns (bytes memory) {
+        bytes32 digest = account.commandDigest(
+            account.ERC1271_CALL(), keccak256(abi.encode(validator, purpose, payloadHash)), DEADLINE
+        );
+        return abi.encode(purpose, DEADLINE, false, assertion(digest, key));
     }
 
     function testFactoryPredictionIdempotencyAndPolicyBinding() public {
@@ -255,5 +289,78 @@ contract OpenBalanceAccountTest {
         vm.expectRevert(OpenBalanceAccount.Unauthorized.selector);
         account.recover(next, DEADLINE, sig);
         assert(token.balanceOf(RECIPIENT) == 10);
+    }
+
+    function testAuthorizedValidatorAcceptsPurposeBoundSignature() public {
+        bytes32 purpose = keccak256("PAYMENT_AUTHORIZATION");
+        bytes32 payloadHash = keccak256("invoice:42:25-USDC");
+        setValidator(address(consumer), true);
+        bytes memory signature = validatorSignature(address(consumer), purpose, payloadHash, 42);
+
+        assert(
+            consumer.validate(account, payloadHash, signature) == IERC1271.isValidSignature.selector
+        );
+        assert(account.nonce() == 1);
+        assert(
+            consumer.validate(account, keccak256("invoice:42:26-USDC"), signature)
+                == bytes4(0xffffffff)
+        );
+        assert(account.isValidSignature(payloadHash, signature) == bytes4(0xffffffff));
+    }
+
+    function testValidatorRejectsMalformedExpiredAndLoginAssertions() public {
+        bytes32 purpose = keccak256("PAYMENT_AUTHORIZATION");
+        bytes32 payloadHash = keccak256("invoice:42:25-USDC");
+        setValidator(address(consumer), true);
+        assert(consumer.validate(account, payloadHash, hex"00") == bytes4(0xffffffff));
+
+        bytes memory loginAssertion =
+            abi.encode(purpose, DEADLINE, false, assertion(payloadHash, 42));
+        assert(consumer.validate(account, payloadHash, loginAssertion) == bytes4(0xffffffff));
+
+        bytes memory signature = validatorSignature(address(consumer), purpose, payloadHash, 42);
+        vm.warp(DEADLINE);
+        assert(consumer.validate(account, payloadHash, signature) == bytes4(0xffffffff));
+    }
+
+    function testValidatorPermissionAndRootNonceRevokeSignatures() public {
+        bytes32 purpose = keccak256("PAYMENT_AUTHORIZATION");
+        bytes32 payloadHash = keccak256("invoice:42:25-USDC");
+        setValidator(address(consumer), true);
+        bytes memory signature = validatorSignature(address(consumer), purpose, payloadHash, 42);
+
+        setValidator(address(consumer), false);
+        assert(!account.validators(address(consumer)) && account.nonce() == 2);
+        assert(consumer.validate(account, payloadHash, signature) == bytes4(0xffffffff));
+    }
+
+    function testValidatorAndNonceDomainsCannotReuseSignature() public {
+        bytes32 purpose = keccak256("PAYMENT_AUTHORIZATION");
+        bytes32 payloadHash = keccak256("invoice:42:25-USDC");
+        setValidator(address(consumer), true);
+        setValidator(address(otherConsumer), true);
+        bytes memory signature = validatorSignature(address(consumer), purpose, payloadHash, 42);
+
+        assert(
+            consumer.validate(account, payloadHash, signature) == IERC1271.isValidSignature.selector
+        );
+        assert(otherConsumer.validate(account, payloadHash, signature) == bytes4(0xffffffff));
+
+        account.withdraw(address(token), RECIPIENT, 1, DEADLINE, false, withdrawal(1));
+        assert(account.validators(address(consumer)));
+        assert(consumer.validate(account, payloadHash, signature) == bytes4(0xffffffff));
+    }
+
+    function testInvalidValidatorPoliciesRejected() public {
+        for (uint256 i; i < 3; ++i) {
+            address validator = i == 0 ? address(0) : i == 1 ? address(account) : address(123);
+            bytes32 digest = account.commandDigest(
+                account.SET_VALIDATOR(), keccak256(abi.encode(validator, true)), DEADLINE
+            );
+            WebAuthn.WebAuthnAuth memory auth = assertion(digest, 42);
+            vm.expectRevert(OpenBalanceAccount.InvalidPolicy.selector);
+            account.setValidator(validator, true, DEADLINE, false, auth);
+        }
+        assert(account.nonce() == 0);
     }
 }
