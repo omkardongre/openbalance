@@ -1,16 +1,13 @@
-import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
+import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
+import {
+  canonicalVoucherReceipt,
+  type VoucherReceipt,
+  validateVoucherReceipt,
+  voucherReceiptPayloadHash,
+} from "@openbalance/protocol";
 
-export type VoucherReceipt = {
-  receiptId: string;
-  terminalId: string;
-  channelId: string;
-  sequence: number;
-  paymentId: string;
-  voucher: string;
-  attendeeSignature: string;
-  terminalSignature: string;
-};
+export type { VoucherReceipt } from "@openbalance/protocol";
 
 export type ReceiptState = "PENDING" | "RETRY" | "SUBMITTED" | "SETTLED" | "QUARANTINED";
 
@@ -33,41 +30,26 @@ export class InvalidReceipt extends Error {}
 export class InvalidTransition extends Error {}
 
 const hex32 = /^0x[0-9a-fA-F]{64}$/;
-const hexBytes = /^0x(?:[0-9a-fA-F]{2})+$/;
 const states = new Set<ReceiptState>(["PENDING", "RETRY", "SUBMITTED", "SETTLED", "QUARANTINED"]);
 
 export function canonicalReceipt(receipt: VoucherReceipt): string {
-  return JSON.stringify({
-    receiptId: receipt.receiptId,
-    terminalId: receipt.terminalId.toLowerCase(),
-    channelId: receipt.channelId.toLowerCase(),
-    sequence: receipt.sequence,
-    paymentId: receipt.paymentId.toLowerCase(),
-    voucher: receipt.voucher.toLowerCase(),
-    attendeeSignature: receipt.attendeeSignature.toLowerCase(),
-    terminalSignature: receipt.terminalSignature.toLowerCase(),
-  });
+  return canonicalVoucherReceipt(receipt);
 }
 
 export function validateReceipt(receipt: VoucherReceipt): void {
-  if (
-    !/^[A-Za-z0-9][A-Za-z0-9:_-]{0,127}$/.test(receipt.receiptId) ||
-    !hex32.test(receipt.terminalId) ||
-    !hex32.test(receipt.channelId) ||
-    !Number.isSafeInteger(receipt.sequence) ||
-    receipt.sequence <= 0 ||
-    receipt.sequence >= 2 ** 32 ||
-    !hex32.test(receipt.paymentId) ||
-    !hexBytes.test(receipt.voucher) ||
-    !hexBytes.test(receipt.attendeeSignature) ||
-    !hexBytes.test(receipt.terminalSignature)
-  )
+  try {
+    validateVoucherReceipt(receipt);
+  } catch {
     throw new InvalidReceipt("Invalid voucher receipt");
+  }
 }
 
 export function receiptPayloadHash(receipt: VoucherReceipt): string {
-  validateReceipt(receipt);
-  return createHash("sha256").update(canonicalReceipt(receipt)).digest("hex");
+  try {
+    return voucherReceiptPayloadHash(receipt);
+  } catch {
+    throw new InvalidReceipt("Invalid voucher receipt");
+  }
 }
 
 export type AuthenticatedIngress = {
@@ -446,7 +428,7 @@ export class VenueRelayJournal {
     ) as VoucherReceipt;
     validateReceipt(receipt);
     if (
-      createHash("sha256").update(canonicalReceipt(receipt)).digest("hex") !== row.payload_hash ||
+      receiptPayloadHash(receipt) !== row.payload_hash ||
       receipt.receiptId !== row.receipt_id ||
       receipt.channelId.toLowerCase() !== row.channel_id ||
       receipt.paymentId.toLowerCase() !== row.payment_id ||

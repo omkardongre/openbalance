@@ -1,27 +1,15 @@
 import {
+  decodeOfflineVoucher,
   type OfflineVoucher,
   offlineVoucherDigest,
-  offlineVoucherFields,
+  terminalIngressDigest,
 } from "@openbalance/protocol";
-import {
-  type Address,
-  decodeAbiParameters,
-  encodeAbiParameters,
-  getAddress,
-  type Hex,
-  keccak256,
-  recoverAddress,
-  stringToHex,
-} from "viem";
+import { type Address, getAddress, type Hex, recoverAddress } from "viem";
 import { receiptPayloadHash, type VoucherReceipt, validateReceipt } from "./journal.js";
 
-const terminalRequestTypeHash = keccak256(
-  stringToHex(
-    "OpenBalanceTerminalIngress(bytes32 audienceHash,bytes32 terminalId,uint256 keyVersion,uint64 sentAt,bytes32 nonce,bytes32 payloadHash)",
-  ),
-);
-const hex32 = /^0x[0-9a-fA-F]{64}$/;
 const signature = /^0x[0-9a-fA-F]{130}$/;
+
+export { terminalIngressDigest } from "@openbalance/protocol";
 
 export type TerminalAuthorization = {
   keyVersion: bigint;
@@ -51,10 +39,7 @@ export function decodeVoucher(receipt: VoucherReceipt): OfflineVoucher {
   validateReceipt(receipt);
   let voucher: OfflineVoucher;
   try {
-    [voucher] = decodeAbiParameters(
-      [{ type: "tuple", components: offlineVoucherFields }],
-      receipt.voucher as Hex,
-    );
+    voucher = decodeOfflineVoucher(receipt.voucher as Hex);
   } catch {
     throw new TerminalAuthenticationFailed("Voucher encoding is invalid");
   }
@@ -65,49 +50,6 @@ export function decodeVoucher(receipt: VoucherReceipt): OfflineVoucher {
   )
     throw new TerminalAuthenticationFailed("Receipt metadata does not match voucher");
   return voucher;
-}
-
-export function terminalIngressDigest(input: {
-  audience: string;
-  terminalId: Hex;
-  keyVersion: bigint;
-  sentAt: number;
-  nonce: Hex;
-  payloadHash: Hex;
-}): Hex {
-  if (
-    input.audience.length < 1 ||
-    input.audience.length > 512 ||
-    !hex32.test(input.terminalId) ||
-    input.keyVersion <= 0n ||
-    !Number.isSafeInteger(input.sentAt) ||
-    input.sentAt < 0 ||
-    !hex32.test(input.nonce) ||
-    !hex32.test(input.payloadHash)
-  )
-    throw new TerminalAuthenticationFailed("Terminal authorization is invalid");
-  return keccak256(
-    encodeAbiParameters(
-      [
-        { type: "bytes32" },
-        { type: "bytes32" },
-        { type: "bytes32" },
-        { type: "uint256" },
-        { type: "uint64" },
-        { type: "bytes32" },
-        { type: "bytes32" },
-      ],
-      [
-        terminalRequestTypeHash,
-        keccak256(stringToHex(input.audience)),
-        input.terminalId,
-        input.keyVersion,
-        BigInt(input.sentAt),
-        input.nonce,
-        input.payloadHash,
-      ],
-    ),
-  );
 }
 
 export async function authenticateTerminalReceipt(input: {

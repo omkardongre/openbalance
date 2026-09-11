@@ -11,7 +11,7 @@ import {
 } from "../src/settlement.js";
 
 const hex32 = (byte: string) => `0x${byte.repeat(64)}` as `0x${string}`;
-const bytes = (byte: string) => `0x${byte.repeat(130)}`;
+const bytes = (byte: string) => `0x${byte.repeat(130)}` as `0x${string}`;
 const directories: string[] = [];
 
 function receipt(sequence = 1): VoucherReceipt {
@@ -22,8 +22,8 @@ function receipt(sequence = 1): VoucherReceipt {
     sequence,
     paymentId: hex32(String(sequence)),
     voucher: bytes("3"),
-    attendeeSignature: bytes("4"),
-    terminalSignature: bytes("5"),
+    attendeeSignature: `0x${"4".repeat(130)}`,
+    terminalSignature: `0x${"5".repeat(130)}`,
   };
 }
 

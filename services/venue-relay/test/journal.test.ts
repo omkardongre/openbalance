@@ -11,8 +11,8 @@ import {
   type VoucherReceipt,
 } from "../src/journal.js";
 
-const hex32 = (byte: string) => `0x${byte.repeat(64)}`;
-const bytes = (byte: string) => `0x${byte.repeat(130)}`;
+const hex32 = (byte: string) => `0x${byte.repeat(64)}` as `0x${string}`;
+const bytes = (byte: string) => `0x${byte.repeat(130)}` as `0x${string}`;
 
 function receipt(sequence: number, suffix: string): VoucherReceipt {
   return {
@@ -22,8 +22,8 @@ function receipt(sequence: number, suffix: string): VoucherReceipt {
     sequence,
     paymentId: hex32(suffix),
     voucher: bytes("3"),
-    attendeeSignature: bytes("4"),
-    terminalSignature: bytes("5"),
+    attendeeSignature: `0x${"4".repeat(130)}`,
+    terminalSignature: `0x${"5".repeat(130)}`,
   };
 }
 
