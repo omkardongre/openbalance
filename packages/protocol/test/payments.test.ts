@@ -20,6 +20,8 @@ import {
   refundIntentStructHash,
   reserveChannelFields,
   reserveChannelTermsHash,
+  validateOfflineVoucher,
+  validateReserveChannelConfig,
 } from "../src/payments.js";
 
 const intent: PaymentIntent = {
@@ -190,12 +192,27 @@ describe("reserve channel and offline voucher", () => {
     );
   });
 
+  it("rejects values outside Solidity integer ranges", () => {
+    expect(() => validateReserveChannelConfig({ ...reserveConfig, acceptFrom: 2 ** 48 })).toThrow(
+      "Invalid acceptFrom",
+    );
+    expect(() => validateOfflineVoucher({ ...offlineVoucher, acceptedAt: 2 ** 48 })).toThrow(
+      "Invalid acceptedAt",
+    );
+    expect(() => validateOfflineVoucher({ ...offlineVoucher, sequence: 2 ** 32 })).toThrow(
+      "Invalid sequence",
+    );
+  });
+
   it("binds sequence, previous digest, amount, and deadlines", () => {
     const digest = offlineVoucherDigest(offlineVoucher);
     for (const mutation of [
       { sequence: 2 },
       { previousVoucherDigest: offlineVoucher.paymentId },
-      { grossUnits: offlineVoucher.grossUnits + 1n },
+      {
+        grossUnits: offlineVoucher.grossUnits + 1n,
+        cumulativeGrossUnits: offlineVoucher.cumulativeGrossUnits + 1n,
+      },
       { cumulativeGrossUnits: offlineVoucher.cumulativeGrossUnits + 1n },
       { acceptedAt: offlineVoucher.acceptedAt + 1 },
       { submitUntil: offlineVoucher.submitUntil + 1 },

@@ -87,6 +87,53 @@ export type OfflineVoucher = {
   configVersion: bigint;
 };
 
+const uint48Limit = 1n << 48n;
+const uint32Limit = 1n << 32n;
+
+function validateUnsignedNumber(value: number, limit: bigint, field: string): void {
+  if (!Number.isSafeInteger(value) || value < 0 || BigInt(value) >= limit)
+    throw new Error(`Invalid ${field}`);
+}
+
+export function validateReserveChannelConfig(config: ReserveChannelConfig): void {
+  for (const [field, value] of [
+    ["acceptFrom", config.acceptFrom],
+    ["acceptUntil", config.acceptUntil],
+    ["submitUntil", config.submitUntil],
+  ] as const)
+    validateUnsignedNumber(value, uint48Limit, field);
+  validateUnsignedNumber(config.maxVoucherCount, uint32Limit, "maxVoucherCount");
+  validateUnsignedNumber(config.organizerFeeBps, 10_001n, "organizerFeeBps");
+  validateUnsignedNumber(config.platformFeeBps, 10_001n, "platformFeeBps");
+  if (
+    config.reserveUnits <= 0n ||
+    config.maxPerVoucher <= 0n ||
+    config.maxPerVoucher > config.reserveUnits ||
+    config.maxVoucherCount === 0 ||
+    config.acceptFrom >= config.acceptUntil ||
+    config.acceptUntil >= config.submitUntil
+  )
+    throw new Error("Invalid reserve channel policy");
+}
+
+export function validateOfflineVoucher(voucher: OfflineVoucher): void {
+  validateUnsignedNumber(voucher.protocolVersion, uint32Limit, "protocolVersion");
+  validateUnsignedNumber(voucher.sequence, uint32Limit, "sequence");
+  for (const [field, value] of [
+    ["acceptedAt", voucher.acceptedAt],
+    ["acceptUntil", voucher.acceptUntil],
+    ["submitUntil", voucher.submitUntil],
+  ] as const)
+    validateUnsignedNumber(value, uint48Limit, field);
+  if (
+    voucher.chainId <= 0n ||
+    voucher.grossUnits <= 0n ||
+    voucher.cumulativeGrossUnits < voucher.grossUnits ||
+    voucher.sequence === 0
+  )
+    throw new Error("Invalid offline voucher");
+}
+
 export const paymentIntentFields = [
   { name: "schemaVersion", type: "uint32" },
   { name: "chainId", type: "uint256" },
@@ -277,6 +324,8 @@ export function reserveChannelTermsHash(input: {
   originalAccount: Address;
   config: ReserveChannelConfig;
 }): Hex {
+  validateReserveChannelConfig(input.config);
+  if (input.chainId <= 0n) throw new Error("Invalid reserve chain ID");
   return keccak256(
     encodeAbiParameters(
       [
@@ -291,6 +340,7 @@ export function reserveChannelTermsHash(input: {
 }
 
 export function offlineVoucherStructHash(voucher: OfflineVoucher): Hex {
+  validateOfflineVoucher(voucher);
   return keccak256(
     encodeAbiParameters(
       [{ type: "bytes32" }, ...offlineVoucherFields],
@@ -317,7 +367,8 @@ export function offlineVoucherStructHash(voucher: OfflineVoucher): Hex {
 }
 
 export function offlineVoucherDigest(voucher: OfflineVoucher): Hex {
-  if (voucher.chainId <= 0n || voucher.chainId > BigInt(Number.MAX_SAFE_INTEGER)) {
+  validateOfflineVoucher(voucher);
+  if (voucher.chainId > BigInt(Number.MAX_SAFE_INTEGER)) {
     throw new Error("Invalid voucher chain ID");
   }
   return hashTypedData({
@@ -334,6 +385,7 @@ export function offlineVoucherDigest(voucher: OfflineVoucher): Hex {
 }
 
 export function encodeOfflineVoucher(voucher: OfflineVoucher): Hex {
+  validateOfflineVoucher(voucher);
   return encodeAbiParameters([{ type: "tuple", components: offlineVoucherFields }], [voucher]);
 }
 
@@ -369,7 +421,9 @@ export const settlementLedgerAbi = parseAbi([
   "function refunds(bytes32 refundId) view returns (bytes32 paymentId)",
   "function refundTerms(bytes32 paymentId) view returns (address payer,bytes32 vendorId,uint256 gross,uint256 refundedGross,bytes32 vendorBeneficiaryId)",
   "function withdrawFor(bytes32 beneficiaryId) returns (uint256 amount)",
+  "event PaymentCredited(bytes32 indexed paymentId,address indexed payer,uint256 gross)",
   "event RefundPaid(bytes32 indexed refundId,bytes32 indexed paymentId,address indexed payer,uint256 amount,uint256 vendorCreditUsed)",
+  "event Withdrawn(bytes32 indexed beneficiaryId,address indexed destination,uint256 amount)",
 ]);
 
 export const resilienceVaultAbi = parseAbi([
@@ -387,6 +441,9 @@ export const resilienceVaultAbi = parseAbi([
   "function channelRecipients(bytes32 channelId) view returns (address vendor,address organizer,address platform)",
   "function totalReserved() view returns (uint256)",
   "function reservedFor(address originalAccount) view returns (uint256)",
+  "event ChannelOpened(bytes32 indexed channelId,address indexed originalAccount,bytes32 indexed vendorId,bytes32 terminalInstanceId,uint256 reserveUnits,uint48 acceptUntil,uint48 submitUntil)",
+  "event VoucherSettled(bytes32 indexed channelId,bytes32 indexed paymentId,uint32 indexed sequence,uint256 grossUnits,uint256 cumulativeGrossUnits,bytes32 voucherDigest)",
+  "event ChannelReclaimed(bytes32 indexed channelId,address indexed originalAccount,uint256 returnedUnits)",
 ]);
 
 export const eventFactoryAbi = parseAbi([

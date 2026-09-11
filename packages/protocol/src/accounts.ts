@@ -141,6 +141,7 @@ function validateOnlineSessionConfig(config: OnlineSessionConfig) {
     !Number.isSafeInteger(config.validAfter) ||
     !Number.isSafeInteger(config.validUntil) ||
     config.validAfter < 0 ||
+    config.validAfter >= uint48Limit ||
     config.validUntil >= uint48Limit ||
     config.validAfter >= config.validUntil
   )
