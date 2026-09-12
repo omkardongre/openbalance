@@ -8,6 +8,10 @@ const environmentSchema = z.object({
   WEBAUTHN_ORIGIN: z.string().url().optional(),
   ACCOUNT_MANIFEST_PATH: z.string().min(1).optional(),
   ACCOUNT_RPC_URL: z.string().url().optional(),
+  PROJECTION_READS_ENABLED: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((value) => value === "true"),
 });
 
 export function loadEnvironment(environment: NodeJS.ProcessEnv) {
@@ -24,5 +28,7 @@ export function loadEnvironment(environment: NodeJS.ProcessEnv) {
     throw new Error(
       "Enrollment requires DATABASE_URL, WEBAUTHN_RP_ID and WEBAUTHN_ORIGIN together",
     );
+  if (parsed.PROJECTION_READS_ENABLED && count !== 3)
+    throw new Error("Projection reads require enrollment database and passkey configuration");
   return parsed;
 }

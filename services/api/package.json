@@ -16,6 +16,10 @@
       "types": "./src/enrollment.ts",
       "default": "./dist/enrollment.js"
     },
+    "./operations": {
+      "types": "./src/operations.ts",
+      "default": "./dist/operations.js"
+    },
     "./sponsorship": {
       "types": "./src/sponsorship.ts",
       "default": "./dist/sponsorship.js"
