@@ -1,4 +1,4 @@
-import { exactPayRouterAbi } from "@openbalance/protocol";
+import { exactPayRouterAbi, type ReserveChannelConfig } from "@openbalance/protocol";
 import {
   type Address,
   encodeAbiParameters,
@@ -14,6 +14,7 @@ import {
   type VerificationReader,
   verifyCustodyConservation,
   verifyDeployment,
+  verifyFinalizedChannel,
   verifyFinalizedTransition,
 } from "../src/index.js";
 
@@ -31,6 +32,27 @@ const manifest: DeploymentManifest = {
   vault: { address: address("14"), runtimeCodeHash: keccak256(code("14")) },
 };
 
+const channelConfig: ReserveChannelConfig = {
+  channelId: hex32("41"),
+  eventId: manifest.eventId,
+  asset: manifest.asset,
+  reserveUnits: 10_000n,
+  vendorId: hex32("42"),
+  vendorDestinationVersion: 2n,
+  terminalInstanceId: hex32("43"),
+  terminalKeyVersion: 3n,
+  attendeeChannelSigner: address("44"),
+  configVersion: 4n,
+  organizerFeeBps: 100,
+  platformFeeBps: 50,
+  maxPerVoucher: 1_000n,
+  maxVoucherCount: 20,
+  acceptFrom: 1_000,
+  acceptUntil: 2_000,
+  submitUntil: 2_300,
+  genesisDigest: hex32("45"),
+};
+
 class Reader implements VerificationReader {
   chainId = 10143;
   finalized = 100n;
@@ -44,19 +66,23 @@ class Reader implements VerificationReader {
   ]);
   readonly values = new Map<string, unknown>();
 
+  key(address: Address, functionName: string, args: readonly unknown[] = []) {
+    return `${address}:${functionName}:${args.map(String).join(":")}`;
+  }
+
   constructor() {
-    this.values.set(`${manifest.registry.address}:eventId`, manifest.eventId);
-    this.values.set(`${manifest.registry.address}:asset`, manifest.asset);
-    this.values.set(`${manifest.ledger.address}:registry`, manifest.registry.address);
-    this.values.set(`${manifest.ledger.address}:asset`, manifest.asset);
-    this.values.set(`${manifest.ledger.address}:router`, manifest.router.address);
-    this.values.set(`${manifest.ledger.address}:vault`, manifest.vault.address);
-    this.values.set(`${manifest.router.address}:registry`, manifest.registry.address);
-    this.values.set(`${manifest.router.address}:ledger`, manifest.ledger.address);
-    this.values.set(`${manifest.router.address}:asset`, manifest.asset);
-    this.values.set(`${manifest.vault.address}:registry`, manifest.registry.address);
-    this.values.set(`${manifest.vault.address}:ledger`, manifest.ledger.address);
-    this.values.set(`${manifest.vault.address}:asset`, manifest.asset);
+    this.values.set(this.key(manifest.registry.address, "eventId"), manifest.eventId);
+    this.values.set(this.key(manifest.registry.address, "asset"), manifest.asset);
+    this.values.set(this.key(manifest.ledger.address, "registry"), manifest.registry.address);
+    this.values.set(this.key(manifest.ledger.address, "asset"), manifest.asset);
+    this.values.set(this.key(manifest.ledger.address, "router"), manifest.router.address);
+    this.values.set(this.key(manifest.ledger.address, "vault"), manifest.vault.address);
+    this.values.set(this.key(manifest.router.address, "registry"), manifest.registry.address);
+    this.values.set(this.key(manifest.router.address, "ledger"), manifest.ledger.address);
+    this.values.set(this.key(manifest.router.address, "asset"), manifest.asset);
+    this.values.set(this.key(manifest.vault.address, "registry"), manifest.registry.address);
+    this.values.set(this.key(manifest.vault.address, "ledger"), manifest.ledger.address);
+    this.values.set(this.key(manifest.vault.address, "asset"), manifest.asset);
   }
 
   async getChainId() {
@@ -75,8 +101,7 @@ class Reader implements VerificationReader {
       : { number: input.blockNumber, hash: this.canonicalHash };
   }
   async readContract(input: { address: Address; functionName: string; args?: readonly unknown[] }) {
-    const suffix = input.args ? `:${String(input.args[0])}` : "";
-    return this.values.get(`${input.address}:${input.functionName}${suffix}`);
+    return this.values.get(this.key(input.address, input.functionName, input.args));
   }
 }
 
@@ -155,6 +180,84 @@ describe("independent verifier", () => {
     ).rejects.toThrow("gross mismatch");
   });
 
+  it("installs only an untouched channel whose finalized snapshot matches registry history", async () => {
+    const reader = new Reader();
+    const vendor = address("51");
+    const organizer = address("52");
+    const platform = address("53");
+    reader.values.set(
+      reader.key(manifest.vault.address, "channelConfig", [channelConfig.channelId]),
+      channelConfig,
+    );
+    reader.values.set(
+      reader.key(manifest.vault.address, "channelState", [channelConfig.channelId]),
+      {
+        originalAccount: address("54"),
+        spentGross: 0n,
+        nextSequence: 1,
+        lastVoucherDigest: channelConfig.genesisDigest,
+        reclaimed: false,
+      },
+    );
+    reader.values.set(
+      reader.key(manifest.vault.address, "channelRecipients", [channelConfig.channelId]),
+      { vendor, organizer, platform },
+    );
+    reader.values.set(
+      reader.key(manifest.registry.address, "historicalTerminalSigner", [
+        channelConfig.terminalInstanceId,
+        channelConfig.terminalKeyVersion,
+        channelConfig.vendorId,
+      ]),
+      address("55"),
+    );
+    reader.values.set(
+      reader.key(manifest.registry.address, "destinations", [
+        channelConfig.vendorId,
+        channelConfig.vendorDestinationVersion,
+      ]),
+      { account: vendor, enabled: false },
+    );
+    const policyKey = reader.key(manifest.registry.address, "configs", [
+      channelConfig.configVersion,
+    ]);
+    reader.values.set(policyKey, {
+      validAfter: 900,
+      validUntil: 2_100,
+      organizerFeeBps: channelConfig.organizerFeeBps,
+      platformFeeBps: channelConfig.platformFeeBps,
+      maximumAcceptanceDuration: 1_200,
+      maximumSubmissionDelay: 400,
+      organizerDestination: organizer,
+      platformDestination: platform,
+      termsHash: hex32("56"),
+      enabled: false,
+    });
+
+    await expect(
+      verifyFinalizedChannel(reader, manifest, channelConfig.channelId),
+    ).resolves.toMatchObject({
+      chainId: 10_143n,
+      terminalSigner: address("55"),
+      config: {
+        channelId: channelConfig.channelId,
+        eventId: channelConfig.eventId,
+        reserveUnits: channelConfig.reserveUnits,
+        terminalInstanceId: channelConfig.terminalInstanceId,
+      },
+      finalizedBlockNumber: 100n,
+      finalizedBlockHash: hex32("ff"),
+    });
+
+    reader.values.set(policyKey, {
+      ...(reader.values.get(policyKey) as object),
+      organizerDestination: address("99"),
+    });
+    await expect(verifyFinalizedChannel(reader, manifest, channelConfig.channelId)).rejects.toThrow(
+      "organizer recipient mismatch",
+    );
+  });
+
   it("rejects unfinalized and noncanonical receipts", async () => {
     const reader = new Reader();
     reader.receipt = paymentReceipt();
@@ -180,15 +283,15 @@ describe("independent verifier", () => {
 
   it("checks ledger and reserve custody against finalized liabilities", async () => {
     const reader = new Reader();
-    reader.values.set(`${manifest.asset}:balanceOf:${manifest.ledger.address}`, 12_000n);
-    reader.values.set(`${manifest.ledger.address}:totalLiability`, 12_000n);
-    reader.values.set(`${manifest.asset}:balanceOf:${manifest.vault.address}`, 8_000n);
-    reader.values.set(`${manifest.vault.address}:totalReserved`, 8_000n);
+    reader.values.set(reader.key(manifest.asset, "balanceOf", [manifest.ledger.address]), 12_000n);
+    reader.values.set(reader.key(manifest.ledger.address, "totalLiability"), 12_000n);
+    reader.values.set(reader.key(manifest.asset, "balanceOf", [manifest.vault.address]), 8_000n);
+    reader.values.set(reader.key(manifest.vault.address, "totalReserved"), 8_000n);
     await expect(verifyCustodyConservation(reader, manifest)).resolves.toEqual({
       ledgerUnits: 12_000n,
       vaultUnits: 8_000n,
     });
-    reader.values.set(`${manifest.vault.address}:totalReserved`, 8_001n);
+    reader.values.set(reader.key(manifest.vault.address, "totalReserved"), 8_001n);
     await expect(verifyCustodyConservation(reader, manifest)).rejects.toBeInstanceOf(
       VerificationFailed,
     );
