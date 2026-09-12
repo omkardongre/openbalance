@@ -100,7 +100,7 @@ export class FinancialOperationTransitionRejected extends Error {}
 const address = /^0x[0-9a-fA-F]{40}$/;
 const bytes32 = /^0x[0-9a-fA-F]{64}$/;
 const calldata = /^0x(?:[0-9a-fA-F]{2})*$/;
-const actorId = /^[A-Za-z0-9][A-Za-z0-9._:@/-]{2,127}$/;
+const actorIdPattern = /^[A-Za-z0-9][A-Za-z0-9._:@/-]{2,127}$/;
 const idempotencyKey = /^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$/;
 const workerId = /^[A-Za-z0-9][A-Za-z0-9._:@/-]{2,127}$/;
 const failureCode = /^[a-z][a-z0-9_]{2,63}$/;
@@ -110,11 +110,13 @@ const maxCalldataBytes = 131_072;
 
 function normalize(input: AcceptFinancialOperation): AcceptFinancialOperation {
   if (
-    !actorId.test(input.actorId) ||
+    !actorIdPattern.test(input.actorId) ||
     !operationKind.has(input.kind) ||
     !idempotencyKey.test(input.idempotencyKey) ||
     !bytes32.test(input.commandDigest) ||
     !bytes32.test(input.aggregateId) ||
+    input.commandDigest.toLowerCase() === `0x${"00".repeat(32)}` ||
+    input.aggregateId.toLowerCase() === `0x${"00".repeat(32)}` ||
     !address.test(input.targetAddress) ||
     !calldata.test(input.calldata) ||
     (input.calldata.length - 2) / 2 > maxCalldataBytes ||
@@ -219,6 +221,16 @@ function validateSignedTransaction(transaction: SignedTransaction): SignedTransa
 export class FinancialOperationJournal {
   constructor(private readonly pool: Pool) {}
 
+  async assertReady(): Promise<void> {
+    const result = await this.pool.query(
+      `SELECT to_regclass('public.financial_operations') AS operations,
+              to_regclass('public.relayer_nonce_cursors') AS cursors,
+              to_regclass('public.relayer_nonce_reservations') AS reservations`,
+    );
+    if (!result.rows[0]?.operations || !result.rows[0]?.cursors || !result.rows[0]?.reservations)
+      throw new Error("Financial operation database migration is not installed");
+  }
+
   async accept(
     input: AcceptFinancialOperation,
   ): Promise<{ created: boolean; operation: FinancialOperation }> {
@@ -263,6 +275,16 @@ export class FinancialOperationJournal {
     const result = await this.pool.query<OperationRow>(
       "SELECT * FROM financial_operations WHERE operation_id=$1",
       [operationId],
+    );
+    return result.rows[0] ? operation(result.rows[0]) : null;
+  }
+
+  async getForActor(operationId: string, actorId: string): Promise<FinancialOperation | null> {
+    if (!uuid.test(operationId) || !actorIdPattern.test(actorId))
+      throw new FinancialOperationRejected("Invalid operation lookup");
+    const result = await this.pool.query<OperationRow>(
+      "SELECT * FROM financial_operations WHERE operation_id=$1 AND actor_id=$2",
+      [operationId, actorId],
     );
     return result.rows[0] ? operation(result.rows[0]) : null;
   }
@@ -333,6 +355,47 @@ export class FinancialOperationJournal {
        WHERE state IN ('ACCEPTED','RETRY') AND expires_at <= clock_timestamp()`,
     );
     return result.rowCount ?? 0;
+  }
+
+  async listForReconciliation(limit: number): Promise<FinancialOperation[]> {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100)
+      throw new FinancialOperationRejected("Invalid reconciliation limit");
+    const result = await this.pool.query<OperationRow>(
+      `SELECT * FROM financial_operations
+       WHERE state IN ('SIGNED','SUBMITTED') AND next_attempt_at <= clock_timestamp()
+       ORDER BY next_attempt_at,created_at,operation_id LIMIT $1`,
+      [limit],
+    );
+    return result.rows.map(operation);
+  }
+
+  async deferReconciliation(
+    operationId: string,
+    transactionHash: Hex,
+    delayMilliseconds: number,
+    code: string,
+  ): Promise<FinancialOperation> {
+    if (
+      !uuid.test(operationId) ||
+      !bytes32.test(transactionHash) ||
+      !Number.isSafeInteger(delayMilliseconds) ||
+      delayMilliseconds < 1_000 ||
+      delayMilliseconds > 86_400_000 ||
+      !failureCode.test(code)
+    )
+      throw new FinancialOperationRejected("Invalid reconciliation delay");
+    const result = await this.pool.query<OperationRow>(
+      `UPDATE financial_operations
+       SET next_attempt_at=clock_timestamp()+($3::text || ' milliseconds')::interval,
+           failure_code=$4,updated_at=clock_timestamp()
+       WHERE operation_id=$1 AND state IN ('SIGNED','SUBMITTED') AND transaction_hash=$2
+       RETURNING *`,
+      [operationId, transactionHash.toLowerCase(), delayMilliseconds, code],
+    );
+    return this.transition(
+      result.rows[0],
+      "Reconciliation transaction does not match current state",
+    );
   }
 
   async reserveNonce(
