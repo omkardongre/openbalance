@@ -109,6 +109,7 @@ h1 {
 }
 
 .feature-grid h2,
+.operations-panel h2,
 .activity h2 {
   margin: 0;
   font-size: 1.25rem;
@@ -133,7 +134,9 @@ label {
   color: #b9d5cb;
 }
 
-input {
+input,
+select,
+textarea {
   display: block;
   width: 100%;
   margin: 0.5rem 0 1rem;
@@ -143,6 +146,102 @@ input {
   background: #07110f;
   color: inherit;
   font: inherit;
+}
+
+textarea {
+  min-height: 6rem;
+  resize: vertical;
+}
+
+.operations-stack {
+  width: min(100%, 82rem);
+}
+
+.operations-shell,
+.operations-panel {
+  width: 100%;
+}
+
+.operations-shell h1 {
+  font-size: clamp(2.8rem, 7vw, 6rem);
+}
+
+.operations-inputs {
+  display: grid;
+  grid-template-columns: 1fr 1.5fr 1.5fr;
+  gap: 1rem;
+}
+
+.operations-inputs label {
+  margin-top: 1.5rem;
+}
+
+.operations-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 1rem;
+}
+
+.operations-grid article {
+  display: grid;
+  gap: 0.5rem;
+  padding: 1.5rem;
+  border: 1px solid #254d42;
+  border-radius: 1.25rem;
+  background: #091713;
+}
+
+.operations-grid span,
+.operations-grid small,
+.operations-panel > p,
+.warning-list {
+  color: #9cbeb2;
+}
+
+.operations-grid strong {
+  font-size: clamp(1.5rem, 3vw, 2.4rem);
+}
+
+.operations-panel {
+  padding: clamp(1.5rem, 4vw, 2.5rem);
+}
+
+.warning-list {
+  padding-left: 1.25rem;
+  line-height: 1.6;
+}
+
+.severity {
+  color: #ffcb6b;
+  font: 700 0.8rem / 1 monospace;
+}
+
+.incident-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+
+.incident-actions input {
+  width: min(18rem, 100%);
+  margin: 0;
+}
+
+.incident-form {
+  margin-top: 2rem;
+  padding-top: 2rem;
+  border-top: 1px solid #254d42;
+}
+
+.incident-form h3 {
+  margin: 0;
+}
+
+.incident-fields {
+  display: grid;
+  grid-template-columns: 1fr 2fr;
+  gap: 1rem;
 }
 
 button {
@@ -209,6 +308,18 @@ code {
 
   .feature-grid {
     grid-template-columns: 1fr;
+  }
+
+  .operations-inputs,
+  .operations-grid,
+  .incident-fields {
+    grid-template-columns: 1fr;
+  }
+
+  .incident-actions {
+    width: 100%;
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .section-heading,
