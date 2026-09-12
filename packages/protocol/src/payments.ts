@@ -373,6 +373,17 @@ export function encodePaymentIntent(intent: PaymentIntent): Hex {
   return encodeAbiParameters([{ type: "tuple", components: paymentIntentFields }], [intent]);
 }
 
+export function decodePaymentIntent(encoded: Hex): PaymentIntent {
+  let intent: PaymentIntent;
+  try {
+    [intent] = decodeAbiParameters([{ type: "tuple", components: paymentIntentFields }], encoded);
+  } catch {
+    throw new Error("Invalid payment intent encoding");
+  }
+  validatePaymentIntent(intent);
+  return intent;
+}
+
 export function refundIntentStructHash(intent: RefundIntent): Hex {
   validateRefundIntent(intent);
   return keccak256(
@@ -421,6 +432,17 @@ export function refundIntentDigest(intent: RefundIntent): Hex {
 export function encodeRefundIntent(intent: RefundIntent): Hex {
   validateRefundIntent(intent);
   return encodeAbiParameters([{ type: "tuple", components: refundIntentFields }], [intent]);
+}
+
+export function decodeRefundIntent(encoded: Hex): RefundIntent {
+  let intent: RefundIntent;
+  try {
+    [intent] = decodeAbiParameters([{ type: "tuple", components: refundIntentFields }], encoded);
+  } catch {
+    throw new Error("Invalid refund intent encoding");
+  }
+  validateRefundIntent(intent);
+  return intent;
 }
 
 export function reserveChannelTermsHash(input: {

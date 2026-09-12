@@ -1,6 +1,8 @@
 import { decodeAbiParameters, keccak256, stringToHex } from "viem";
 import { describe, expect, it } from "vitest";
 import {
+  decodePaymentIntent,
+  decodeRefundIntent,
   encodeOfflineVoucher,
   encodePaymentIntent,
   encodeRefundIntent,
@@ -129,6 +131,7 @@ describe("payment intent", () => {
       encodePaymentIntent(intent),
     );
     expect(decoded).toEqual(intent);
+    expect(decodePaymentIntent(encodePaymentIntent(intent))).toEqual(intent);
   });
 
   it("has a stable canonical struct hash", () => {
@@ -173,6 +176,7 @@ describe("refund intent", () => {
       encodeRefundIntent(refundIntent),
     );
     expect(decoded).toEqual(refundIntent);
+    expect(decodeRefundIntent(encodeRefundIntent(refundIntent))).toEqual(refundIntent);
   });
 
   it("has a stable canonical struct hash", () => {
