@@ -9,12 +9,14 @@
     "dev": "tsx watch src/server.ts",
     "migrate": "tsx src/migrate.ts",
     "start": "node dist/server.js",
+    "start:financial-worker": "node dist/financial-worker-server.js",
     "test": "vitest run"
   },
   "dependencies": {
     "@fastify/cors": "11.3.0",
     "@fastify/rate-limit": "11.2.0",
     "@openbalance/api": "workspace:*",
+    "@openbalance/protocol": "workspace:*",
     "fastify": "5.12.3",
     "pg": "8.23.0",
     "viem": "2.56.3",
