@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { loadRelayerEnvironment } from "../src/config.js";
+import { loadRelayerDatabaseConfig, loadRelayerEnvironment } from "../src/config.js";
 
 it("requires an explicit and complete relayer configuration", () => {
   expect(() => loadRelayerEnvironment({})).toThrow();
@@ -17,4 +17,11 @@ it("requires an explicit and complete relayer configuration", () => {
       SPONSOR_MAX_COST_WEI: "100000000000000000",
     }),
   ).not.toThrow();
+});
+
+it("keeps database migration configuration independent from runtime secrets", () => {
+  expect(loadRelayerDatabaseConfig({ DATABASE_URL: "postgresql://localhost/openbalance" })).toEqual(
+    { databaseUrl: "postgresql://localhost/openbalance" },
+  );
+  expect(() => loadRelayerDatabaseConfig({})).toThrow();
 });

@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 const positiveInteger = z.string().regex(/^[1-9][0-9]*$/);
+const databaseSchema = z.object({ DATABASE_URL: z.string().min(1) }).passthrough();
 const schema = z
   .object({
     HOST: z.string().min(1).default("127.0.0.1"),
@@ -20,4 +21,8 @@ const schema = z
 
 export function loadRelayerEnvironment(environment: NodeJS.ProcessEnv) {
   return schema.parse(environment);
+}
+
+export function loadRelayerDatabaseConfig(environment: NodeJS.ProcessEnv) {
+  return { databaseUrl: databaseSchema.parse(environment).DATABASE_URL };
 }
