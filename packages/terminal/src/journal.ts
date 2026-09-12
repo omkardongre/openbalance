@@ -11,6 +11,7 @@ import {
   validateVoucherReceipt,
 } from "@openbalance/protocol";
 import { getAddress, type Hex, recoverAddress, sha256, stringToHex } from "viem";
+import type { TerminalClock } from "./clock.js";
 import {
   type AttendeeVoucherResponse,
   paymentRequestHash,
@@ -284,6 +285,22 @@ export class TerminalJournal {
       this.#database.exec("ROLLBACK");
       throw error;
     }
+  }
+
+  /** Host-facing preparation using verified channel deadlines and bounded trusted time. */
+  prepareTimedSale(
+    input: Omit<Parameters<TerminalJournal["prepareSale"]>[0], "acceptedAt">,
+    clock: TerminalClock,
+    reading: { monotonicMs: number; bootId: string },
+  ): TerminalSale {
+    const snapshot = this.#snapshot(input.channelId.toLowerCase());
+    const acceptedAt = clock.authorizeSale({
+      ...reading,
+      acceptFrom: snapshot.config.acceptFrom,
+      acceptUntil: snapshot.config.acceptUntil,
+      expiresAt: input.expiresAt,
+    });
+    return this.prepareSale({ ...input, acceptedAt }, acceptedAt * 1000);
   }
 
   prepareSale(

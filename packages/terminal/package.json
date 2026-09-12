@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@openbalance/protocol": "workspace:*",
+    "@openbalance/verifier": "workspace:*",
     "viem": "2.56.3"
   },
   "devDependencies": {

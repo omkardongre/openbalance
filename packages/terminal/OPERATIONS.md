@@ -3,7 +3,8 @@
 ## Startup
 
 1. Load encryption and signing keys from platform-protected storage.
-2. Open the journal and register finalized channel snapshots.
+2. Open the journal and install each new channel through `bootstrapFinalizedChannel`; reuse the
+   existing journal snapshot after restart rather than re-bootstrap an already-spent channel.
 3. Recover expired upload leases before starting the upload loop.
 4. Refuse offline acceptance if trusted time or channel provenance cannot be established.
 
@@ -29,4 +30,3 @@ Retain channel snapshot provenance, receipt identifiers, voucher digests, upload
 acknowledgements, transaction hashes, and finalized settlement observations according to the event
 operator's retention policy. Logs must contain identifiers and state transitions, not encrypted
 payloads, signatures, keys, or personal data.
-

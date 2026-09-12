@@ -177,6 +177,9 @@ importers:
       '@openbalance/protocol':
         specifier: workspace:*
         version: link:../protocol
+      '@openbalance/verifier':
+        specifier: workspace:*
+        version: link:../verifier
       viem:
         specifier: 2.56.3
         version: 2.56.3(typescript@7.0.2)(zod@4.6.1)
