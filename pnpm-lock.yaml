@@ -298,6 +298,9 @@ importers:
       '@openbalance/api':
         specifier: workspace:*
         version: link:../api
+      '@openbalance/protocol':
+        specifier: workspace:*
+        version: link:../../packages/protocol
       fastify:
         specifier: 5.12.3
         version: 5.12.3

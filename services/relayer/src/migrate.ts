@@ -3,15 +3,10 @@ import { readFile } from "node:fs/promises";
 import { Pool } from "pg";
 import { loadRelayerDatabaseConfig } from "./config.js";
 
-const migrationName = "001_financial_operations";
+const migrationNames = ["001_financial_operations", "002_vendor_treasury_credentials"] as const;
 
 async function migrate() {
   const config = loadRelayerDatabaseConfig(process.env);
-  const sql = await readFile(
-    new URL("../migrations/001_financial_operations.sql", import.meta.url),
-    "utf8",
-  );
-  const checksum = createHash("sha256").update(sql).digest("hex");
   const pool = new Pool({
     connectionString: config.databaseUrl,
     max: 1,
@@ -28,19 +23,27 @@ async function migrate() {
          applied_at timestamptz NOT NULL DEFAULT clock_timestamp()
        )`,
     );
-    const existing = await client.query(
-      "SELECT checksum FROM relayer_schema_migrations WHERE name=$1 FOR UPDATE",
-      [migrationName],
-    );
-    if (existing.rows[0]) {
-      if (existing.rows[0].checksum !== checksum)
-        throw new Error("Applied relayer migration checksum does not match source");
-    } else {
-      await client.query(sql);
-      await client.query("INSERT INTO relayer_schema_migrations (name,checksum) VALUES ($1,$2)", [
-        migrationName,
-        checksum,
-      ]);
+    for (const migrationName of migrationNames) {
+      const sql = await readFile(
+        new URL(`../migrations/${migrationName}.sql`, import.meta.url),
+        "utf8",
+      );
+      const checksum = createHash("sha256").update(sql).digest("hex");
+      const existing = await client.query(
+        "SELECT checksum FROM relayer_schema_migrations WHERE name=$1 FOR UPDATE",
+        [migrationName],
+      );
+      if (existing.rows[0]) {
+        if (existing.rows[0].checksum !== checksum)
+          throw new Error("Applied relayer migration checksum does not match source");
+      } else {
+        const executable = sql.replace(/^\s*BEGIN;\s*/i, "").replace(/\s*COMMIT;\s*$/i, "");
+        await client.query(executable);
+        await client.query("INSERT INTO relayer_schema_migrations (name,checksum) VALUES ($1,$2)", [
+          migrationName,
+          checksum,
+        ]);
+      }
     }
     await client.query("COMMIT");
   } catch (error) {

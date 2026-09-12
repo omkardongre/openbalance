@@ -1,10 +1,18 @@
 import { readFile } from "node:fs/promises";
+import { AccountAccessService } from "@openbalance/api/account-access";
 import { DeploymentChain } from "@openbalance/api/deployment-chain";
 import { DeploymentService } from "@openbalance/api/deployments";
 import { DeploymentSponsorshipService, loadSponsorAccount } from "@openbalance/api/sponsorship";
 import { Pool } from "pg";
 import { buildRelayerApp } from "./app.js";
+import { AttendeeFinancialCommandService } from "./attendee-commands.js";
+import { AttendeeReclaimService } from "./attendee-reclaims.js";
 import { loadRelayerEnvironment } from "./config.js";
+import { loadFinancialEventManifest } from "./financial-manifest.js";
+import { ViemFinancialManifestVerifier } from "./financial-manifest-chain.js";
+import { FinancialOperationJournal } from "./financial-operations.js";
+import { VendorFinancialCommandService } from "./vendor-commands.js";
+import { VendorTreasuryAccessService } from "./vendor-treasury-access.js";
 
 const environment = loadRelayerEnvironment(process.env);
 const pool = new Pool({
@@ -32,7 +40,40 @@ const sponsorship = new DeploymentSponsorshipService(
   },
 );
 await sponsorship.reconcilePending();
-const app = await buildRelayerApp(sponsorship, environment.WEBAUTHN_ORIGIN);
+let financial:
+  | {
+      access: AccountAccessService;
+      commands: AttendeeFinancialCommandService;
+      reclaims: AttendeeReclaimService;
+      treasuryAccess: VendorTreasuryAccessService;
+      treasuryCommands: VendorFinancialCommandService;
+    }
+  | undefined;
+if (environment.FINANCIAL_EVENT_MANIFEST_PATH) {
+  const manifest = await loadFinancialEventManifest(environment.FINANCIAL_EVENT_MANIFEST_PATH);
+  await new ViemFinancialManifestVerifier(environment.ACCOUNT_RPC_URL).assert(manifest);
+  const journal = new FinancialOperationJournal(pool);
+  await journal.assertReady();
+  const treasuryAccess = new VendorTreasuryAccessService(pool);
+  await treasuryAccess.assertReady();
+  financial = {
+    access: new AccountAccessService(pool, policy),
+    commands: new AttendeeFinancialCommandService({
+      journal,
+      chainId: BigInt(manifest.chainId),
+      events: manifest.events,
+      maximumLifetimeSeconds: BigInt(environment.FINANCIAL_COMMAND_MAX_LIFETIME_SECONDS),
+    }),
+    reclaims: new AttendeeReclaimService({ pool, journal, manifest }),
+    treasuryAccess,
+    treasuryCommands: new VendorFinancialCommandService({
+      journal,
+      manifest,
+      maximumLifetimeSeconds: BigInt(environment.FINANCIAL_COMMAND_MAX_LIFETIME_SECONDS),
+    }),
+  };
+}
+const app = await buildRelayerApp(sponsorship, environment.WEBAUTHN_ORIGIN, financial);
 app.addHook("onClose", async () => pool.end());
 for (const signal of ["SIGTERM", "SIGINT"] as const)
   process.once(signal, () => {

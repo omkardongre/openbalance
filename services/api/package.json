@@ -4,6 +4,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./account-access": {
+      "types": "./src/account-access.ts",
+      "default": "./dist/account-access.js"
+    },
     "./deployment-chain": {
       "types": "./src/deployment-chain.ts",
       "default": "./dist/deployment-chain.js"
