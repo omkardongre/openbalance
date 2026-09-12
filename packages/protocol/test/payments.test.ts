@@ -21,6 +21,8 @@ import {
   reserveChannelFields,
   reserveChannelTermsHash,
   validateOfflineVoucher,
+  validatePaymentIntent,
+  validateRefundIntent,
   validateReserveChannelConfig,
 } from "../src/payments.js";
 
@@ -134,6 +136,15 @@ describe("payment intent", () => {
       "0x43dafb74a49c5b8df4499917fd6b9b96af7ce26e59c53bd4eb1d0e8bad56928c",
     );
   });
+
+  it("rejects malformed economic and authority boundaries before encoding", () => {
+    expect(() => validatePaymentIntent({ ...intent, grossUnits: 0n })).toThrow(
+      "Invalid payment intent",
+    );
+    expect(() =>
+      encodePaymentIntent({ ...intent, organizerFeeBps: 9_999, platformFeeBps: 2 }),
+    ).toThrow("Invalid payment intent");
+  });
 });
 
 describe("refund intent", () => {
@@ -143,7 +154,10 @@ describe("refund intent", () => {
       { refundId: intent.paymentId },
       { paymentId: refundIntent.refundId },
       { payerAccount: refundIntent.fundingSource },
-      { refundUnits: refundIntent.refundUnits + 1n },
+      {
+        refundUnits: refundIntent.refundUnits + 1n,
+        cumulativeRefundUnits: refundIntent.cumulativeRefundUnits + 1n,
+      },
       { cumulativeRefundUnits: refundIntent.cumulativeRefundUnits + 1n },
       { vendorCreditUnits: refundIntent.vendorCreditUnits + 1n },
       { fundingSource: refundIntent.payerAccount },
@@ -165,6 +179,21 @@ describe("refund intent", () => {
     expect(refundIntentStructHash(refundIntent)).toBe(
       "0x22dbd5a9e0c5faa0c0357665dbdb86f4e03daecf5499a16ed554f4c95cd1cc88",
     );
+  });
+
+  it("rejects unfunded ordering and invalid refund scope before encoding", () => {
+    expect(() =>
+      validateRefundIntent({ ...refundIntent, vendorCreditUnits: refundIntent.refundUnits + 1n }),
+    ).toThrow("Invalid refund intent");
+    expect(() =>
+      encodeRefundIntent({ ...refundIntent, fundingSource: intent.router }),
+    ).not.toThrow();
+    expect(() =>
+      encodeRefundIntent({
+        ...refundIntent,
+        fundingSource: "0x0000000000000000000000000000000000000000",
+      }),
+    ).toThrow("Invalid refund intent");
   });
 });
 

@@ -93,10 +93,81 @@ const uint48Limit = 1n << 48n;
 const uint32Limit = 1n << 32n;
 const zeroHash = `0x${"00".repeat(32)}`;
 const zeroAddress = "0x0000000000000000000000000000000000000000";
+const bytes32Pattern = /^0x[0-9a-fA-F]{64}$/;
+
+function validBytes32(value: unknown): value is Hex {
+  return (
+    typeof value === "string" && bytes32Pattern.test(value) && value.toLowerCase() !== zeroHash
+  );
+}
+
+function validUint256(value: unknown, allowZero = false): value is bigint {
+  return typeof value === "bigint" && value >= (allowZero ? 0n : 1n) && value < 1n << 256n;
+}
 
 function validateUnsignedNumber(value: number, limit: bigint, field: string): void {
   if (!Number.isSafeInteger(value) || value < 0 || BigInt(value) >= limit)
     throw new Error(`Invalid ${field}`);
+}
+
+export function validatePaymentIntent(intent: PaymentIntent): void {
+  validateUnsignedNumber(intent.schemaVersion, uint32Limit, "schemaVersion");
+  validateUnsignedNumber(intent.organizerFeeBps, 10_001n, "organizerFeeBps");
+  validateUnsignedNumber(intent.platformFeeBps, 10_001n, "platformFeeBps");
+  validateUnsignedNumber(intent.validAfter, uint48Limit, "validAfter");
+  validateUnsignedNumber(intent.expiresAt, uint48Limit, "expiresAt");
+  if (
+    intent.schemaVersion !== 1 ||
+    !validUint256(intent.chainId) ||
+    !isAddress(intent.router) ||
+    intent.router.toLowerCase() === zeroAddress ||
+    !validBytes32(intent.eventId) ||
+    !validBytes32(intent.paymentId) ||
+    !isAddress(intent.payerAccount) ||
+    intent.payerAccount.toLowerCase() === zeroAddress ||
+    !validBytes32(intent.orderRefHash) ||
+    !validBytes32(intent.vendorId) ||
+    !validUint256(intent.vendorDestinationVersion) ||
+    !validBytes32(intent.terminalInstanceId) ||
+    !isAddress(intent.asset) ||
+    intent.asset.toLowerCase() === zeroAddress ||
+    !validUint256(intent.grossUnits) ||
+    intent.organizerFeeBps + intent.platformFeeBps > 10_000 ||
+    !validUint256(intent.configVersion) ||
+    !validBytes32(intent.receiptCommitment) ||
+    intent.validAfter >= intent.expiresAt ||
+    !validUint256(intent.terminalKeyVersion)
+  )
+    throw new Error("Invalid payment intent");
+}
+
+export function validateRefundIntent(intent: RefundIntent): void {
+  validateUnsignedNumber(intent.schemaVersion, uint32Limit, "schemaVersion");
+  validateUnsignedNumber(intent.validAfter, uint48Limit, "validAfter");
+  validateUnsignedNumber(intent.expiresAt, uint48Limit, "expiresAt");
+  if (
+    intent.schemaVersion !== 1 ||
+    !validUint256(intent.chainId) ||
+    !isAddress(intent.router) ||
+    intent.router.toLowerCase() === zeroAddress ||
+    !validBytes32(intent.eventId) ||
+    !validBytes32(intent.refundId) ||
+    !validBytes32(intent.paymentId) ||
+    !isAddress(intent.payerAccount) ||
+    intent.payerAccount.toLowerCase() === zeroAddress ||
+    !validBytes32(intent.vendorId) ||
+    !isAddress(intent.asset) ||
+    intent.asset.toLowerCase() === zeroAddress ||
+    !validUint256(intent.refundUnits) ||
+    !validUint256(intent.cumulativeRefundUnits) ||
+    intent.cumulativeRefundUnits < intent.refundUnits ||
+    !validUint256(intent.vendorCreditUnits, true) ||
+    intent.vendorCreditUnits > intent.refundUnits ||
+    !isAddress(intent.fundingSource) ||
+    intent.fundingSource.toLowerCase() === zeroAddress ||
+    intent.validAfter >= intent.expiresAt
+  )
+    throw new Error("Invalid refund intent");
 }
 
 export function validateReserveChannelConfig(config: ReserveChannelConfig): void {
@@ -249,6 +320,7 @@ const voucherType =
   "OfflineVoucher(uint32 protocolVersion,uint256 chainId,address vault,bytes32 channelId,uint32 sequence,bytes32 previousVoucherDigest,bytes32 paymentId,bytes32 orderRefHash,uint256 grossUnits,uint256 cumulativeGrossUnits,bytes32 receiptCommitment,uint48 acceptedAt,uint48 acceptUntil,uint48 submitUntil,uint256 configVersion)";
 
 export function paymentIntentStructHash(intent: PaymentIntent): Hex {
+  validatePaymentIntent(intent);
   return keccak256(
     encodeAbiParameters(
       [{ type: "bytes32" }, ...paymentIntentFields],
@@ -279,7 +351,8 @@ export function paymentIntentStructHash(intent: PaymentIntent): Hex {
 }
 
 export function paymentIntentDigest(intent: PaymentIntent): Hex {
-  if (intent.chainId <= 0n || intent.chainId > BigInt(Number.MAX_SAFE_INTEGER)) {
+  validatePaymentIntent(intent);
+  if (intent.chainId > BigInt(Number.MAX_SAFE_INTEGER)) {
     throw new Error("Invalid payment chain ID");
   }
   return hashTypedData({
@@ -296,10 +369,12 @@ export function paymentIntentDigest(intent: PaymentIntent): Hex {
 }
 
 export function encodePaymentIntent(intent: PaymentIntent): Hex {
+  validatePaymentIntent(intent);
   return encodeAbiParameters([{ type: "tuple", components: paymentIntentFields }], [intent]);
 }
 
 export function refundIntentStructHash(intent: RefundIntent): Hex {
+  validateRefundIntent(intent);
   return keccak256(
     encodeAbiParameters(
       [{ type: "bytes32" }, ...refundIntentFields],
@@ -326,7 +401,8 @@ export function refundIntentStructHash(intent: RefundIntent): Hex {
 }
 
 export function refundIntentDigest(intent: RefundIntent): Hex {
-  if (intent.chainId <= 0n || intent.chainId > BigInt(Number.MAX_SAFE_INTEGER)) {
+  validateRefundIntent(intent);
+  if (intent.chainId > BigInt(Number.MAX_SAFE_INTEGER)) {
     throw new Error("Invalid refund chain ID");
   }
   return hashTypedData({
@@ -343,6 +419,7 @@ export function refundIntentDigest(intent: RefundIntent): Hex {
 }
 
 export function encodeRefundIntent(intent: RefundIntent): Hex {
+  validateRefundIntent(intent);
   return encodeAbiParameters([{ type: "tuple", components: refundIntentFields }], [intent]);
 }
 
