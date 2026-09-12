@@ -5,7 +5,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "OpenBalance",
-  description: "A programmable shared balance for everyday groups.",
+  description: "Exact event payments with attendee-controlled outage reserves.",
 };
 
 export default function RootLayout({ children }: Readonly<{ children: ReactNode }>) {

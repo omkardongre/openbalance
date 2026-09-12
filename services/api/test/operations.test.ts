@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
 import type { Pool } from "pg";
+import { describe, expect, it } from "vitest";
 
 import { OperationalReadService } from "../src/operations.js";
 
@@ -39,18 +39,12 @@ describe("operational projection service", () => {
     const pool = { connect: async () => client } as unknown as Pool;
     const service = new OperationalReadService(pool);
 
-    const result = await service.payment(
-      `0x${"11".repeat(20)}`,
-      `0x${"22".repeat(32)}`,
-    );
+    const result = await service.payment(`0x${"11".repeat(20)}`, `0x${"22".repeat(32)}`);
 
     expect(result.status).toBe("PARTIALLY_REFUNDED");
     expect(result.refundedUnits).toBe("30");
     expect(result.proof.finalizedThroughBlock).toBe("96");
-    expect(queries[1]?.values).toEqual([
-      `0x${"22".repeat(32)}`,
-      `0x${"11".repeat(20)}`,
-    ]);
+    expect(queries[1]?.values).toEqual([`0x${"22".repeat(32)}`, `0x${"11".repeat(20)}`]);
     expect(queries.map(({ text }) => text)).toEqual([
       "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY",
       expect.stringContaining("WHERE p.payment_id=$1 AND p.payer=$2"),

@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { AccountAccessRejected, type AccountAccessService } from "../src/account-access.js";
 import { buildApp } from "../src/app.js";
 import type { EnrollmentService } from "../src/enrollment.js";
-import { ProjectionNotFound, type OperationalReadService } from "../src/operations.js";
+import { type OperationalReadService, ProjectionNotFound } from "../src/operations.js";
 
 const openApps: Awaited<ReturnType<typeof buildApp>>[] = [];
 
@@ -74,8 +74,9 @@ describe("authenticated projection reads", () => {
 
     expect(responses.map((response) => response.statusCode)).toEqual([200, 200, 200]);
     expect(calls.sort()).toEqual(["activity", "channel", "payment"]);
-    expect(responses.every((response) => response.headers["cache-control"] === "private, no-store"))
-      .toBe(true);
+    expect(
+      responses.every((response) => response.headers["cache-control"] === "private, no-store"),
+    ).toBe(true);
   });
 
   it("returns bounded errors without disclosing another account's projection", async () => {

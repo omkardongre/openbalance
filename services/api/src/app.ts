@@ -7,7 +7,7 @@ import { AccountAccessRejected, type AccountAccessService } from "./account-acce
 import { DeploymentMismatch } from "./deployment-chain.js";
 import type { DeploymentService } from "./deployments.js";
 import { EnrollmentRejected, type EnrollmentService } from "./enrollment.js";
-import { OperationalReadService, ProjectionNotFound } from "./operations.js";
+import { type OperationalReadService, ProjectionNotFound } from "./operations.js";
 
 export async function buildApp(
   enrollment?: EnrollmentService,
@@ -170,7 +170,10 @@ export async function buildApp(
             })
             .strict()
             .superRefine((value, context) => {
-              if (Boolean(value.beforeBlock === undefined) !== Boolean(value.beforeTransitionId === undefined))
+              if (
+                Boolean(value.beforeBlock === undefined) !==
+                Boolean(value.beforeTransitionId === undefined)
+              )
                 context.addIssue({ code: "custom", message: "Both cursor fields are required" });
             })
             .safeParse(request.query);

@@ -215,7 +215,12 @@ export class OperationalReadService {
        WHERE ($2::bigint IS NULL OR (o.block_number,o.transition_id) < ($2,$3))
        ORDER BY o.block_number DESC,o.transition_id DESC
        LIMIT $4`,
-      [lower(account), cursor?.blockNumber.toString() ?? null, cursor?.transitionId ?? null, limit + 1],
+      [
+        lower(account),
+        cursor?.blockNumber.toString() ?? null,
+        cursor?.transitionId ?? null,
+        limit + 1,
+      ],
     );
     const hasMore = result.rows.length > limit;
     const rows = result.rows.slice(0, limit);
@@ -232,7 +237,10 @@ export class OperationalReadService {
       })),
       nextCursor:
         hasMore && last
-          ? { blockNumber: last.block_number.toString(), transitionId: last.transition_id as string }
+          ? {
+              blockNumber: last.block_number.toString(),
+              transitionId: last.transition_id as string,
+            }
           : null,
     };
   }

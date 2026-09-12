@@ -11,6 +11,7 @@
 
 body {
   margin: 0;
+  background: radial-gradient(circle at 80% 0%, rgb(33 105 79 / 22%), transparent 32rem), #07110f;
 }
 
 main {
@@ -20,12 +21,25 @@ main {
   padding: 2rem;
 }
 
+.page-stack {
+  display: grid;
+  width: min(100%, 72rem);
+  gap: 1rem;
+}
+
 .shell {
   width: min(100%, 64rem);
   padding: clamp(2rem, 6vw, 5rem);
   border: 1px solid #254d42;
   border-radius: 2rem;
   background: linear-gradient(145deg, #0d211c, #091713);
+}
+
+.hero {
+  min-height: 34rem;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
 }
 
 .eyebrow {
@@ -52,6 +66,67 @@ h1 {
   line-height: 1.6;
 }
 
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-top: 1.5rem;
+}
+
+.primary-action,
+.secondary-action {
+  display: inline-flex;
+  min-height: 3rem;
+  align-items: center;
+  justify-content: center;
+  padding: 0.75rem 1.1rem;
+  border-radius: 999px;
+  font-weight: 750;
+  text-decoration: none;
+}
+
+.primary-action {
+  background: #6ef3bd;
+  color: #07110f;
+}
+
+.secondary-action {
+  border: 1px solid #397564;
+  color: #f3fff8;
+}
+
+.feature-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1rem;
+}
+
+.feature-grid article {
+  padding: 1.5rem;
+  border: 1px solid #254d42;
+  border-radius: 1.25rem;
+  background: #091713;
+}
+
+.feature-grid h2,
+.activity h2 {
+  margin: 0;
+  font-size: 1.25rem;
+}
+
+.feature-grid p:not(.feature-number),
+.section-heading > p,
+.activity-list span,
+.empty-state {
+  color: #9cbeb2;
+  line-height: 1.55;
+}
+
+.feature-number {
+  color: #6ef3bd;
+  font: 700 0.8rem / 1 monospace;
+}
+
 label {
   display: block;
   margin-top: 2rem;
@@ -72,4 +147,77 @@ input {
 
 button {
   margin: 0.5rem 0.5rem 0.5rem 0;
+}
+
+.actions button {
+  margin: 0;
+}
+
+.account-shell {
+  align-self: start;
+}
+
+.activity {
+  margin-top: 2.5rem;
+  padding-top: 2rem;
+  border-top: 1px solid #254d42;
+}
+
+.section-heading,
+.activity-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.section-heading .eyebrow {
+  margin-bottom: 0.5rem;
+}
+
+.activity-list {
+  display: grid;
+  gap: 0.65rem;
+  padding: 0;
+  list-style: none;
+}
+
+.activity-list li {
+  padding: 1rem;
+  border: 1px solid #254d42;
+  border-radius: 0.85rem;
+  background: #07110f;
+}
+
+.activity-list li > div {
+  display: grid;
+  gap: 0.3rem;
+}
+
+.proof-ref {
+  justify-items: end;
+}
+
+code {
+  color: #6ef3bd;
+}
+
+@media (max-width: 700px) {
+  main {
+    padding: 1rem;
+  }
+
+  .feature-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .section-heading,
+  .activity-list li {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .proof-ref {
+    justify-items: start;
+  }
 }
