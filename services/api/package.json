@@ -24,6 +24,14 @@
       "types": "./src/operations.ts",
       "default": "./dist/operations.js"
     },
+    "./operations-access": {
+      "types": "./src/operations-access.ts",
+      "default": "./dist/operations-access.js"
+    },
+    "./operations-reporting": {
+      "types": "./src/operations-reporting.ts",
+      "default": "./dist/operations-reporting.js"
+    },
     "./sponsorship": {
       "types": "./src/sponsorship.ts",
       "default": "./dist/sponsorship.js"
@@ -33,6 +41,8 @@
     "build": "tsc -p tsconfig.build.json",
     "check": "tsc --noEmit",
     "dev": "tsx watch src/server.ts",
+    "migrate": "tsx src/migrate.ts",
+    "provision:operations-access": "tsx src/provision-operations-access.ts",
     "start": "node dist/server.js",
     "test": "vitest run"
   },

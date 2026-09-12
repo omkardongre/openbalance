@@ -7,7 +7,25 @@ import { AccountAccessRejected, type AccountAccessService } from "./account-acce
 import { DeploymentMismatch } from "./deployment-chain.js";
 import type { DeploymentService } from "./deployments.js";
 import { EnrollmentRejected, type EnrollmentService } from "./enrollment.js";
+import {
+  IncidentConflict,
+  IncidentNotFound,
+  IncidentRejected,
+  type IncidentService,
+} from "./incidents.js";
 import { type OperationalReadService, ProjectionNotFound } from "./operations.js";
+import {
+  OperationsAccessRejected,
+  type OperationsAccessService,
+  OperationsScopeRejected,
+} from "./operations-access.js";
+import type { OperationsReportingService } from "./operations-reporting.js";
+
+export type OperationsControl = {
+  access: OperationsAccessService;
+  reporting: OperationsReportingService;
+  incidents: IncidentService;
+};
 
 export async function buildApp(
   enrollment?: EnrollmentService,
@@ -15,6 +33,7 @@ export async function buildApp(
   deployment?: DeploymentService,
   access?: AccountAccessService,
   operations?: OperationalReadService,
+  control?: OperationsControl,
 ) {
   const app = Fastify({ logger: false, bodyLimit: 32_768 });
 
@@ -233,6 +252,182 @@ export async function buildApp(
         }
       });
     }
+  }
+
+  if (control) {
+    const bytes32 = z.string().regex(/^0x[0-9a-fA-F]{64}$/);
+    const operationsError = (reply: FastifyReply, error: unknown) => {
+      if (error instanceof OperationsAccessRejected)
+        return reply.code(401).send({ error: "operations_session_invalid", retryable: false });
+      if (error instanceof OperationsScopeRejected)
+        return reply.code(403).send({ error: "operations_scope_denied", retryable: false });
+      if (error instanceof ProjectionNotFound || error instanceof IncidentNotFound)
+        return reply.code(404).send({ error: "operational_record_not_found", retryable: false });
+      if (error instanceof IncidentConflict)
+        return reply.code(409).send({ error: "idempotency_conflict", retryable: false });
+      if (error instanceof IncidentRejected || error instanceof RangeError)
+        return reply.code(422).send({ error: "operational_request_rejected", retryable: false });
+      throw error;
+    };
+
+    app.get("/v1/operations/me", async (request, reply) => {
+      reply.header("Cache-Control", "private, no-store");
+      try {
+        const identity = await control.access.authenticate(request.headers.authorization);
+        return {
+          role: identity.role,
+          eventId: identity.eventId,
+          vendorId: identity.vendorId,
+        };
+      } catch (error) {
+        return operationsError(reply, error);
+      }
+    });
+
+    app.get("/v1/events/:eventId/statements", async (request, reply) => {
+      reply.header("Cache-Control", "private, no-store");
+      const parsed = z.object({ eventId: bytes32 }).strict().safeParse(request.params);
+      const query = z
+        .object({
+          vendorId: bytes32,
+          fromBlock: z.coerce.bigint().nonnegative().optional(),
+          toBlock: z.coerce.bigint().nonnegative().optional(),
+          limit: z.coerce.number().int().min(1).max(100).default(50),
+          afterBlock: z.coerce.bigint().nonnegative().optional(),
+          afterPaymentId: bytes32.optional(),
+        })
+        .strict()
+        .superRefine((value, context) => {
+          if (
+            Boolean(value.afterBlock === undefined) !== Boolean(value.afterPaymentId === undefined)
+          )
+            context.addIssue({
+              code: "custom",
+              message: "Both statement cursor fields are required",
+            });
+        })
+        .safeParse(request.query);
+      if (!parsed.success || !query.success)
+        return reply.code(400).send({ error: "invalid_statement_request", retryable: false });
+      try {
+        const identity = await control.access.authenticate(request.headers.authorization);
+        const eventId = parsed.data.eventId as `0x${string}`;
+        const vendorId = query.data.vendorId as `0x${string}`;
+        control.access.assertRole(identity, ["VENDOR", "ORGANIZER", "FINANCE"]);
+        control.access.assertEvent(identity, eventId);
+        control.access.assertVendor(identity, vendorId);
+        const range: {
+          fromBlock?: bigint;
+          toBlock?: bigint;
+          limit: number;
+          afterBlock?: bigint;
+          afterPaymentId?: `0x${string}`;
+        } = { limit: query.data.limit };
+        if (query.data.fromBlock !== undefined) range.fromBlock = query.data.fromBlock;
+        if (query.data.toBlock !== undefined) range.toBlock = query.data.toBlock;
+        if (query.data.afterBlock !== undefined) range.afterBlock = query.data.afterBlock;
+        if (query.data.afterPaymentId !== undefined)
+          range.afterPaymentId = query.data.afterPaymentId as `0x${string}`;
+        return await control.reporting.statement(identity, vendorId, range);
+      } catch (error) {
+        return operationsError(reply, error);
+      }
+    });
+
+    app.get("/v1/events/:eventId/reconciliation", async (request, reply) => {
+      reply.header("Cache-Control", "private, no-store");
+      const parsed = z.object({ eventId: bytes32 }).strict().safeParse(request.params);
+      if (!parsed.success)
+        return reply.code(400).send({ error: "invalid_reconciliation_request", retryable: false });
+      try {
+        const identity = await control.access.authenticate(request.headers.authorization);
+        control.access.assertRole(identity, ["ORGANIZER", "FINANCE"]);
+        control.access.assertEvent(identity, parsed.data.eventId as `0x${string}`);
+        return await control.reporting.reconciliation(identity);
+      } catch (error) {
+        return operationsError(reply, error);
+      }
+    });
+
+    app.post("/v1/incidents", async (request, reply) => {
+      const parsed = z
+        .object({
+          eventId: bytes32,
+          affectedVendorId: bytes32.nullable().default(null),
+          affectedTerminalId: bytes32.nullable().default(null),
+          severity: z.enum(["LOW", "MEDIUM", "HIGH", "CRITICAL"]),
+          summary: z.string().min(5).max(500),
+          mitigation: z.string().min(1).max(2_000),
+          nextAction: z.string().min(1).max(1_000),
+          evidenceRefs: z.array(z.string().min(1).max(500)).max(20).default([]),
+          owner: z.string().min(3).max(128),
+        })
+        .strict()
+        .safeParse(request.body);
+      const idempotencyKey = request.headers["idempotency-key"];
+      if (!parsed.success || typeof idempotencyKey !== "string")
+        return reply.code(400).send({ error: "invalid_incident_request", retryable: false });
+      try {
+        const identity = await control.access.authenticate(request.headers.authorization);
+        control.access.assertEvent(identity, parsed.data.eventId as `0x${string}`);
+        const {
+          eventId: _eventId,
+          affectedVendorId,
+          affectedTerminalId,
+          ...incidentInput
+        } = parsed.data;
+        const incident = await control.incidents.open(identity, {
+          ...incidentInput,
+          affectedVendorId: affectedVendorId as `0x${string}` | null,
+          affectedTerminalId: affectedTerminalId as `0x${string}` | null,
+          idempotencyKey,
+        });
+        return reply.code(202).send(incident);
+      } catch (error) {
+        return operationsError(reply, error);
+      }
+    });
+
+    app.get("/v1/events/:eventId/incidents", async (request, reply) => {
+      reply.header("Cache-Control", "private, no-store");
+      const params = z.object({ eventId: bytes32 }).strict().safeParse(request.params);
+      const query = z
+        .object({
+          status: z.enum(["OPEN", "RESOLVED"]).default("OPEN"),
+          limit: z.coerce.number().int().min(1).max(100).default(25),
+        })
+        .strict()
+        .safeParse(request.query);
+      if (!params.success || !query.success)
+        return reply.code(400).send({ error: "invalid_incident_query", retryable: false });
+      try {
+        const identity = await control.access.authenticate(request.headers.authorization);
+        control.access.assertEvent(identity, params.data.eventId as `0x${string}`);
+        return await control.incidents.list(identity, query.data.status, query.data.limit);
+      } catch (error) {
+        return operationsError(reply, error);
+      }
+    });
+
+    app.post("/v1/incidents/:incidentId/resolutions", async (request, reply) => {
+      const params = z.object({ incidentId: z.string().uuid() }).strict().safeParse(request.params);
+      const body = z
+        .object({ resolutionProof: z.string().min(1).max(2_000) })
+        .strict()
+        .safeParse(request.body);
+      const idempotencyKey = request.headers["idempotency-key"];
+      if (!params.success || !body.success || typeof idempotencyKey !== "string")
+        return reply.code(400).send({ error: "invalid_resolution_request", retryable: false });
+      try {
+        const identity = await control.access.authenticate(request.headers.authorization);
+        return await control.incidents.resolve(identity, params.data.incidentId, {
+          ...body.data,
+          idempotencyKey,
+        });
+      } catch (error) {
+        return operationsError(reply, error);
+      }
+    });
   }
 
   app.get("/health", { config: { rateLimit: false } }, async () => ({
