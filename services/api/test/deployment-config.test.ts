@@ -12,4 +12,13 @@ it("requires complete deployment configuration and limits manifests to supported
   ).toThrow();
   expect(() => accountManifestSchema.parse({ version: 1, chainId: 143 })).toThrow();
   expect(loadEnvironment({}).ACCOUNT_RPC_URL).toBeUndefined();
+  expect(() => loadEnvironment({ PROJECTION_READS_ENABLED: "true" })).toThrow();
+  expect(
+    loadEnvironment({
+      DATABASE_URL: "postgresql://localhost/openbalance",
+      WEBAUTHN_RP_ID: "app.example",
+      WEBAUTHN_ORIGIN: "https://app.example",
+      PROJECTION_READS_ENABLED: "true",
+    }).PROJECTION_READS_ENABLED,
+  ).toBe(true);
 });

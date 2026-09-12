@@ -1,18 +1,20 @@
 import cors from "@fastify/cors";
 import rateLimit from "@fastify/rate-limit";
 import type { AuthenticationResponseJSON, RegistrationResponseJSON } from "@simplewebauthn/server";
-import Fastify from "fastify";
+import Fastify, { type FastifyReply } from "fastify";
 import { z } from "zod";
 import { AccountAccessRejected, type AccountAccessService } from "./account-access.js";
 import { DeploymentMismatch } from "./deployment-chain.js";
 import type { DeploymentService } from "./deployments.js";
 import { EnrollmentRejected, type EnrollmentService } from "./enrollment.js";
+import { OperationalReadService, ProjectionNotFound } from "./operations.js";
 
 export async function buildApp(
   enrollment?: EnrollmentService,
   origin?: string,
   deployment?: DeploymentService,
   access?: AccountAccessService,
+  operations?: OperationalReadService,
 ) {
   const app = Fastify({ logger: false, bodyLimit: 32_768 });
 
@@ -115,6 +117,80 @@ export async function buildApp(
           throw error;
         }
       });
+
+      if (operations) {
+        const identifierSchema = z.object({
+          id: z.string().regex(/^0x[0-9a-fA-F]{64}$/),
+        });
+        const projectionError = (reply: FastifyReply, error: unknown) => {
+          if (error instanceof AccountAccessRejected)
+            return reply.code(401).send({ error: "session_invalid", retryable: false });
+          if (error instanceof ProjectionNotFound)
+            return reply.code(404).send({
+              error: "projection_not_found",
+              action: "Check the identifier and finalized status before retrying.",
+              retryable: false,
+            });
+          throw error;
+        };
+
+        app.get("/v1/payment-intents/:id", async (request, reply) => {
+          reply.header("Cache-Control", "private, no-store");
+          const parsed = identifierSchema.safeParse(request.params);
+          if (!parsed.success)
+            return reply.code(400).send({ error: "invalid_payment_id", retryable: false });
+          try {
+            const identity = await access.authenticate(request.headers.authorization);
+            return await operations.payment(identity.account, parsed.data.id as `0x${string}`);
+          } catch (error) {
+            return projectionError(reply, error);
+          }
+        });
+
+        app.get("/v1/reserve-channels/:id", async (request, reply) => {
+          reply.header("Cache-Control", "private, no-store");
+          const parsed = identifierSchema.safeParse(request.params);
+          if (!parsed.success)
+            return reply.code(400).send({ error: "invalid_channel_id", retryable: false });
+          try {
+            const identity = await access.authenticate(request.headers.authorization);
+            return await operations.channel(identity.account, parsed.data.id as `0x${string}`);
+          } catch (error) {
+            return projectionError(reply, error);
+          }
+        });
+
+        app.get("/v1/accounts/me/activity", async (request, reply) => {
+          reply.header("Cache-Control", "private, no-store");
+          const parsed = z
+            .object({
+              limit: z.coerce.number().int().min(1).max(100).default(25),
+              beforeBlock: z.coerce.bigint().nonnegative().optional(),
+              beforeTransitionId: z.string().min(1).max(256).optional(),
+            })
+            .strict()
+            .superRefine((value, context) => {
+              if (Boolean(value.beforeBlock === undefined) !== Boolean(value.beforeTransitionId === undefined))
+                context.addIssue({ code: "custom", message: "Both cursor fields are required" });
+            })
+            .safeParse(request.query);
+          if (!parsed.success)
+            return reply.code(400).send({ error: "invalid_activity_query", retryable: false });
+          try {
+            const identity = await access.authenticate(request.headers.authorization);
+            const cursor =
+              parsed.data.beforeBlock === undefined || !parsed.data.beforeTransitionId
+                ? undefined
+                : {
+                    blockNumber: parsed.data.beforeBlock,
+                    transitionId: parsed.data.beforeTransitionId,
+                  };
+            return await operations.activity(identity.account, parsed.data.limit, cursor);
+          } catch (error) {
+            return projectionError(reply, error);
+          }
+        });
+      }
     }
     if (deployment) {
       for (const operation of ["prepare", "confirm"] as const) {
