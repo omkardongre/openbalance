@@ -537,6 +537,8 @@ export const offlineVoucherTuple =
   "(uint32 protocolVersion,uint256 chainId,address vault,bytes32 channelId,uint32 sequence,bytes32 previousVoucherDigest,bytes32 paymentId,bytes32 orderRefHash,uint256 grossUnits,uint256 cumulativeGrossUnits,bytes32 receiptCommitment,uint48 acceptedAt,uint48 acceptUntil,uint48 submitUntil,uint256 configVersion)";
 
 export const exactPayRouterAbi = parseAbi([
+  "function registry() view returns (address)",
+  "function asset() view returns (address)",
   "function eventId() view returns (bytes32)",
   `function quote(bytes encodedIntent) view returns (bytes32 digest,address token,uint256 gross,address payer)`,
   `function intentDigest(${intentTuple} intent) view returns (bytes32)`,
@@ -550,6 +552,15 @@ export const exactPayRouterAbi = parseAbi([
   "event PaymentCommitted(bytes32 indexed paymentId,address indexed payer,bytes32 indexed vendorId,uint256 configVersion,uint256 gross,uint256 organizerFee,uint256 platformFee,bytes32 receiptCommitment)",
   "event PaymentCancelled(bytes32 indexed paymentId,address indexed payer)",
   "event RefundCommitted(bytes32 indexed refundId,bytes32 indexed paymentId,address indexed payer,uint256 amount,uint256 vendorCreditUsed)",
+]);
+
+export const eventRegistryAbi = parseAbi([
+  "function eventId() view returns (bytes32)",
+  "function asset() view returns (address)",
+  "function onlinePaused() view returns (bool)",
+  "function configs(uint256 version) view returns (uint48 validAfter,uint48 validUntil,uint16 organizerFeeBps,uint16 platformFeeBps,uint48 maximumAcceptanceDuration,uint48 maximumSubmissionDelay,address organizerDestination,address platformDestination,bytes32 termsHash,bool enabled)",
+  "function destinations(bytes32 vendorId,uint256 version) view returns (address account,bool enabled)",
+  "function terminals(bytes32 terminalId,uint256 version) view returns (bytes32 vendorId,address signer,uint48 validAfter,uint48 validUntil,bool enabled)",
 ]);
 
 export const settlementLedgerAbi = parseAbi([
