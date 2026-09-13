@@ -2,6 +2,9 @@ import { readFile } from "node:fs/promises";
 import { Pool } from "pg";
 import { AccountAccessService } from "./account-access.js";
 import { buildApp } from "./app.js";
+import { CheckoutService } from "./checkout.js";
+import { ViemCheckoutPolicyVerifier } from "./checkout-chain.js";
+import { loadCheckoutManifest } from "./checkout-manifest.js";
 import { loadEnvironment } from "./config.js";
 import { DeploymentChain } from "./deployment-chain.js";
 import { DeploymentService } from "./deployments.js";
@@ -51,6 +54,22 @@ if (pool && environment.PROJECTION_READS_ENABLED) {
     incidents.assertReady(),
   ]);
   control = { access: operationsAccess, reporting, incidents };
+  if (environment.CHECKOUT_MANIFEST_PATH && environment.CHECKOUT_CAPABILITY_KEY_PATH) {
+    const [checkoutManifest, capabilityKey] = await Promise.all([
+      loadCheckoutManifest(environment.CHECKOUT_MANIFEST_PATH),
+      readFile(environment.CHECKOUT_CAPABILITY_KEY_PATH),
+    ]);
+    if (capabilityKey.length < 32 || capabilityKey.length > 64)
+      throw new Error("Checkout capability key must contain 32 to 64 raw bytes");
+    const checkout = new CheckoutService(
+      pool,
+      checkoutManifest,
+      new ViemCheckoutPolicyVerifier(environment.ACCOUNT_RPC_URL as string),
+      capabilityKey,
+    );
+    await checkout.assertReady();
+    control.checkout = checkout;
+  }
 }
 if (
   pool &&

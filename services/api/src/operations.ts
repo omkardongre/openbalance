@@ -137,7 +137,7 @@ export class OperationalReadService {
     const result = await this.pool.query(
       `SELECT ch.channel_id,ch.vendor_id,ch.terminal_instance_id,ch.reserve_units,ch.spent_units,
               ch.returned_units,ch.next_sequence,ch.accept_until,ch.submit_until,ch.reclaimed,
-              l.transaction_hash,l.block_number,l.block_hash AS transaction_block_hash,
+              l.event_id,l.transaction_hash,l.block_number,l.block_hash AS transaction_block_hash,
               c.block_number AS finalized_block,c.block_hash AS finalized_block_hash,
               COUNT(v.sequence)::integer AS voucher_count,
               MAX(v.block_number) AS latest_voucher_block
@@ -149,7 +149,7 @@ export class OperationalReadService {
        WHERE ch.channel_id=$1 AND ch.original_account=$2
        GROUP BY ch.channel_id,ch.vendor_id,ch.terminal_instance_id,ch.reserve_units,ch.spent_units,
                 ch.returned_units,ch.next_sequence,ch.accept_until,ch.submit_until,ch.reclaimed,
-                l.transaction_hash,l.block_number,l.block_hash,c.block_number,c.block_hash`,
+                l.event_id,l.transaction_hash,l.block_number,l.block_hash,c.block_number,c.block_hash`,
       [lower(channelId), lower(account)],
     );
     if (result.rowCount !== 1) {
@@ -163,6 +163,7 @@ export class OperationalReadService {
     const returnedUnits = BigInt(row.returned_units);
     return {
       channelId: row.channel_id as Hex,
+      eventId: row.event_id as Hex,
       status: row.reclaimed ? ("RECLAIMED" as const) : ("ACTIVE" as const),
       vendorId: row.vendor_id as Hex,
       terminalInstanceId: row.terminal_instance_id as Hex,

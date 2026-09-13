@@ -4,6 +4,12 @@ import type { AuthenticationResponseJSON, RegistrationResponseJSON } from "@simp
 import Fastify, { type FastifyReply } from "fastify";
 import { z } from "zod";
 import { AccountAccessRejected, type AccountAccessService } from "./account-access.js";
+import {
+  CheckoutConflict,
+  CheckoutNotFound,
+  CheckoutRejected,
+  type CheckoutService,
+} from "./checkout.js";
 import { DeploymentMismatch } from "./deployment-chain.js";
 import type { DeploymentService } from "./deployments.js";
 import { EnrollmentRejected, type EnrollmentService } from "./enrollment.js";
@@ -25,6 +31,7 @@ export type OperationsControl = {
   access: OperationsAccessService;
   reporting: OperationsReportingService;
   incidents: IncidentService;
+  checkout?: CheckoutService;
 };
 
 export async function buildApp(
@@ -261,6 +268,8 @@ export async function buildApp(
         return reply.code(401).send({ error: "operations_session_invalid", retryable: false });
       if (error instanceof OperationsScopeRejected)
         return reply.code(403).send({ error: "operations_scope_denied", retryable: false });
+      if (error instanceof CheckoutRejected)
+        return reply.code(403).send({ error: "checkout_scope_denied", retryable: false });
       if (error instanceof ProjectionNotFound || error instanceof IncidentNotFound)
         return reply.code(404).send({ error: "operational_record_not_found", retryable: false });
       if (error instanceof IncidentConflict)
@@ -270,6 +279,122 @@ export async function buildApp(
       throw error;
     };
 
+    if (control.checkout) {
+      const checkout = control.checkout;
+      const orderId = z.object({ id: z.string().uuid() }).strict();
+      app.post("/v1/checkout-orders", async (request, reply) => {
+        const parsed = z
+          .object({
+            orderReference: z.string().min(1).max(160),
+            orderVersion: z.coerce.bigint().positive(),
+            description: z.string().min(1).max(160),
+            grossUnits: z.coerce.bigint().positive(),
+          })
+          .strict()
+          .safeParse(request.body);
+        const idempotencyKey = request.headers["idempotency-key"];
+        if (!parsed.success || typeof idempotencyKey !== "string")
+          return reply.code(400).send({ error: "invalid_checkout_request", retryable: false });
+        try {
+          const identity = await control.access.authenticate(request.headers.authorization);
+          control.access.assertRole(identity, ["VENDOR"]);
+          const result = await checkout.create(identity, { ...parsed.data, idempotencyKey });
+          return reply.code(result.created ? 201 : 200).send(result);
+        } catch (error) {
+          if (error instanceof CheckoutConflict)
+            return reply.code(409).send({ error: "checkout_conflict", retryable: false });
+          if (error instanceof CheckoutRejected)
+            return reply.code(422).send({ error: "checkout_rejected", retryable: false });
+          return operationsError(reply, error);
+        }
+      });
+
+      app.get("/v1/checkout-orders/:id/cashier", async (request, reply) => {
+        reply.header("Cache-Control", "private, no-store");
+        const params = orderId.safeParse(request.params);
+        if (!params.success)
+          return reply.code(404).send({ error: "checkout_not_found", retryable: false });
+        try {
+          const identity = await control.access.authenticate(request.headers.authorization);
+          control.access.assertRole(identity, ["VENDOR"]);
+          return await checkout.cashier(identity, params.data.id);
+        } catch (error) {
+          if (error instanceof CheckoutNotFound)
+            return reply.code(404).send({ error: "checkout_not_found", retryable: false });
+          return operationsError(reply, error);
+        }
+      });
+
+      if (access) {
+        app.post("/v1/checkout-orders/:id/bindings", async (request, reply) => {
+          const params = orderId.safeParse(request.params);
+          const body = z
+            .object({ checkoutCapability: z.string().regex(/^[A-Za-z0-9_-]{43}$/) })
+            .strict()
+            .safeParse(request.body);
+          if (!params.success || !body.success)
+            return reply.code(400).send({ error: "invalid_checkout_binding", retryable: false });
+          try {
+            const identity = await access.authenticate(request.headers.authorization);
+            return reply
+              .code(202)
+              .send(await checkout.bind(identity, params.data.id, body.data.checkoutCapability));
+          } catch (error) {
+            if (error instanceof AccountAccessRejected)
+              return reply.code(401).send({ error: "session_invalid", retryable: false });
+            if (error instanceof CheckoutNotFound)
+              return reply.code(404).send({ error: "checkout_not_found", retryable: false });
+            if (error instanceof CheckoutConflict)
+              return reply.code(409).send({ error: "checkout_binding_conflict", retryable: false });
+            if (error instanceof CheckoutRejected)
+              return reply.code(422).send({ error: "checkout_binding_rejected", retryable: false });
+            throw error;
+          }
+        });
+      }
+
+      app.post("/v1/checkout-orders/:id/terminal-signature", async (request, reply) => {
+        const params = orderId.safeParse(request.params);
+        const body = z
+          .object({ terminalSignature: z.string().regex(/^0x[0-9a-fA-F]{130}$/) })
+          .strict()
+          .safeParse(request.body);
+        if (!params.success || !body.success)
+          return reply.code(400).send({ error: "invalid_terminal_signature", retryable: false });
+        try {
+          const identity = await control.access.authenticate(request.headers.authorization);
+          control.access.assertRole(identity, ["VENDOR"]);
+          return await checkout.attachSignature(
+            identity,
+            params.data.id,
+            body.data.terminalSignature as `0x${string}`,
+          );
+        } catch (error) {
+          if (error instanceof CheckoutNotFound)
+            return reply.code(404).send({ error: "checkout_not_found", retryable: false });
+          if (error instanceof CheckoutConflict)
+            return reply.code(409).send({ error: "checkout_conflict", retryable: false });
+          if (error instanceof CheckoutRejected)
+            return reply.code(422).send({ error: "terminal_signature_rejected", retryable: false });
+          return operationsError(reply, error);
+        }
+      });
+
+      app.get("/v1/checkout-orders/:id", async (request, reply) => {
+        reply.header("Cache-Control", "private, no-store");
+        const params = orderId.safeParse(request.params);
+        if (!params.success)
+          return reply.code(404).send({ error: "checkout_not_found", retryable: false });
+        try {
+          return await checkout.resolve(params.data.id, request.headers.authorization);
+        } catch (error) {
+          if (error instanceof CheckoutNotFound)
+            return reply.code(404).send({ error: "checkout_not_found", retryable: false });
+          throw error;
+        }
+      });
+    }
+
     app.get("/v1/operations/me", async (request, reply) => {
       reply.header("Cache-Control", "private, no-store");
       try {
@@ -278,6 +403,10 @@ export async function buildApp(
           role: identity.role,
           eventId: identity.eventId,
           vendorId: identity.vendorId,
+          checkoutPolicy:
+            control.checkout && identity.role === "VENDOR"
+              ? control.checkout.policy(identity)
+              : null,
         };
       } catch (error) {
         return operationsError(reply, error);
