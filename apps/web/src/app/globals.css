@@ -248,6 +248,90 @@ button {
   margin: 0.5rem 0.5rem 0.5rem 0;
 }
 
+.secondary-button {
+  border: 1px solid #397564;
+  background: transparent;
+  color: #f3fff8;
+}
+
+.checkout-stack {
+  width: min(100%, 58rem);
+}
+
+.checkout-shell {
+  width: 100%;
+}
+
+.checkout-shell h1 {
+  font-size: clamp(2.8rem, 7vw, 5.5rem);
+}
+
+.checkout-shell h2 {
+  margin: 0;
+  font-size: clamp(2rem, 5vw, 3.5rem);
+}
+
+.field-grid {
+  display: grid;
+  grid-template-columns: 2fr 1fr;
+  gap: 1rem;
+}
+
+.scope-chip {
+  width: fit-content;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid #397564;
+  border-radius: 999px;
+  color: #6ef3bd;
+}
+
+.checkout-link,
+.receipt-card,
+.operation-card,
+.reserve-readback {
+  display: grid;
+  gap: 0.75rem;
+  margin-top: 1.5rem;
+  padding: 1.25rem;
+  border: 1px solid #397564;
+  border-radius: 1rem;
+  background: #07110f;
+}
+
+.checkout-link input {
+  margin: 0;
+}
+
+.receipt-card strong {
+  color: #6ef3bd;
+  font-size: clamp(2rem, 6vw, 4rem);
+}
+
+.receipt-card p,
+.receipt-card small,
+.reserve-panel > p,
+.operation-card small,
+.reserve-readback small {
+  color: #9cbeb2;
+}
+
+.operation-card > div,
+.reserve-readback {
+  align-items: start;
+}
+
+.operation-card > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.operation-card strong,
+.reserve-readback > span {
+  color: #6ef3bd;
+  font: 700 0.85rem / 1 monospace;
+}
+
 .actions button {
   margin: 0;
 }
@@ -312,7 +396,8 @@ code {
 
   .operations-inputs,
   .operations-grid,
-  .incident-fields {
+  .incident-fields,
+  .field-grid {
     grid-template-columns: 1fr;
   }
 

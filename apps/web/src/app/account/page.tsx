@@ -2,6 +2,7 @@
 
 import { startAuthentication } from "@simplewebauthn/browser";
 import { useState } from "react";
+import { financialIdempotencyKey } from "../../lib/financial-client";
 
 const accountPattern = /^0x[0-9a-fA-F]{40}$/;
 
@@ -16,6 +17,14 @@ type ActivityItem = {
 };
 
 type Activity = { items: ActivityItem[]; nextCursor: unknown };
+type Channel = {
+  channelId: `0x${string}`;
+  eventId: `0x${string}`;
+  status: "ACTIVE" | "RECLAIMED";
+  remainingUnits: string;
+  submitUntil: string;
+};
+type Operation = { operationId: string; state: string; transactionHash: string | null };
 
 function short(value: string) {
   return `${value.slice(0, 8)}…${value.slice(-6)}`;
@@ -27,6 +36,9 @@ export default function AccountPage() {
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
   const [activity, setActivity] = useState<Activity>();
+  const [channelId, setChannelId] = useState("");
+  const [channel, setChannel] = useState<Channel>();
+  const [reclaimOperation, setReclaimOperation] = useState<Operation>();
   const api = process.env.NEXT_PUBLIC_API_URL;
 
   async function request(path: string, init: RequestInit) {
@@ -37,6 +49,26 @@ export default function AccountPage() {
       signal: AbortSignal.timeout(30_000),
     });
     if (!response.ok) throw new Error("Passkey authentication was not accepted.");
+    return response.json();
+  }
+
+  async function relayerRequest(path: string, init: RequestInit) {
+    const relayer = process.env.NEXT_PUBLIC_RELAYER_URL;
+    if (!relayer) throw new Error("Financial relayer is not configured.");
+    const response = await fetch(`${relayer}${path}`, {
+      ...init,
+      cache: "no-store",
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!response.ok) {
+      const body = (await response.json().catch(() => null)) as {
+        error?: string;
+        action?: string;
+      } | null;
+      throw new Error(
+        body?.action ?? body?.error?.replaceAll("_", " ") ?? "Reclaim is unavailable.",
+      );
+    }
     return response.json();
   }
 
@@ -113,6 +145,67 @@ export default function AccountPage() {
     }
   }
 
+  async function loadChannel() {
+    if (!session || !/^0x[0-9a-fA-F]{64}$/.test(channelId)) {
+      setStatus("Enter a valid reserve channel identifier.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const result = (await request(`/v1/reserve-channels/${channelId}`, {
+        method: "GET",
+        headers: { Authorization: `Bearer ${session}` },
+      })) as Channel;
+      setChannel(result);
+      setStatus("Finalized reserve state loaded.");
+    } catch (error) {
+      setChannel(undefined);
+      setStatus(error instanceof Error ? error.message : "Reserve state is unavailable.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function reclaim() {
+    if (!session || !channel) return;
+    setBusy(true);
+    try {
+      const result = (await relayerRequest(`/v1/reserve-channels/${channel.channelId}/reclaims`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${session}`,
+          "Idempotency-Key": financialIdempotencyKey("RESERVE_RECLAIM", channel.channelId),
+        },
+        body: JSON.stringify({ eventId: channel.eventId }),
+      })) as Operation;
+      setReclaimOperation(result);
+      setStatus("Reclaim accepted. It remains pending until network finality.");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Reclaim was not accepted.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function refreshReclaim() {
+    if (!session || !reclaimOperation) return;
+    setBusy(true);
+    try {
+      const result = (await relayerRequest(
+        `/v1/financial-operations/${reclaimOperation.operationId}`,
+        { method: "GET", headers: { Authorization: `Bearer ${session}` } },
+      )) as Operation;
+      setReclaimOperation(result);
+      if (result.state === "FINALIZED") await loadChannel();
+      else setStatus(`Reclaim state: ${result.state.toLowerCase()}.`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Reclaim status is unavailable.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <main>
       <section className="shell account-shell">
@@ -168,9 +261,56 @@ export default function AccountPage() {
                       <span>Block {item.blockNumber}</span>
                       <code title={item.transactionHash}>{short(item.transactionHash)}</code>
                     </div>
+                    {item.aggregateKind === "CHANNEL" && (
+                      <button type="button" onClick={() => setChannelId(item.aggregateId)}>
+                        Inspect reserve
+                      </button>
+                    )}
                   </li>
                 ))}
               </ol>
+            )}
+          </section>
+        )}
+        {session && (
+          <section className="activity" aria-labelledby="reserve-heading">
+            <div className="section-heading">
+              <div>
+                <p className="eyebrow">Reserve recovery</p>
+                <h2 id="reserve-heading">Recover unspent value</h2>
+              </div>
+            </div>
+            <label>
+              Reserve channel identifier
+              <input value={channelId} onChange={(event) => setChannelId(event.target.value)} />
+            </label>
+            <button type="button" disabled={busy} onClick={loadChannel}>
+              Load finalized reserve
+            </button>
+            {channel && (
+              <div className="reserve-readback">
+                <span>{channel.status}</span>
+                <strong>{channel.remainingUnits} base units remaining</strong>
+                <small>
+                  Submission deadline:{" "}
+                  {new Date(Number(channel.submitUntil) * 1_000).toLocaleString()}
+                </small>
+                {channel.status === "ACTIVE" &&
+                  Date.now() >= Number(channel.submitUntil) * 1_000 &&
+                  !reclaimOperation && (
+                    <button type="button" disabled={busy} onClick={reclaim}>
+                      Reclaim eligible balance
+                    </button>
+                  )}
+                {reclaimOperation && (
+                  <>
+                    <strong>Reclaim {reclaimOperation.state}</strong>
+                    <button type="button" disabled={busy} onClick={refreshReclaim}>
+                      Refresh reclaim status
+                    </button>
+                  </>
+                )}
+              </div>
             )}
           </section>
         )}

@@ -18,6 +18,9 @@ export default function HomePage() {
             <Link className="secondary-action" href="/account">
               Open my account
             </Link>
+            <Link className="secondary-action" href="/cashier">
+              Open cashier
+            </Link>
             <Link className="secondary-action" href="/operations">
               Open operations desk
             </Link>
