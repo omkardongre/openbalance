@@ -16,6 +16,10 @@ with contract state at the exact indexed block.
 - Every financial transition has equal debit and credit totals enforced by PostgreSQL.
 - Reconciliation reads `totalLiability` and `totalReserved` at the exact cursor block. Differences
   remain visible and create an open integrity incident.
+- Optional latest-head observations live in separate provisional tables. Reorganizations replace
+  only that provisional tail, and the service stops if the configured rewind bound is exceeded.
+- A finalized boundary is marked verified only when its canonical block hash and transition set
+  match the separately indexed finalized history. No worker consumes provisional records.
 
 ## Configuration
 
@@ -35,6 +39,8 @@ INDEXER_DEPLOYMENT_BLOCK
 INDEXER_BATCH_SIZE                 optional, default 500
 INDEXER_POLL_INTERVAL_MS           optional, default 2000
 INDEXER_DATABASE_POOL_SIZE         optional, default 5
+INDEXER_PROVISIONAL_ENABLED        optional, default false
+INDEXER_PROVISIONAL_REORG_DEPTH    optional, default 128
 ```
 
 The three contract addresses, event ID, chain ID, and deployment block must come from the verified
@@ -51,6 +57,5 @@ Run locally with `pnpm --filter @openbalance/indexer dev`, or build and start th
 The service exits on a finalized-history contradiction. RPC/database availability errors are retried
 without advancing the cursor.
 
-The current implementation indexes finalized state only. Subscriptions and provisional projections
-remain a latency enhancement; they cannot trigger financial partner writes or replace finalized
-truth.
+Provisional observations are opt-in. They are for pending user feedback only and cannot trigger
+financial partner writes or replace finalized truth.

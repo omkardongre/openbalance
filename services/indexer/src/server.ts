@@ -3,6 +3,7 @@ import { Pool } from "pg";
 import { defineChain } from "viem";
 import { loadIndexerConfig } from "./config.js";
 import { FinalizedHistoryConflict, FinalizedIndexer } from "./indexer.js";
+import { ProvisionalIndexer, ProvisionalReorgTooDeep } from "./provisional.js";
 import { ConservationReconciler } from "./reconciliation.js";
 import { DeploymentManifestMismatch, ViemFinalizedChainSource } from "./source.js";
 import { PgIndexerStore } from "./store.js";
@@ -47,6 +48,19 @@ async function main() {
     store,
   });
   const reconciler = new ConservationReconciler(config.streamId, source, store);
+  const provisional = config.provisionalEnabled
+    ? new ProvisionalIndexer({
+        streamId: config.streamId,
+        chainId: BigInt(config.chainId),
+        eventId: config.eventId,
+        contracts: config.contracts,
+        deploymentBlock: config.deploymentBlock,
+        batchSize: config.batchSize,
+        maximumReorgDepth: config.provisionalReorgDepth,
+        source,
+        store,
+      })
+    : undefined;
   let stopping = false;
   const stop = () => {
     stopping = true;
@@ -78,11 +92,22 @@ async function main() {
               },
             );
         }
+        if (provisional) {
+          const observed = await provisional.runOnce();
+          if (observed.toBlock !== null)
+            log("info", "Provisional batch observed", {
+              fromBlock: observed.fromBlock?.toString(),
+              toBlock: observed.toBlock.toString(),
+              transitionCount: observed.transitionCount,
+              rewound: observed.rewound,
+            });
+        }
       } catch (error) {
         log("error", error instanceof Error ? error.message : "Indexer iteration failed");
         if (
           error instanceof FinalizedHistoryConflict ||
-          error instanceof DeploymentManifestMismatch
+          error instanceof DeploymentManifestMismatch ||
+          error instanceof ProvisionalReorgTooDeep
         ) {
           process.exitCode = 1;
           break;
