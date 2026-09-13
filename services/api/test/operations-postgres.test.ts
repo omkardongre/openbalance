@@ -1,6 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
+import { decodePaymentIntent, paymentIntentDigest } from "@openbalance/protocol";
 import { Pool } from "pg";
+import { privateKeyToAccount } from "viem/accounts";
 import { expect, it } from "vitest";
+import { CheckoutConflict, CheckoutService } from "../src/checkout.js";
+import type { CheckoutPolicyVerifier } from "../src/checkout-chain.js";
+import type { CheckoutManifest } from "../src/checkout-manifest.js";
 import { IncidentService } from "../src/incidents.js";
 import { OperationsAccessService } from "../src/operations-access.js";
 import { OperationsReportingService } from "../src/operations-reporting.js";
@@ -13,6 +18,7 @@ const eligible = (() => {
 })();
 const postgresIt = eligible ? it : it.skip;
 const hex = (digit: string) => `0x${digit.repeat(64)}` as const;
+const address = (digit: string) => `0x${digit.repeat(40)}` as const;
 
 postgresIt(
   "keeps reporting and incident actions scoped, exact, and idempotent in PostgreSQL",
@@ -122,3 +128,92 @@ postgresIt(
   },
   15_000,
 );
+
+postgresIt("keeps cashier checkout issuance exact, scoped, and idempotent", async () => {
+  if (!databaseUrl) throw new Error("Missing isolated operations test database");
+  const pool = new Pool({ connectionString: databaseUrl, max: 2 });
+  const terminal = privateKeyToAccount(`0x${"12".repeat(32)}`);
+  const eventId = hex("a");
+  const vendorId = hex("b");
+  const streamId = `test:10143:${randomUUID()}`;
+  const identity = {
+    credentialId: randomUUID(),
+    principalId: `vendor:${randomUUID()}`,
+    role: "VENDOR" as const,
+    streamId,
+    eventId,
+    vendorId,
+  };
+  const manifest: CheckoutManifest = {
+    schemaVersion: 1,
+    chainId: 10_143,
+    events: [
+      {
+        streamId,
+        eventId,
+        router: address("1"),
+        registry: address("2"),
+        vault: address("3"),
+        asset: address("4"),
+        assetSymbol: "USDC",
+        assetDecimals: 6,
+        configVersion: 1n,
+        organizerFeeBps: 400,
+        platformFeeBps: 100,
+        intentLifetimeSeconds: 600,
+        vendors: [
+          {
+            vendorId,
+            vendorName: "North Gate Coffee",
+            destinationVersion: 1n,
+            terminal: { instanceId: hex("c"), keyVersion: 1n, signer: terminal.address },
+            reservePolicy: {
+              maximumReserveUnits: 50_000_000n,
+              maximumPerVoucherUnits: 15_000_000n,
+              maximumVoucherCount: 8,
+              acceptanceDurationSeconds: 3_600,
+              submissionDelaySeconds: 3_600,
+            },
+          },
+        ],
+      },
+    ],
+  };
+  const verifier: CheckoutPolicyVerifier = { assert: async () => undefined };
+  const now = new Date();
+  const service = new CheckoutService(pool, manifest, verifier, Buffer.alloc(32, 7), () => now);
+  let orderId: string | undefined;
+  try {
+    const request = {
+      orderReference: "ORDER-1042",
+      orderVersion: 1n,
+      description: "Two coffees",
+      grossUnits: 12_500_000n,
+      idempotencyKey: "checkout-postgres-0001",
+    };
+    const created = await service.create(identity, request);
+    orderId = created.orderId;
+    const replay = await service.create(identity, request);
+    expect(replay).toMatchObject({ created: false, orderId, capability: created.capability });
+    await expect(service.create(identity, { ...request, grossUnits: 1n })).rejects.toBeInstanceOf(
+      CheckoutConflict,
+    );
+    const bound = await service.bind(
+      { enrollmentId: randomUUID(), account: address("5") },
+      orderId,
+      created.capability,
+    );
+    if (!("encodedIntent" in bound) || !bound.encodedIntent)
+      throw new Error("Checkout did not bind");
+    const signature = await terminal.sign({
+      hash: paymentIntentDigest(decodePaymentIntent(bound.encodedIntent)),
+    });
+    const ready = await service.attachSignature(identity, orderId, signature);
+    const resolved = await service.resolve(orderId, `Checkout ${ready.capability}`);
+    expect(resolved).toMatchObject({ orderId, terminalSignature: signature.toLowerCase() });
+    expect(resolved).not.toHaveProperty("capability");
+  } finally {
+    if (orderId) await pool.query("DELETE FROM checkout_orders WHERE order_id=$1", [orderId]);
+    await pool.end();
+  }
+});

@@ -9,6 +9,7 @@ const migrations = [
   "003_account_access",
   "004_deployment_sponsorship",
   "005_operational_access_and_incidents",
+  "006_checkout_orders",
 ] as const;
 
 const environment = z

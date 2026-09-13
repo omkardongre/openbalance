@@ -12,6 +12,8 @@ const environmentSchema = z.object({
     .enum(["true", "false"])
     .default("false")
     .transform((value) => value === "true"),
+  CHECKOUT_MANIFEST_PATH: z.string().min(1).optional(),
+  CHECKOUT_CAPABILITY_KEY_PATH: z.string().min(1).optional(),
 });
 
 export function loadEnvironment(environment: NodeJS.ProcessEnv) {
@@ -30,5 +32,13 @@ export function loadEnvironment(environment: NodeJS.ProcessEnv) {
     );
   if (parsed.PROJECTION_READS_ENABLED && count !== 3)
     throw new Error("Projection reads require enrollment database and passkey configuration");
+  if (
+    Boolean(parsed.CHECKOUT_MANIFEST_PATH) !== Boolean(parsed.CHECKOUT_CAPABILITY_KEY_PATH) ||
+    (parsed.CHECKOUT_MANIFEST_PATH &&
+      (!parsed.DATABASE_URL || !parsed.ACCOUNT_RPC_URL || !parsed.PROJECTION_READS_ENABLED))
+  )
+    throw new Error(
+      "Checkout requires a manifest, capability key, database, RPC URL, and projection reads",
+    );
   return parsed;
 }

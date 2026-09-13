@@ -16,6 +16,10 @@
       "types": "./src/deployments.ts",
       "default": "./dist/deployments.js"
     },
+    "./checkout": {
+      "types": "./src/checkout.ts",
+      "default": "./dist/checkout.js"
+    },
     "./enrollment": {
       "types": "./src/enrollment.ts",
       "default": "./dist/enrollment.js"
