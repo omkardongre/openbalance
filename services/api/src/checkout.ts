@@ -118,6 +118,9 @@ export class CheckoutService {
       vendorName: vendor.vendorName,
       assetSymbol: event.assetSymbol,
       assetDecimals: event.assetDecimals,
+      asset: event.asset,
+      router: event.router,
+      destinationVersion: vendor.destinationVersion.toString(),
       terminalSigner: vendor.terminal.signer,
     };
   }

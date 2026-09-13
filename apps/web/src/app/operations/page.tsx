@@ -1,6 +1,16 @@
 "use client";
 
+import { exactPayRouterAbi, type RefundIntent, refundIntentFields } from "@openbalance/protocol";
 import { useState } from "react";
+import {
+  createWalletClient,
+  custom,
+  encodeFunctionData,
+  encodePacked,
+  getAddress,
+  type Hex,
+  keccak256,
+} from "viem";
 
 const bytes32 = /^0x[0-9a-fA-F]{64}$/;
 
@@ -18,8 +28,10 @@ type Statement = {
   finalizedThrough: { blockNumber: string; blockHash: string; indexedAt: string };
   payments: Array<{
     paymentId: string;
+    payer: string | null;
     mode: string;
     grossUnits: string;
+    refundedUnits: string;
     allocationStatus: string;
     proof: { transactionHash: string; blockNumber: string };
   }>;
@@ -52,6 +64,20 @@ type OperationsProfile = {
   role: "VENDOR" | "ORGANIZER" | "FINANCE" | "SUPPORT";
   eventId: string;
   vendorId: string | null;
+  checkoutPolicy: {
+    chainId: number;
+    eventId: Hex;
+    vendorId: Hex;
+    router: `0x${string}`;
+    asset: `0x${string}`;
+    destinationVersion: string;
+  } | null;
+};
+
+type SubmittedOperation = {
+  operationId: string;
+  state: string;
+  statusUrl: string;
 };
 
 function short(value: string) {
@@ -78,9 +104,16 @@ export default function OperationsPage() {
   const [nextAction, setNextAction] = useState("");
   const [owner, setOwner] = useState("");
   const [resolutionProofs, setResolutionProofs] = useState<Record<string, string>>({});
+  const [treasuryToken, setTreasuryToken] = useState("");
+  const [refundPaymentId, setRefundPaymentId] = useState("");
+  const [refundUnits, setRefundUnits] = useState("");
+  const [vendorCreditUnits, setVendorCreditUnits] = useState("");
+  const [destinationVersion, setDestinationVersion] = useState("1");
+  const [financialOperation, setFinancialOperation] = useState<SubmittedOperation>();
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
   const api = process.env.NEXT_PUBLIC_API_URL;
+  const relayer = process.env.NEXT_PUBLIC_RELAYER_URL;
 
   async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     if (!api) throw new Error("Operations service is not configured.");
@@ -98,6 +131,139 @@ export default function OperationsPage() {
       throw new Error(body?.error?.replaceAll("_", " ") ?? "Operations data is unavailable.");
     }
     return response.json() as Promise<T>;
+  }
+
+  async function treasuryRequest<T>(path: string, init: RequestInit): Promise<T> {
+    if (!relayer) throw new Error("Financial relayer is not configured.");
+    if (!treasuryToken) throw new Error("Enter the separate vendor treasury credential.");
+    const headers = new Headers(init.headers);
+    headers.set("Authorization", `Bearer ${treasuryToken}`);
+    const response = await fetch(`${relayer}${path}`, {
+      ...init,
+      headers,
+      cache: "no-store",
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!response.ok) {
+      const body = (await response.json().catch(() => null)) as { error?: string } | null;
+      throw new Error(body?.error?.replaceAll("_", " ") ?? "Financial action is unavailable.");
+    }
+    return response.json() as Promise<T>;
+  }
+
+  async function submitRefund() {
+    const policy = profile?.checkoutPolicy;
+    const payment = statement?.payments.find(
+      (candidate) => candidate.paymentId.toLowerCase() === refundPaymentId.toLowerCase(),
+    );
+    if (!policy || !profile?.vendorId || !payment?.payer) {
+      setStatus("Choose one finalized payment from this vendor statement.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const amount = BigInt(refundUnits);
+      const credit = BigInt(vendorCreditUnits);
+      const previous = BigInt(payment.refundedUnits);
+      if (
+        amount < 1n ||
+        credit < 0n ||
+        credit > amount ||
+        previous + amount > BigInt(payment.grossUnits)
+      )
+        throw new Error("Refund units exceed the finalized refundable amount.");
+      const ethereum = (
+        window as unknown as {
+          ethereum?: { request(input: { method: string; params?: unknown[] }): Promise<unknown> };
+        }
+      ).ethereum;
+      if (!ethereum) throw new Error("Connect the vendor treasury wallet.");
+      const wallet = createWalletClient({ transport: custom(ethereum) });
+      const [authority] = await wallet.requestAddresses();
+      if (!authority) throw new Error("Vendor treasury wallet is unavailable.");
+      const now = Math.floor(Date.now() / 1_000);
+      const cumulativeRefundUnits = previous + amount;
+      const intent: RefundIntent = {
+        schemaVersion: 1,
+        chainId: BigInt(policy.chainId),
+        router: getAddress(policy.router),
+        eventId: policy.eventId,
+        refundId: keccak256(
+          encodePacked(
+            ["string", "bytes32", "uint256", "uint256"],
+            ["OpenBalance refund", payment.paymentId as Hex, cumulativeRefundUnits, credit],
+          ),
+        ),
+        paymentId: payment.paymentId as Hex,
+        payerAccount: getAddress(payment.payer),
+        vendorId: policy.vendorId,
+        asset: getAddress(policy.asset),
+        refundUnits: amount,
+        cumulativeRefundUnits,
+        vendorCreditUnits: credit,
+        fundingSource: getAddress(authority),
+        validAfter: now - 30,
+        expiresAt: now + 900,
+      };
+      const signature = await wallet.signTypedData({
+        account: authority,
+        domain: {
+          name: "OpenBalanceRefund",
+          version: "1",
+          chainId: policy.chainId,
+          verifyingContract: policy.router,
+        },
+        types: { RefundIntent: refundIntentFields },
+        primaryType: "RefundIntent",
+        message: intent,
+      });
+      const calldata = encodeFunctionData({
+        abi: exactPayRouterAbi,
+        functionName: "refund",
+        args: [intent, signature],
+      });
+      const payload = { calldata };
+      const key = await idempotencyKey(`refund-${intent.refundId}`, payload);
+      const operation = await treasuryRequest<SubmittedOperation>(
+        `/v1/payments/${encodeURIComponent(payment.paymentId)}/refunds`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Idempotency-Key": key },
+          body: JSON.stringify(payload),
+        },
+      );
+      setFinancialOperation(operation);
+      setStatus("Refund accepted; completion still requires finalized read-back.");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Refund submission failed.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function submitWithdrawal() {
+    if (!profile?.vendorId) return;
+    setBusy(true);
+    try {
+      if (!/^[1-9][0-9]*$/.test(destinationVersion))
+        throw new Error("Enter a valid destination version.");
+      const payload = { destinationVersion };
+      const key = await idempotencyKey(`withdraw-${profile.vendorId}`, payload);
+      const operation = await treasuryRequest<SubmittedOperation>(
+        `/v1/vendors/${encodeURIComponent(profile.vendorId)}/withdrawals`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Idempotency-Key": key },
+          body: JSON.stringify(payload),
+        },
+      );
+      setFinancialOperation(operation);
+      setStatus("Fixed-destination withdrawal accepted; completion is pending finality.");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Withdrawal submission failed.");
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function load() {
@@ -341,6 +507,88 @@ export default function OperationsPage() {
                       </li>
                     ))}
                   </ol>
+                )}
+              </section>
+            )}
+
+            {profile?.role === "VENDOR" && profile.checkoutPolicy && statement && (
+              <section className="shell operations-panel">
+                <div className="section-heading">
+                  <div>
+                    <p className="eyebrow">Treasury actions</p>
+                    <h2>Authorize money movement</h2>
+                  </div>
+                  <p>Separate credential and wallet</p>
+                </div>
+                <label>
+                  Vendor treasury credential
+                  <input
+                    type="password"
+                    autoComplete="off"
+                    value={treasuryToken}
+                    disabled={busy}
+                    onChange={(event) => setTreasuryToken(event.target.value)}
+                  />
+                </label>
+                <div className="incident-fields">
+                  <label>
+                    Finalized payment
+                    <select
+                      value={refundPaymentId}
+                      disabled={busy}
+                      onChange={(event) => setRefundPaymentId(event.target.value)}
+                    >
+                      <option value="">Choose payment</option>
+                      {statement.payments
+                        .filter((payment) => payment.payer)
+                        .map((payment) => (
+                          <option key={payment.paymentId} value={payment.paymentId}>
+                            {short(payment.paymentId)} · {payment.grossUnits} units
+                          </option>
+                        ))}
+                    </select>
+                  </label>
+                  <label>
+                    Refund units
+                    <input
+                      inputMode="numeric"
+                      value={refundUnits}
+                      disabled={busy}
+                      onChange={(event) => setRefundUnits(event.target.value)}
+                    />
+                  </label>
+                  <label>
+                    Vendor-credit units
+                    <input
+                      inputMode="numeric"
+                      value={vendorCreditUnits}
+                      disabled={busy}
+                      onChange={(event) => setVendorCreditUnits(event.target.value)}
+                    />
+                  </label>
+                </div>
+                <button type="button" disabled={busy || !refundPaymentId} onClick={submitRefund}>
+                  Sign refund with treasury wallet
+                </button>
+                <div className="incident-fields">
+                  <label>
+                    Payout destination version
+                    <input
+                      inputMode="numeric"
+                      value={destinationVersion}
+                      disabled={busy}
+                      onChange={(event) => setDestinationVersion(event.target.value)}
+                    />
+                  </label>
+                  <button type="button" disabled={busy} onClick={submitWithdrawal}>
+                    Trigger fixed-destination withdrawal
+                  </button>
+                </div>
+                {financialOperation && (
+                  <p role="status">
+                    Operation {short(financialOperation.operationId)}:{" "}
+                    {financialOperation.state.toLowerCase()}
+                  </p>
                 )}
               </section>
             )}

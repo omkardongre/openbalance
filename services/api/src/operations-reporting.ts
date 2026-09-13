@@ -94,7 +94,7 @@ export class OperationsReportingService {
         [identity.streamId, vendorId.toLowerCase(), fromBlock.toString(), toBlock.toString()],
       );
       const payments = await db.query(
-        `SELECT p.payment_id,p.mode,p.gross_units,p.organizer_fee_units,p.platform_fee_units,
+        `SELECT p.payment_id,p.mode,p.payer,p.gross_units,p.organizer_fee_units,p.platform_fee_units,
                 p.allocation_status,p.transaction_hash,p.block_number,l.block_hash,
                 COALESCE(SUM(r.amount_units),0) AS refunded_units,
                 COALESCE(SUM(r.vendor_credit_units),0) AS vendor_credit_refund_units
@@ -104,7 +104,7 @@ export class OperationsReportingService {
            ON r.stream_id=p.stream_id AND r.payment_id=p.payment_id
          WHERE p.stream_id=$1 AND p.vendor_id=$2 AND p.block_number BETWEEN $3 AND $4
            AND ($5::bigint IS NULL OR (p.block_number,p.payment_id) > ($5,$6))
-         GROUP BY p.payment_id,p.mode,p.gross_units,p.organizer_fee_units,p.platform_fee_units,
+         GROUP BY p.payment_id,p.mode,p.payer,p.gross_units,p.organizer_fee_units,p.platform_fee_units,
                   p.allocation_status,p.transaction_hash,p.block_number,l.block_hash
          ORDER BY p.block_number,p.payment_id LIMIT $7`,
         [
@@ -197,6 +197,7 @@ export class OperationsReportingService {
         },
         payments: payments.rows.slice(0, options.limit).map((row) => ({
           paymentId: row.payment_id as Hex,
+          payer: row.payer,
           mode: row.mode as "ONLINE" | "OFFLINE",
           grossUnits: row.gross_units.toString(),
           organizerFeeUnits: row.organizer_fee_units?.toString() ?? null,
