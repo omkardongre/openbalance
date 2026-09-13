@@ -3,6 +3,7 @@ import { encodeAbiParameters, encodeEventTopics, type Hex } from "viem";
 import { expect, it } from "vitest";
 import { decodeIndexedTransition } from "../src/events.js";
 import { FinalizedHistoryConflict, FinalizedIndexer } from "../src/indexer.js";
+import { ProvisionalIndexer, type ProvisionalStore } from "../src/provisional.js";
 import { ConservationReconciler } from "../src/reconciliation.js";
 import type { FinalizedChainSource } from "../src/source.js";
 import type { FinalizedBatch, IndexerStore, IntegrityIncidentInput } from "../src/store.js";
@@ -104,6 +105,10 @@ class MemorySource implements FinalizedChainSource {
     return this.#block(12n, this.canonicalHash);
   }
 
+  async getLatestHead(): Promise<FinalizedBlock> {
+    return this.getFinalizedHead();
+  }
+
   async getBlock(blockNumber: bigint): Promise<FinalizedBlock> {
     return this.#block(blockNumber, blockNumber === 11n ? hex32("b") : this.canonicalHash);
   }
@@ -177,4 +182,78 @@ it("records exact-block conservation differences without changing projections", 
   expect(result?.differences).toEqual(["LEDGER_LIABILITY", "VAULT_RESERVED"]);
   expect(store.reconciliations).toHaveLength(1);
   expect(store.snapshot).toEqual({ ledgerLiabilityUnits: 100n, vaultReservedUnits: 0n });
+});
+
+it("rewinds only a contradictory provisional tail before replacing it", async () => {
+  const hashes = new Map<bigint, Hex>([
+    [10n, hex32("1")],
+    [11n, hex32("2")],
+    [12n, hex32("3")],
+  ]);
+  const source: FinalizedChainSource = {
+    async assertManifest() {},
+    async getFinalizedHead() {
+      return { number: 10n, hash: hashes.get(10n) as Hex, parentHash: hex32("0"), timestamp: 1n };
+    },
+    async getLatestHead() {
+      return this.getBlock(12n);
+    },
+    async getBlock(number) {
+      return {
+        number,
+        hash: hashes.get(number) as Hex,
+        parentHash: number === 10n ? hex32("0") : (hashes.get(number - 1n) as Hex),
+        timestamp: number,
+      };
+    },
+    async getLogs() {
+      return [];
+    },
+    async readConservation() {
+      return { ledgerLiabilityUnits: 0n, vaultReservedUnits: 0n };
+    },
+  };
+  const blocks = new Map<bigint, { blockNumber: bigint; blockHash: Hex; parentHash: Hex }>();
+  let cursor: IndexerCursor | null = null;
+  const replacements: Array<bigint | null> = [];
+  const store: ProvisionalStore = {
+    async getFinalizedCursor() {
+      return null;
+    },
+    async getProvisionalCursor() {
+      return cursor;
+    },
+    async getProvisionalBlock(_streamId, blockNumber) {
+      return blocks.get(blockNumber) ?? null;
+    },
+    async replaceProvisionalTail(input) {
+      replacements.push(input.ancestorBlock);
+      for (const number of [...blocks.keys()])
+        if (input.ancestorBlock === null || number > input.ancestorBlock) blocks.delete(number);
+      for (const block of input.blocks) blocks.set(block.blockNumber, block);
+      const last = input.blocks.at(-1);
+      cursor = last ? { blockNumber: last.blockNumber, blockHash: last.blockHash } : cursor;
+    },
+    async verifyFinalizedBoundary() {},
+  };
+  const indexer = new ProvisionalIndexer({
+    streamId: "test:provisional",
+    chainId: 10_143n,
+    eventId,
+    contracts,
+    deploymentBlock: 10n,
+    batchSize: 10,
+    maximumReorgDepth: 4,
+    source,
+    store,
+  });
+  await expect(indexer.runOnce()).resolves.toMatchObject({ rewound: 0, caughtUp: true });
+  hashes.set(12n, hex32("4"));
+  await expect(indexer.runOnce()).resolves.toMatchObject({
+    fromBlock: 12n,
+    toBlock: 12n,
+    rewound: 1,
+  });
+  expect(replacements).toEqual([null, 11n]);
+  expect(blocks.get(12n)?.blockHash).toBe(hex32("4"));
 });

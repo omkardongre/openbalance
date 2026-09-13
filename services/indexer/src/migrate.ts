@@ -3,15 +3,10 @@ import { readFile } from "node:fs/promises";
 import { Pool } from "pg";
 import { loadIndexerDatabaseConfig } from "./config.js";
 
-const migrationName = "001_finalized_indexer";
+const migrations = ["001_finalized_indexer", "002_provisional_indexer"] as const;
 
 async function migrate() {
   const config = loadIndexerDatabaseConfig(process.env);
-  const sql = await readFile(
-    new URL("../migrations/001_finalized_indexer.sql", import.meta.url),
-    "utf8",
-  );
-  const checksum = createHash("sha256").update(sql).digest("hex");
   const pool = new Pool({
     connectionString: config.databaseUrl,
     max: 1,
@@ -28,14 +23,21 @@ async function migrate() {
          applied_at timestamptz NOT NULL DEFAULT clock_timestamp()
        )`,
     );
-    const existing = await client.query(
-      "SELECT checksum FROM indexer_schema_migrations WHERE name=$1 FOR UPDATE",
-      [migrationName],
-    );
-    if (existing.rows[0]) {
-      if (existing.rows[0].checksum !== checksum)
-        throw new Error("Applied indexer migration checksum does not match source");
-    } else {
+    for (const migrationName of migrations) {
+      const sql = await readFile(
+        new URL(`../migrations/${migrationName}.sql`, import.meta.url),
+        "utf8",
+      );
+      const checksum = createHash("sha256").update(sql).digest("hex");
+      const existing = await client.query(
+        "SELECT checksum FROM indexer_schema_migrations WHERE name=$1 FOR UPDATE",
+        [migrationName],
+      );
+      if (existing.rows[0]) {
+        if (existing.rows[0].checksum !== checksum)
+          throw new Error("Applied indexer migration checksum does not match source");
+        continue;
+      }
       await client.query(sql);
       await client.query("INSERT INTO indexer_schema_migrations (name,checksum) VALUES ($1,$2)", [
         migrationName,

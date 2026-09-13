@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import type { Hex } from "viem";
+import type { ProvisionalStore } from "./provisional.js";
 import type {
   ConservationSnapshot,
   IndexedTransition,
@@ -141,7 +142,7 @@ async function writeIncident(client: Pool | PoolClient, incident: IntegrityIncid
   );
 }
 
-export class PgIndexerStore implements IndexerStore {
+export class PgIndexerStore implements IndexerStore, ProvisionalStore {
   constructor(private readonly pool: Pool) {}
 
   async assertReady(): Promise<void> {
@@ -159,6 +160,147 @@ export class PgIndexerStore implements IndexerStore {
     );
     const row = result.rows[0];
     return row ? { blockNumber: BigInt(row.block_number), blockHash: row.block_hash as Hex } : null;
+  }
+
+  async getProvisionalCursor(streamId: string): Promise<IndexerCursor | null> {
+    const result = await this.pool.query(
+      "SELECT block_number,block_hash FROM provisional_cursors WHERE stream_id=$1",
+      [streamId],
+    );
+    const row = result.rows[0];
+    return row ? { blockNumber: BigInt(row.block_number), blockHash: row.block_hash as Hex } : null;
+  }
+
+  getFinalizedCursor(streamId: string): Promise<IndexerCursor | null> {
+    return this.getCursor(streamId);
+  }
+
+  async getProvisionalBlock(streamId: string, blockNumber: bigint) {
+    const result = await this.pool.query(
+      `SELECT block_number,block_hash,parent_hash FROM provisional_blocks
+       WHERE stream_id=$1 AND block_number=$2`,
+      [streamId, blockNumber.toString()],
+    );
+    const row = result.rows[0];
+    return row
+      ? {
+          blockNumber: BigInt(row.block_number),
+          blockHash: row.block_hash as Hex,
+          parentHash: row.parent_hash as Hex,
+        }
+      : null;
+  }
+
+  async replaceProvisionalTail(input: {
+    streamId: string;
+    chainId: bigint;
+    eventId: Hex;
+    ancestorBlock: bigint | null;
+    blocks: readonly { blockNumber: bigint; blockHash: Hex; parentHash: Hex }[];
+    transitions: readonly IndexedTransition[];
+  }): Promise<void> {
+    if (input.blocks.length === 0) throw new Error("Provisional batch is empty");
+    const first = input.blocks[0];
+    const last = input.blocks.at(-1);
+    if (!first || !last) throw new Error("Provisional batch is empty");
+    if (input.ancestorBlock !== null && first.blockNumber !== input.ancestorBlock + 1n)
+      throw new Error("Provisional batch does not extend its ancestor");
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [input.streamId]);
+      const deleteAfter = input.ancestorBlock?.toString() ?? "-1";
+      await client.query(
+        "DELETE FROM provisional_chain_logs WHERE stream_id=$1 AND block_number>$2",
+        [input.streamId, deleteAfter],
+      );
+      await client.query("DELETE FROM provisional_blocks WHERE stream_id=$1 AND block_number>$2", [
+        input.streamId,
+        deleteAfter,
+      ]);
+      for (const block of input.blocks)
+        await client.query(
+          `INSERT INTO provisional_blocks (stream_id,block_number,block_hash,parent_hash)
+           VALUES ($1,$2,$3,$4)`,
+          [
+            input.streamId,
+            block.blockNumber.toString(),
+            block.blockHash.toLowerCase(),
+            block.parentHash.toLowerCase(),
+          ],
+        );
+      for (const transition of input.transitions)
+        await client.query(
+          `INSERT INTO provisional_chain_logs
+            (transition_id,stream_id,chain_id,event_id,block_number,block_hash,
+             transaction_hash,transaction_index,log_index,transition_kind,payload)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb)`,
+          [
+            transition.transitionId,
+            input.streamId,
+            input.chainId.toString(),
+            input.eventId.toLowerCase(),
+            transition.blockNumber.toString(),
+            transition.blockHash.toLowerCase(),
+            transition.transactionHash.toLowerCase(),
+            transition.transactionIndex,
+            transition.logIndex,
+            transition.kind,
+            canonicalJson(transition),
+          ],
+        );
+      await client.query(
+        `INSERT INTO provisional_cursors (stream_id,chain_id,block_number,block_hash)
+         VALUES ($1,$2,$3,$4)
+         ON CONFLICT (stream_id) DO UPDATE SET chain_id=EXCLUDED.chain_id,
+           block_number=EXCLUDED.block_number,block_hash=EXCLUDED.block_hash,
+           updated_at=clock_timestamp()`,
+        [input.streamId, input.chainId.toString(), last.blockNumber.toString(), last.blockHash],
+      );
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async verifyFinalizedBoundary(input: {
+    streamId: string;
+    blockNumber: bigint;
+    blockHash: Hex;
+  }): Promise<void> {
+    const result = await this.pool.query(
+      `WITH provisional AS (
+         SELECT transition_id FROM provisional_chain_logs WHERE stream_id=$1 AND block_number=$2
+       ), finalized AS (
+         SELECT transition_id FROM finalized_chain_logs WHERE stream_id=$1 AND block_number=$2
+       ), difference AS (
+         (SELECT transition_id FROM provisional EXCEPT SELECT transition_id FROM finalized)
+         UNION ALL
+         (SELECT transition_id FROM finalized EXCEPT SELECT transition_id FROM provisional)
+       )
+       SELECT b.block_hash,(SELECT COUNT(*) FROM difference)::integer AS difference_count,
+              (SELECT COUNT(*) FROM provisional)::integer AS transition_count
+       FROM provisional_blocks b WHERE b.stream_id=$1 AND b.block_number=$2`,
+      [input.streamId, input.blockNumber.toString()],
+    );
+    const row = result.rows[0];
+    if (!row) return;
+    if (String(row.block_hash).toLowerCase() !== input.blockHash.toLowerCase())
+      throw new Error("Provisional boundary hash disagrees with finalized history");
+    if (Number(row.difference_count) !== 0)
+      throw new Error("Provisional transitions disagree with finalized history");
+    await this.pool.query(
+      `INSERT INTO provisional_promotions
+        (stream_id,block_number,block_hash,transition_count,status,verified_at)
+       VALUES ($1,$2,$3,$4,'VERIFIED',clock_timestamp())
+       ON CONFLICT (stream_id,block_number) DO UPDATE SET
+         block_hash=EXCLUDED.block_hash,transition_count=EXCLUDED.transition_count,
+         status='VERIFIED',verified_at=clock_timestamp()`,
+      [input.streamId, input.blockNumber.toString(), input.blockHash, row.transition_count],
+    );
   }
 
   async commitFinalizedBatch(batch: FinalizedBatch): Promise<void> {

@@ -22,6 +22,7 @@ export interface FinalizedChainSource {
     contracts: IndexedContracts;
   }): Promise<void>;
   getFinalizedHead(): Promise<FinalizedBlock>;
+  getLatestHead(): Promise<FinalizedBlock>;
   getBlock(blockNumber: bigint): Promise<FinalizedBlock>;
   getLogs(fromBlock: bigint, toBlock: bigint): Promise<RawChainLog[]>;
   readConservation(blockNumber: bigint): Promise<ConservationSnapshot>;
@@ -128,6 +129,17 @@ export class ViemFinalizedChainSource implements FinalizedChainSource {
   async getFinalizedHead(): Promise<FinalizedBlock> {
     const block = await this.#client.getBlock({ blockTag: "finalized" });
     if (block.hash === null) throw new Error("Finalized head has no hash");
+    return {
+      number: block.number,
+      hash: block.hash,
+      parentHash: block.parentHash,
+      timestamp: block.timestamp,
+    };
+  }
+
+  async getLatestHead(): Promise<FinalizedBlock> {
+    const block = await this.#client.getBlock({ blockTag: "latest" });
+    if (block.hash === null) throw new Error("Latest head has no hash");
     return {
       number: block.number,
       hash: block.hash,
