@@ -8,10 +8,12 @@
     "pnpm": ">=12.3.4 <13"
   },
   "scripts": {
+    "verify:postgres": "node scripts/verify-postgres.mjs",
+    "test:tooling": "node --test scripts/*.test.mjs",
     "build": "turbo run build && forge build --root contracts",
     "check": "biome check . && turbo run check && forge fmt --root contracts --check",
     "dev": "turbo run dev",
-    "test": "turbo run test && forge test --root contracts"
+    "test": "node --test scripts/*.test.mjs && turbo run test && forge test --root contracts"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.13",
