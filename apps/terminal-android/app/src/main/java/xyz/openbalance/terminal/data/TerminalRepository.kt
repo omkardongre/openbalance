@@ -10,10 +10,24 @@ import xyz.openbalance.terminal.protocol.VoucherReceipt
 import xyz.openbalance.terminal.security.EncryptedJournalPayloads
 import xyz.openbalance.terminal.security.TerminalKeyStore
 import xyz.openbalance.terminal.security.Keccak
+import xyz.openbalance.terminal.provisioning.PosOrder
 import java.math.BigInteger
+import java.security.SecureRandom
+import java.util.UUID
 
 data class SalePayload(val request: TerminalPaymentRequest, val attendeeSignature: String?, val receipt: VoucherReceipt?)
 data class SaleView(val requestId: String, val channelId: String, val state: String, val requestQr: String, val receiptJson: String?)
+data class OrderView(
+    val orderId: String,
+    val orderReference: String,
+    val description: String,
+    val grossUnits: String,
+    val assetSymbol: String,
+    val assetDecimals: Int,
+    val expiresAt: Long,
+    val state: String,
+)
+data class ChannelView(val channelId: String, val remainingUnits: String, val acceptUntil: Long)
 
 class TerminalRepository(
     private val database: TerminalDatabase,
@@ -29,7 +43,7 @@ class TerminalRepository(
         val hash = Keccak.hex(canonical.toByteArray())
         val existing = dao.channel(snapshot.channelId.lowercase())
         if (existing != null) {
-            check(existing.snapshotHash == hash && existing.finalizedProofHash.equals(finalizedProofHash, true)) {
+            check(existing.snapshotHash == hash) {
                 "Finalized channel snapshot conflict"
             }
             return false
@@ -41,6 +55,62 @@ class TerminalRepository(
             ),
         ) != -1L
     }
+
+    suspend fun importOrders(orders: List<PosOrder>, now: Long): Int = database.withTransaction {
+        var created = 0
+        for (order in orders) {
+            val canonical = orderJson(order)
+            val existing = dao.order(order.orderId)
+            if (existing != null) {
+                check(existing.orderRefHash == order.orderRefHash && existing.orderVersion == order.orderVersion.toString() &&
+                    existing.grossUnits == order.grossUnits.toString() && existing.receiptCommitment == order.receiptCommitment &&
+                    existing.expiresAt == order.expiresAt && String(payloads.open(existing.payloadNonce, existing.payloadCiphertext, order.orderId.toByteArray())) == canonical
+                ) { "Imported POS order conflict" }
+                continue
+            }
+            val sealed = payloads.seal(canonical.toByteArray(), order.orderId.toByteArray())
+            check(dao.insertOrder(
+                OrderEntity(
+                    order.orderId, order.orderRefHash, order.orderVersion.toString(), order.grossUnits.toString(),
+                    order.receiptCommitment, order.expiresAt, "IMPORTED", sealed.first, sealed.second, null, now, now,
+                ),
+            ) != -1L) { "POS order import conflict" }
+            created++
+        }
+        created
+    }
+
+    suspend fun prepareOrderSale(
+        orderId: String,
+        channelId: String,
+        acceptedAt: Long,
+        latestTrustedAt: Long,
+        nowSeconds: Long,
+        now: Long,
+    ): SaleView =
+        database.withTransaction {
+            val order = requireNotNull(dao.order(orderId)) { "POS order is not imported" }
+            check(order.state == "IMPORTED" && order.expiresAt > nowSeconds) { "POS order is unavailable" }
+            val channel = requireNotNull(dao.channel(channelId.lowercase())) { "Channel is not installed" }
+            val snapshot = parseSnapshot(channel.snapshotJson)
+            val expiresAt = minOf(order.expiresAt, snapshot.acceptUntil, Math.addExact(nowSeconds, 120))
+            check(latestTrustedAt >= acceptedAt && latestTrustedAt < expiresAt) { "Trusted time does not fit the payment window" }
+            val requestId = UUID.randomUUID().toString()
+            var paymentBytes: ByteArray
+            do paymentBytes = ByteArray(32).also(SecureRandom()::nextBytes) while (paymentBytes.all { it == 0.toByte() })
+            val paymentId = "0x" + paymentBytes.toHex()
+            val (_, request) = OfflineProtocol.prepareVoucher(
+                snapshot, channel.nextSequence, channel.lastVoucherDigest, BigInteger(channel.spentUnits),
+                paymentId, order.orderRefHash, BigInteger(order.grossUnits), order.receiptCommitment,
+                acceptedAt, expiresAt, requestId,
+            )
+            val sealed = seal(requestId, SalePayload(request, null, null))
+            dao.insertSale(
+                SaleEntity(requestId, channel.channelId, channel.nextSequence, paymentId, "PREPARED", sealed.first, sealed.second, now, now),
+            )
+            check(dao.markOrderRequested(orderId, requestId, nowSeconds, now) == 1) { "POS order was already used" }
+            view(requireNotNull(dao.sale(requestId)))
+        }
 
     suspend fun prepareSale(
         channelId: String,
@@ -112,6 +182,17 @@ class TerminalRepository(
 
     suspend fun recoverSales(): List<SaleView> = dao.sales().map(::view)
     suspend fun channels(): List<ChannelEntity> = dao.channels()
+    suspend fun channelViews(): List<ChannelView> = dao.channels().map { row ->
+        val snapshot = parseSnapshot(row.snapshotJson)
+        ChannelView(row.channelId, (snapshot.reserveUnits - BigInteger(row.spentUnits)).toString(), snapshot.acceptUntil)
+    }
+    suspend fun orderViews(): List<OrderView> = dao.orders().map { row ->
+        val value = JSONObject(String(payloads.open(row.payloadNonce, row.payloadCiphertext, row.orderId.toByteArray())))
+        OrderView(
+            row.orderId, value.getString("orderReference"), value.getString("description"), row.grossUnits,
+            value.getString("assetSymbol"), value.getInt("assetDecimals"), row.expiresAt, row.state,
+        )
+    }
 
     private fun view(row: SaleEntity): SaleView {
         val payload = open(row)
@@ -161,6 +242,14 @@ class TerminalRepository(
     private fun parseSnapshot(value: String): ChannelSnapshot = JSONObject(value).let { j ->
         ChannelSnapshot(j.getString("channelId"), j.getString("terminalId"), BigInteger(j.getString("chainId")), j.getString("vault"), j.getString("attendeeSigner"), j.getString("terminalSigner"), BigInteger(j.getString("configVersion")), BigInteger(j.getString("reserveUnits")), BigInteger(j.getString("maxPerVoucher")), j.getLong("maxVoucherCount"), j.getLong("acceptFrom"), j.getLong("acceptUntil"), j.getLong("submitUntil"), j.getString("genesisDigest"))
     }
+
+    private fun orderJson(order: PosOrder) = JSONObject().apply {
+        put("vendorName", order.vendorName)
+        put("orderReference", order.orderReference)
+        put("description", order.description)
+        put("assetSymbol", order.assetSymbol)
+        put("assetDecimals", order.assetDecimals)
+    }.toString()
 
     private fun ByteArray.toHex() = joinToString("") { "%02x".format(it.toInt() and 0xff) }
 }
