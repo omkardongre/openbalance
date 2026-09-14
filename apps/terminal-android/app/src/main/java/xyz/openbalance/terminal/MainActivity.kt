@@ -62,7 +62,7 @@ private fun TerminalScreen(model: TerminalViewModel = viewModel()) {
                 QrScanner(Modifier.fillMaxSize(), model::scanned, model::cameraError)
             } else {
                 Column(Modifier.align(Alignment.Center).padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("Camera access is required to scan the attendee authorization.")
+                    Text("Camera access is required to scan ${if (state.scanPurpose == "ENROLLMENT") "the terminal enrollment" else "the attendee authorization"}.")
                     Button(onClick = { cameraPermission.launch(Manifest.permission.CAMERA) }) { Text("Allow camera") }
                 }
             }
@@ -85,7 +85,43 @@ private fun TerminalScreen(model: TerminalViewModel = viewModel()) {
                         Text(if (state.configured) "Terminal configured" else "Configuration required", fontWeight = FontWeight.Bold)
                         Text(state.signer.ifBlank { "Creating protected terminal identity" }, style = MaterialTheme.typography.bodySmall)
                         Text(state.message)
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(onClick = model::beginEnrollmentScan, enabled = !state.busy) { Text("Scan enrollment") }
+                            Button(onClick = model::synchronize, enabled = state.configured && !state.busy) { Text("Synchronize") }
+                        }
                         Button(onClick = model::refreshTime, enabled = state.configured && !state.busy) { Text("Refresh trusted time") }
+                    }
+                }
+            }
+            item { Text("Verified channels", style = MaterialTheme.typography.titleLarge) }
+            if (state.channels.isEmpty()) item { Text("No untouched finalized channels are installed.") }
+            items(state.channels, key = { it.channelId }) { channel ->
+                Card(Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text("Channel ${channel.channelId.take(14)}…", fontWeight = FontWeight.SemiBold)
+                        Text("Remaining ${channel.remainingUnits} token units")
+                        Text("Accept until ${channel.acceptUntil}", style = MaterialTheme.typography.bodySmall)
+                        Button(onClick = { model.selectChannel(channel.channelId) }, enabled = !state.busy) {
+                            Text(if (state.selectedChannelId == channel.channelId) "Selected" else "Use channel")
+                        }
+                    }
+                }
+            }
+            item { Text("Connected POS orders", style = MaterialTheme.typography.titleLarge) }
+            if (state.orders.isEmpty()) item { Text("No imported orders are waiting for offline payment.") }
+            items(state.orders, key = { it.orderId }) { order ->
+                Card(Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text(order.orderReference, fontWeight = FontWeight.SemiBold)
+                            Text(order.state)
+                        }
+                        Text(order.description)
+                        Text("${order.grossUnits} ${order.assetSymbol} base units")
+                        Button(
+                            onClick = { model.createOfflineRequest(order.orderId) },
+                            enabled = order.state == "IMPORTED" && state.selectedChannelId != null && state.trustedTime != null && !state.busy,
+                        ) { Text("Create offline request") }
                     }
                 }
             }

@@ -18,7 +18,13 @@ Build with JDK 17 and Android SDK 37:
 Physical-device persistence, camera, secure-storage, reboot, clock, and poor-light behavior remain
 deployment evidence gates even when the JVM/unit build passes.
 
-Connected channel verification/provisioning and ordered relay upload are not wired into the native
-application yet. `installVerifiedChannel` is a repository boundary for a future verified bootstrap
-caller; accepting a proof hash alone does not verify a deployment. Prepared sales can resume stored
-authorization and display the complete signed receipt. No native end-to-end payment proof is claimed.
+Connected provisioning is implemented through an operator-issued QR whose API credential and HTTPS
+endpoints are encrypted under Android Keystore. Synchronization imports POS orders only after the API
+atomically assigns them to offline mode. The terminal independently checks the API projection block
+against its RPC and verifies pinned runtime bytecode, contract bindings, channel policy, recipients,
+historical terminal authority, and untouched state at one finalized block before installing a channel.
+
+The native UI selects an installed channel and creates a durable, short-lived payment request from an
+imported order only while authenticated time fits both the order and channel windows. Prepared sales
+can resume stored authorization and display the complete signed receipt. Ordered relay upload and
+installed-device evidence remain incomplete; no native end-to-end public-network proof is claimed.
