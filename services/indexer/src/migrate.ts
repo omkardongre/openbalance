@@ -3,7 +3,11 @@ import { readFile } from "node:fs/promises";
 import { Pool } from "pg";
 import { loadIndexerDatabaseConfig } from "./config.js";
 
-const migrations = ["001_finalized_indexer", "002_provisional_indexer"] as const;
+const migrations = [
+  "001_finalized_indexer",
+  "002_provisional_indexer",
+  "003_projection_rebuilds",
+] as const;
 
 async function migrate() {
   const config = loadIndexerDatabaseConfig(process.env);

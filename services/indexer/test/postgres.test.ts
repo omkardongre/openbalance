@@ -3,6 +3,8 @@ import { readFile } from "node:fs/promises";
 import { Pool } from "pg";
 import type { Address, Hex } from "viem";
 import { expect, it } from "vitest";
+import { ProjectionRebuildService } from "../src/rebuild.js";
+import type { FinalizedChainSource } from "../src/source.js";
 import { PgIndexerStore } from "../src/store.js";
 import type { IndexedTransition } from "../src/types.js";
 
@@ -148,4 +150,80 @@ postgresIt(
     }
   },
   15_000,
+);
+
+postgresIt(
+  "rebuilds and promotes a verified shadow projection with explicit plan approval",
+  async () => {
+    if (!databaseUrl) throw new Error("Missing isolated indexer test database");
+    const pool = new Pool({ connectionString: databaseUrl, max: 3 });
+    const streamId = `test:${randomUUID()}`;
+    const blockHash = hash("d");
+    try {
+      for (const name of ["001_finalized_indexer", "003_projection_rebuilds"]) {
+        const migration = await readFile(
+          new URL(`../migrations/${name}.sql`, import.meta.url),
+          "utf8",
+        );
+        const relation =
+          name === "001_finalized_indexer" ? "indexer_cursors" : "projection_rebuilds";
+        if (!(await pool.query("SELECT to_regclass($1) AS name", [relation])).rows[0]?.name)
+          await pool.query(migration);
+      }
+      const store = new PgIndexerStore(pool);
+      await store.commitFinalizedBatch({
+        streamId,
+        chainId: 10_143n,
+        deploymentBlock: 10n,
+        fromBlock: 10n,
+        toBlock: 10n,
+        endBlockHash: blockHash,
+        transitions: [],
+      });
+      await pool.query("UPDATE projection_totals SET ledger_liability_units=1 WHERE stream_id=$1", [
+        streamId,
+      ]);
+      const source: FinalizedChainSource = {
+        async assertManifest() {},
+        async getFinalizedHead() {
+          return this.getBlock(10n);
+        },
+        async getLatestHead() {
+          return this.getBlock(10n);
+        },
+        async getBlock(number) {
+          return { number, hash: blockHash, parentHash: hash("c"), timestamp: 1n };
+        },
+        async getLogs() {
+          return [];
+        },
+        async readConservation() {
+          return { ledgerLiabilityUnits: 0n, vaultReservedUnits: 0n };
+        },
+      };
+      const service = new ProjectionRebuildService(pool, databaseUrl);
+      const plan = await service.rebuild({
+        streamId,
+        chainId: 10_143n,
+        eventId: hash("e"),
+        contracts: { router: address("1"), ledger: address("2"), vault: address("3") },
+        deploymentBlock: 10n,
+        batchSize: 10,
+        source,
+        requestedBy: "operator:test",
+      });
+      expect(plan.changedTables).toContain("projection_totals");
+      await service.promote(plan.rebuildId, plan.planDigest);
+      const result = await pool.query(
+        `SELECT p.ledger_liability_units,r.state FROM projection_totals p
+         JOIN projection_rebuilds r ON r.stream_id=p.stream_id
+         WHERE p.stream_id=$1`,
+        [streamId],
+      );
+      expect(result.rows[0]).toMatchObject({ ledger_liability_units: "0", state: "PROMOTED" });
+    } finally {
+      await pool.end();
+    }
+  },
+  20_000,
 );

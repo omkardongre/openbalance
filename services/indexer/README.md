@@ -20,6 +20,9 @@ with contract state at the exact indexed block.
   only that provisional tail, and the service stops if the configured rewind bound is exceeded.
 - A finalized boundary is marked verified only when its canonical block hash and transition set
   match the separately indexed finalized history. No worker consumes provisional records.
+- Projection repair rebuilds through the normal finalized decoder into an isolated PostgreSQL
+  schema. It records source and shadow fingerprints plus an approval digest; promotion rechecks the
+  cursor, history, fingerprints, and digest under a stream lock before replacing only projections.
 
 ## Configuration
 
@@ -59,3 +62,10 @@ without advancing the cursor.
 
 Provisional observations are opt-in. They are for pending user feedback only and cannot trigger
 financial partner writes or replace finalized truth.
+
+Prepare a projection repair with `pnpm --filter @openbalance/indexer rebuild`. Review the emitted
+changed-table list, target cursor, source/shadow fingerprints, and plan digest. Promote exactly that
+reviewed plan with `pnpm --filter @openbalance/indexer rebuild promote REBUILD_ID PLAN_DIGEST`.
+`INDEXER_REBUILD_OPERATOR` is required for attribution. The command never re-emits integration
+outbox work, never changes finalized history, and refuses promotion if finalized progress or either
+projection copy changed after review.

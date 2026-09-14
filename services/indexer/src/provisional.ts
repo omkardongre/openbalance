@@ -102,11 +102,7 @@ export class ProvisionalIndexer {
     for (let number = fromBlock; number <= toBlock; number += 1n) {
       const block = number === latest.number ? latest : await this.#options.source.getBlock(number);
       const previous = blocks.at(-1);
-      if (
-        !previous &&
-        cursor &&
-        block.parentHash.toLowerCase() !== cursor.blockHash.toLowerCase()
-      )
+      if (!previous && cursor && block.parentHash.toLowerCase() !== cursor.blockHash.toLowerCase())
         throw new Error("RPC returned a provisional block outside the retained canonical tail");
       if (previous && block.parentHash.toLowerCase() !== previous.blockHash.toLowerCase())
         throw new Error("RPC returned a discontinuous provisional block range");
