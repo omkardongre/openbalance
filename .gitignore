@@ -1,6 +1,10 @@
 # Dependencies and package-manager state
 node_modules/
 .pnpm-store/
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
 
 # Build, test, and framework output
 .next/
@@ -9,6 +13,15 @@ dist/
 out/
 cache/
 coverage/
+evidence/
+**/build/
+**/.cxx/
+**/.externalNativeBuild/
+**/captures/
+playwright-report/
+test-results/
+blob-report/
+.nyc_output/
 *.tsbuildinfo
 
 # Smart-contract deployment output
@@ -23,21 +36,46 @@ deployments/local/
 *.pem
 *.p12
 *.pfx
+*.jks
+*.keystore
+key.properties
+google-services.json
 credentials/
 secrets/
 recovery-requests/
 recovery-envelopes/
+.envrc
 
 # Logs, local databases, and temporary files
 *.log
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
+*.hprof
 .tmp/
 .cache/
 
 # Editors and operating systems
 .idea/
 .vscode/
+.fleet/
+.gradle/
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+local.properties
+*.apk
+*.aab
+*.iml
+*.swp
+*.swo
+*.orig
+*.rej
 .DS_Store
 Thumbs.db

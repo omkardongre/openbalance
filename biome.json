@@ -6,6 +6,8 @@
       "!!**/.next",
       "!!**/.turbo",
       "!!**/coverage",
+      "!!**/build",
+      "!!apps/terminal-android/app/schemas",
       "!!**/dist",
       "!!contracts/out",
       "!!contracts/cache",
