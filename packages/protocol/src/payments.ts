@@ -557,10 +557,23 @@ export const exactPayRouterAbi = parseAbi([
 export const eventRegistryAbi = parseAbi([
   "function eventId() view returns (bytes32)",
   "function asset() view returns (address)",
+  "function organizer() view returns (address)",
+  "function riskOperator() view returns (address)",
+  "function maximumFeeBps() view returns (uint16)",
   "function onlinePaused() view returns (bool)",
+  "function vendors(bytes32 vendorId) view returns (address authority,bool enabled)",
   "function configs(uint256 version) view returns (uint48 validAfter,uint48 validUntil,uint16 organizerFeeBps,uint16 platformFeeBps,uint48 maximumAcceptanceDuration,uint48 maximumSubmissionDelay,address organizerDestination,address platformDestination,bytes32 termsHash,bool enabled)",
   "function destinations(bytes32 vendorId,uint256 version) view returns (address account,bool enabled)",
   "function terminals(bytes32 terminalId,uint256 version) view returns (bytes32 vendorId,address signer,uint48 validAfter,uint48 validUntil,bool enabled)",
+  "function registerConfig(uint256 version,(uint48 validAfter,uint48 validUntil,uint16 organizerFeeBps,uint16 platformFeeBps,uint48 maximumAcceptanceDuration,uint48 maximumSubmissionDelay,address organizerDestination,address platformDestination,bytes32 termsHash,bool enabled) config)",
+  "function registerVendor(bytes32 vendorId,address authority)",
+  "function registerDestination(bytes32 vendorId,uint256 version,address destination,uint256 deadline,bytes vendorSignature)",
+  "function registerTerminal(bytes32 terminalId,uint256 version,bytes32 vendorId,address signer,uint48 validAfter,uint48 validUntil)",
+  "function destinationDigest(bytes32 vendorId,uint256 version,address destination,uint256 deadline) view returns (bytes32)",
+  "event ConfigRegistered(uint256 indexed version,bytes32 indexed termsHash)",
+  "event VendorRegistered(bytes32 indexed vendorId,address indexed authority)",
+  "event DestinationRegistered(bytes32 indexed vendorId,uint256 indexed version,address account)",
+  "event TerminalRegistered(bytes32 indexed terminalId,uint256 indexed version,bytes32 vendorId)",
 ]);
 
 export const settlementLedgerAbi = parseAbi([
