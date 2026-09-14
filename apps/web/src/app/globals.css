@@ -350,6 +350,81 @@ button {
   align-items: start;
 }
 
+.device-key-summary,
+.response-qr {
+  display: grid;
+  gap: 0.75rem;
+  margin-top: 1.5rem;
+  padding: 1rem;
+  border: 1px solid #397564;
+  border-radius: 1rem;
+  background: #07110f;
+}
+
+.device-key-summary small,
+.response-qr p,
+.payload-import {
+  color: #9cbeb2;
+}
+
+.offline-stack {
+  width: min(100%, 58rem);
+}
+
+.offline-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 1.5rem;
+}
+
+.qr-camera {
+  width: 100%;
+  min-height: 12rem;
+  max-height: 26rem;
+  margin-top: 1rem;
+  border: 1px solid #254d42;
+  border-radius: 1rem;
+  background: #030806;
+  object-fit: cover;
+}
+
+.payload-import {
+  margin-top: 1rem;
+}
+
+.payload-import summary {
+  cursor: pointer;
+}
+
+.offline-ready,
+.offline-not-ready {
+  width: fit-content;
+  padding: 0.55rem 0.75rem;
+  border-radius: 999px;
+  font: 700 0.78rem / 1.2 monospace;
+}
+
+.offline-ready {
+  background: rgb(110 243 189 / 12%);
+  color: #6ef3bd;
+}
+
+.offline-not-ready {
+  background: rgb(255 203 107 / 12%);
+  color: #ffcb6b;
+}
+
+.response-qr {
+  justify-items: center;
+}
+
+.response-qr img {
+  width: min(100%, 22.5rem);
+  border-radius: 0.75rem;
+  image-rendering: pixelated;
+}
+
 .operation-card > div {
   display: flex;
   justify-content: space-between;

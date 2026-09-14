@@ -1,0 +1,18 @@
+{
+  "name": "OpenBalance Offline Wallet",
+  "short_name": "OpenBalance",
+  "description": "Approve bounded event purchases from a pre-funded offline reserve.",
+  "start_url": "/offline",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#07110f",
+  "theme_color": "#07110f",
+  "icons": [
+    {
+      "src": "/openbalance-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

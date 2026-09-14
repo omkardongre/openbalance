@@ -6,6 +6,8 @@ import "./globals.css";
 export const metadata: Metadata = {
   title: "OpenBalance",
   description: "Exact event payments with attendee-controlled outage reserves.",
+  manifest: "/manifest.webmanifest",
+  icons: { icon: "/openbalance-icon.svg" },
 };
 
 export default function RootLayout({ children }: Readonly<{ children: ReactNode }>) {
