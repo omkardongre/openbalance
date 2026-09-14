@@ -11,6 +11,7 @@ import {
   type Hex,
   keccak256,
 } from "viem";
+import { OrganizerConfigurationPanel } from "./organizer-configuration";
 
 const bytes32 = /^0x[0-9a-fA-F]{64}$/;
 
@@ -62,7 +63,7 @@ type Incident = {
 
 type OperationsProfile = {
   role: "VENDOR" | "ORGANIZER" | "FINANCE" | "SUPPORT";
-  eventId: string;
+  eventId: Hex;
   vendorId: string | null;
   checkoutPolicy: {
     chainId: number;
@@ -71,6 +72,11 @@ type OperationsProfile = {
     router: `0x${string}`;
     asset: `0x${string}`;
     destinationVersion: string;
+  } | null;
+  organizerPolicy: {
+    chainId: number;
+    eventId: Hex;
+    registry: `0x${string}`;
   } | null;
 };
 
@@ -591,6 +597,17 @@ export default function OperationsPage() {
                   </p>
                 )}
               </section>
+            )}
+
+            {profile?.role === "ORGANIZER" && profile.organizerPolicy && api && (
+              <OrganizerConfigurationPanel
+                api={api}
+                token={token}
+                profile={profile}
+                busy={busy}
+                setBusy={setBusy}
+                setStatus={setStatus}
+              />
             )}
 
             <section className="shell operations-panel">

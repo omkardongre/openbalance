@@ -244,8 +244,20 @@ textarea {
   gap: 1rem;
 }
 
+.configuration-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 1rem;
+}
+
 button {
   margin: 0.5rem 0.5rem 0.5rem 0;
+}
+
+.configuration-fields button {
+  align-self: end;
+  min-height: 3rem;
+  margin-bottom: 1rem;
 }
 
 .secondary-button {
@@ -256,6 +268,24 @@ button {
 
 .checkout-stack {
   width: min(100%, 58rem);
+}
+
+.verifier-stack,
+.verifier-shell {
+  width: min(100%, 68rem);
+}
+
+.verifier-shell h1 {
+  font-size: clamp(2.8rem, 7vw, 5.5rem);
+}
+
+.verifier-result pre {
+  overflow: auto;
+  margin: 0;
+  color: #b9d5cb;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .checkout-shell {
@@ -397,6 +427,7 @@ code {
   .operations-inputs,
   .operations-grid,
   .incident-fields,
+  .configuration-fields,
   .field-grid {
     grid-template-columns: 1fr;
   }
