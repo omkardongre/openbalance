@@ -1,0 +1,14 @@
+global:
+  scrape_interval: 10s
+  evaluation_interval: 10s
+
+scrape_configs:
+  - job_name: openbalance
+    static_configs:
+      - targets:
+          - host.docker.internal:9464
+          - host.docker.internal:9465
+          - host.docker.internal:9466
+          - host.docker.internal:9467
+          - host.docker.internal:9468
+          - host.docker.internal:9469

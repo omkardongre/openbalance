@@ -1,0 +1,70 @@
+{
+  "annotations": { "list": [] },
+  "editable": false,
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "HTTP request rate",
+      "targets": [
+        {
+          "expr": "sum by (service_name, method, status) (rate(openbalance_http_requests_total[5m]))",
+          "legendFormat": "{{service_name}} {{method}} {{status}}"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 }
+    },
+    {
+      "type": "timeseries",
+      "title": "HTTP p95 latency",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, service_name, route) (rate(openbalance_http_duration_milliseconds_bucket[5m])))",
+          "legendFormat": "{{service_name}} {{route}}"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Finalized transitions",
+      "targets": [
+        {
+          "expr": "sum(rate(openbalance_finalized_transitions_total[5m]))",
+          "legendFormat": "finalized/s"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 8 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Reconciliation differences",
+      "targets": [
+        {
+          "expr": "sum(increase(openbalance_reconciliation_differences_total[15m]))",
+          "legendFormat": "differences"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 8 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Financial operation outcomes",
+      "targets": [
+        {
+          "expr": "sum by (state) (increase(openbalance_financial_operation_outcomes_total[15m]))",
+          "legendFormat": "{{state}}"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 8 }
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 42,
+  "tags": ["openbalance", "operations"],
+  "templating": { "list": [] },
+  "time": { "from": "now-1h", "to": "now" },
+  "timezone": "browser",
+  "title": "OpenBalance Operations",
+  "uid": "openbalance-operations",
+  "version": 1
+}
