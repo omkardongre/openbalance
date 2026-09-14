@@ -91,7 +91,7 @@ export async function buildApp(
         .passthrough(),
     });
     app.addHook("onRequest", async (request, reply) => {
-      if (request.method === "POST") {
+      if (request.method === "POST" && !request.url.startsWith("/v1/terminal/")) {
         reply.header("Cache-Control", "no-store");
         if (request.headers.origin !== origin)
           return reply.code(403).send({ error: "origin_denied" });
@@ -471,6 +471,51 @@ export async function buildApp(
         } catch (error) {
           if (error instanceof CheckoutNotFound)
             return reply.code(404).send({ error: "checkout_not_found", retryable: false });
+          return operationsError(reply, error);
+        }
+      });
+
+      app.post("/v1/terminal/provisioning-challenges", async (request, reply) => {
+        reply.header("Cache-Control", "private, no-store");
+        try {
+          const identity = await control.access.authenticate(request.headers.authorization);
+          control.access.assertRole(identity, ["VENDOR"]);
+          return await checkout.beginTerminalProvisioning(identity);
+        } catch (error) {
+          return operationsError(reply, error);
+        }
+      });
+
+      app.post("/v1/terminal/provisioning", async (request, reply) => {
+        reply.header("Cache-Control", "private, no-store");
+        const parsed = z
+          .object({
+            challenge: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+            terminalSignature: z.string().regex(/^0x[0-9a-fA-F]{130}$/),
+          })
+          .strict()
+          .safeParse(request.body);
+        if (!parsed.success)
+          return reply
+            .code(400)
+            .send({ error: "invalid_terminal_provisioning_proof", retryable: false });
+        try {
+          const identity = await control.access.authenticate(request.headers.authorization);
+          control.access.assertRole(identity, ["VENDOR"]);
+          return await checkout.terminalProvisioning(
+            identity,
+            parsed.data.challenge,
+            parsed.data.terminalSignature as `0x${string}`,
+          );
+        } catch (error) {
+          if (error instanceof CheckoutConflict)
+            return reply
+              .code(409)
+              .send({ error: "terminal_provisioning_conflict", retryable: true });
+          if (error instanceof CheckoutRejected)
+            return reply
+              .code(422)
+              .send({ error: "terminal_provisioning_rejected", retryable: false });
           return operationsError(reply, error);
         }
       });
