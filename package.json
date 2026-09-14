@@ -8,17 +8,26 @@
     "pnpm": ">=12.3.4 <13"
   },
   "scripts": {
+    "android:build": "./apps/terminal-android/gradlew -p apps/terminal-android :app:testDebugUnitTest :app:assembleDebug",
+    "coverage:contracts": "forge coverage --root contracts --ir-minimum --report summary",
+    "evidence:package": "node scripts/package-evidence.mjs",
+    "sbom": "node scripts/generate-sbom.mjs evidence/sbom.cdx.json",
     "verify:postgres": "node scripts/verify-postgres.mjs",
+    "verify:local": "node scripts/verify-local-system.mjs",
+    "verify:local-chain": "node scripts/verify-local-chain.mjs",
     "test:tooling": "node --test scripts/*.test.mjs",
+    "workload": "node scripts/run-payment-workload.mjs",
     "build": "turbo run build && forge build --root contracts",
     "check": "biome check . && turbo run check && forge fmt --root contracts --check",
     "dev": "turbo run dev",
-    "test": "node --test scripts/*.test.mjs && turbo run test && forge test --root contracts"
+    "test": "node --test scripts/*.test.mjs && turbo run test && forge test --root contracts",
+    "verify:release": "pnpm check && pnpm test && pnpm build && pnpm coverage:contracts && pnpm run sbom"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.13",
     "@openzeppelin/contracts": "5.6.1",
     "turbo": "2.10.12",
-    "typescript": "7.0.2"
+    "typescript": "7.0.2",
+    "yaml": "2.9.1"
   }
 }

@@ -1,4 +1,5 @@
 import { setTimeout as delay } from "node:timers/promises";
+import { startTelemetry, writeLog } from "@openbalance/observability";
 import { Pool } from "pg";
 import { defineChain } from "viem";
 import { loadIndexerConfig } from "./config.js";
@@ -9,17 +10,25 @@ import { DeploymentManifestMismatch, ViemFinalizedChainSource } from "./source.j
 import { PgIndexerStore } from "./store.js";
 
 function log(level: "info" | "error", message: string, fields: Record<string, unknown> = {}) {
-  const value = JSON.stringify({
-    level,
-    service: "indexer",
-    message,
-    ...fields,
-  });
-  (level === "error" ? process.stderr : process.stdout).write(`${value}\n`);
+  writeLog("openbalance-indexer", level, message, fields);
 }
 
 async function main() {
   const config = loadIndexerConfig(process.env);
+  const telemetry = await startTelemetry({
+    serviceName: "openbalance-indexer",
+    metricsPort: Number(process.env.METRICS_PORT ?? "9467"),
+    ...(process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+      ? { otlpTraceUrl: process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT }
+      : {}),
+  });
+  const finalizedTransitions = telemetry.meter.createCounter("openbalance_finalized_transitions", {
+    unit: "{transition}",
+  });
+  const reconciliationDifferences = telemetry.meter.createCounter(
+    "openbalance_reconciliation_differences",
+    { unit: "{difference}" },
+  );
   const chain = defineChain({
     id: config.chainId,
     name: config.chainName,
@@ -80,8 +89,10 @@ async function main() {
             toBlock: run.toBlock.toString(),
             transitionCount: run.transitionCount,
           });
+        finalizedTransitions.add(run.transitionCount);
         if (run.caughtUp) {
           const reconciliation = await reconciler.runAtCursor();
+          if (reconciliation) reconciliationDifferences.add(reconciliation.differences.length);
           if (reconciliation)
             log(
               reconciliation.differences.length === 0 ? "info" : "error",
@@ -117,6 +128,7 @@ async function main() {
     }
   } finally {
     await pool.end();
+    await telemetry.shutdown();
     log("info", "Indexer stopped");
   }
 }

@@ -1,3 +1,4 @@
+import { startTelemetry, writeLog } from "@openbalance/observability";
 import { Pool } from "pg";
 import { loadIntegrationEnvironment, loadIntegrationMappings } from "./config.js";
 import { ErpNextClient } from "./erpnext.js";
@@ -6,6 +7,20 @@ import { FinalizedPaymentImporter } from "./source.js";
 import { IntegrationWorker } from "./worker.js";
 
 const environment = loadIntegrationEnvironment(process.env);
+const telemetry = await startTelemetry({
+  serviceName: "openbalance-integrations",
+  metricsPort: Number(process.env.METRICS_PORT ?? "9468"),
+  ...(process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+    ? { otlpTraceUrl: process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT }
+    : {}),
+});
+const importedPayments = telemetry.meter.createCounter(
+  "openbalance_integration_imported_payments",
+  { unit: "{payment}" },
+);
+const deliveryRuns = telemetry.meter.createCounter("openbalance_integration_delivery_runs", {
+  unit: "{run}",
+});
 const mappings = await loadIntegrationMappings(environment.INTEGRATION_MAPPING_PATH);
 const pool = (connectionString: string, applicationName: string, max: number) =>
   new Pool({
@@ -50,24 +65,23 @@ try {
     let progressed = false;
     for (const streamId of streams) {
       const imported = await importer.importOnce(streamId, environment.INTEGRATION_IMPORT_LIMIT);
+      importedPayments.add(imported, { stream: streamId });
       progressed ||= imported > 0;
     }
     for (let delivered = 0; delivered < environment.INTEGRATION_DELIVERY_LIMIT; delivered += 1) {
       const outcome = await worker.runOnce();
       if (outcome === "IDLE") break;
+      deliveryRuns.add(1, { outcome });
       progressed = true;
     }
     if (!progressed) await pause(environment.INTEGRATION_POLL_INTERVAL_MS);
   }
 } catch (error) {
-  process.stderr.write(
-    `${JSON.stringify({
-      level: "error",
-      service: "integration-worker",
-      error: error instanceof Error ? error.constructor.name : "UnknownError",
-    })}\n`,
-  );
+  writeLog("openbalance-integrations", "error", "Integration worker failed", {
+    error: error instanceof Error ? error.constructor.name : "UnknownError",
+  });
   process.exitCode = 1;
 } finally {
   await Promise.all([state.end(), indexer.end(), api.end()]);
+  await telemetry.shutdown();
 }

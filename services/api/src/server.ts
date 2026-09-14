@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { startTelemetry } from "@openbalance/observability";
 import { Pool } from "pg";
 import { AccountAccessService } from "./account-access.js";
 import { buildApp } from "./app.js";
@@ -17,6 +18,13 @@ import { OrganizerConfigurationService } from "./organizer-configuration.js";
 import { ViemOrganizerConfigurationChain } from "./organizer-configuration-chain.js";
 
 const environment = loadEnvironment(process.env);
+const telemetry = await startTelemetry({
+  serviceName: "openbalance-api",
+  metricsPort: Number(process.env.METRICS_PORT ?? "9464"),
+  ...(process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+    ? { otlpTraceUrl: process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT }
+    : {}),
+});
 const pool = environment.DATABASE_URL
   ? new Pool({
       connectionString: environment.DATABASE_URL,
@@ -104,8 +112,21 @@ const app = await buildApp(
   access,
   operations,
   control,
+  pool
+    ? [
+        {
+          name: "database",
+          check: async () => {
+            await pool.query("SELECT 1");
+          },
+        },
+      ]
+    : [],
 );
-if (pool) app.addHook("onClose", async () => pool.end());
+app.addHook("onClose", async () => {
+  if (pool) await pool.end();
+  await telemetry.shutdown();
+});
 for (const signal of ["SIGTERM", "SIGINT"] as const)
   process.once(signal, () => {
     void app.close();

@@ -9,6 +9,7 @@ import {
   SponsorshipQuotaExceeded,
   SponsorshipUnavailable,
 } from "@openbalance/api/sponsorship";
+import { attachHttpOperations, type ReadinessCheck } from "@openbalance/observability";
 import Fastify, { type FastifyReply } from "fastify";
 import { z } from "zod";
 import {
@@ -38,6 +39,7 @@ export async function buildRelayerApp(
     treasuryAccess?: VendorTreasuryAccessService;
     treasuryCommands?: VendorFinancialCommandService;
   },
+  readiness: ReadinessCheck[] = [],
 ) {
   const app = Fastify({ logger: false, bodyLimit: 300_000 });
   await app.register(cors, {
@@ -46,6 +48,7 @@ export async function buildRelayerApp(
     origin,
   });
   await app.register(rateLimit, { max: 10, timeWindow: "1 minute" });
+  await attachHttpOperations(app, { serviceName: "openbalance-relayer", readiness });
   app.addHook("onRequest", async (request, reply) => {
     reply.header("Cache-Control", "no-store");
     if (request.method === "POST" && request.headers.origin !== origin)

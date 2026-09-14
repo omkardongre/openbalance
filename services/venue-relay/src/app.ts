@@ -1,4 +1,5 @@
 import rateLimit from "@fastify/rate-limit";
+import { attachHttpOperations } from "@openbalance/observability";
 import Fastify from "fastify";
 import type { Hex } from "viem";
 import { z } from "zod";
@@ -48,11 +49,16 @@ export type VenueRelayAppOptions = {
   audience: string;
   maximumClockSkewSeconds?: number;
   now?: () => number;
+  readiness?: () => Promise<void>;
 };
 
 export async function buildVenueRelayApp(options: VenueRelayAppOptions) {
   const app = Fastify({ logger: false, bodyLimit: 128 * 1_024 });
   await app.register(rateLimit, { max: 120, timeWindow: "1 minute" });
+  await attachHttpOperations(app, {
+    serviceName: "openbalance-venue-relay",
+    readiness: options.readiness ? [{ name: "journal", check: options.readiness }] : [],
+  });
   app.addHook("onRequest", async (_request, reply) => {
     reply.header("Cache-Control", "no-store");
     reply.header("X-Content-Type-Options", "nosniff");

@@ -3,6 +3,11 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "files": [
+    "dist",
+    "migrations",
+    "package.json"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "check": "tsc --noEmit",
@@ -16,6 +21,7 @@
     "@fastify/cors": "11.3.0",
     "@fastify/rate-limit": "11.2.0",
     "@openbalance/api": "workspace:*",
+    "@openbalance/observability": "workspace:*",
     "@openbalance/protocol": "workspace:*",
     "fastify": "5.12.3",
     "pg": "8.23.0",

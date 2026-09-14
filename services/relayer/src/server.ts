@@ -3,6 +3,7 @@ import { AccountAccessService } from "@openbalance/api/account-access";
 import { DeploymentChain } from "@openbalance/api/deployment-chain";
 import { DeploymentService } from "@openbalance/api/deployments";
 import { DeploymentSponsorshipService, loadSponsorAccount } from "@openbalance/api/sponsorship";
+import { startTelemetry } from "@openbalance/observability";
 import { Pool } from "pg";
 import { buildRelayerApp } from "./app.js";
 import { AttendeeFinancialCommandService } from "./attendee-commands.js";
@@ -15,6 +16,13 @@ import { VendorFinancialCommandService } from "./vendor-commands.js";
 import { VendorTreasuryAccessService } from "./vendor-treasury-access.js";
 
 const environment = loadRelayerEnvironment(process.env);
+const telemetry = await startTelemetry({
+  serviceName: "openbalance-relayer",
+  metricsPort: Number(process.env.METRICS_PORT ?? "9465"),
+  ...(process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+    ? { otlpTraceUrl: process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT }
+    : {}),
+});
 const pool = new Pool({
   connectionString: environment.DATABASE_URL,
   max: 10,
@@ -73,8 +81,24 @@ if (environment.FINANCIAL_EVENT_MANIFEST_PATH) {
     }),
   };
 }
-const app = await buildRelayerApp(sponsorship, environment.WEBAUTHN_ORIGIN, financial);
-app.addHook("onClose", async () => pool.end());
+const app = await buildRelayerApp(sponsorship, environment.WEBAUTHN_ORIGIN, financial, [
+  {
+    name: "database",
+    check: async () => {
+      await pool.query("SELECT 1");
+    },
+  },
+  {
+    name: "account-chain",
+    check: async () => {
+      await chain.checkpoint();
+    },
+  },
+]);
+app.addHook("onClose", async () => {
+  await pool.end();
+  await telemetry.shutdown();
+});
 for (const signal of ["SIGTERM", "SIGINT"] as const)
   process.once(signal, () => {
     void app.close();

@@ -1,5 +1,6 @@
 import { setTimeout as delay } from "node:timers/promises";
 import { loadSponsorAccount } from "@openbalance/api/sponsorship";
+import { startTelemetry, writeLog } from "@openbalance/observability";
 import { Pool } from "pg";
 import { defineChain } from "viem";
 import { loadFinancialWorkerEnvironment } from "./config.js";
@@ -12,12 +13,21 @@ import { ViemFinancialFinalityVerifier } from "./viem-financial-finality.js";
 import { ViemFinancialTransactionGateway } from "./viem-financial-gateway.js";
 
 function log(level: "info" | "error", message: string, fields: Record<string, unknown> = {}) {
-  const line = JSON.stringify({ level, service: "financial-worker", message, ...fields });
-  (level === "error" ? process.stderr : process.stdout).write(`${line}\n`);
+  writeLog("openbalance-financial-worker", level, message, fields);
 }
 
 async function main() {
   const config = loadFinancialWorkerEnvironment(process.env);
+  const telemetry = await startTelemetry({
+    serviceName: "openbalance-financial-worker",
+    metricsPort: Number(process.env.METRICS_PORT ?? "9469"),
+    ...(process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+      ? { otlpTraceUrl: process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT }
+      : {}),
+  });
+  const outcomes = telemetry.meter.createCounter("openbalance_financial_operation_outcomes", {
+    unit: "{operation}",
+  });
   const manifest = await loadFinancialEventManifest(config.FINANCIAL_EVENT_MANIFEST_PATH);
   await new ViemFinancialManifestVerifier(config.FINANCIAL_RPC_URL).assert(manifest);
   const chain = defineChain({
@@ -67,6 +77,7 @@ async function main() {
     while (!stopping) {
       try {
         const run = await worker.runOnce();
+        for (const [state, count] of Object.entries(run)) outcomes.add(count, { state });
         if (Object.values(run).some((count) => count > 0)) log("info", "Financial worker run", run);
       } catch (error) {
         log("error", error instanceof Error ? error.message : "Financial worker run failed");
@@ -75,6 +86,7 @@ async function main() {
     }
   } finally {
     await pool.end();
+    await telemetry.shutdown();
     log("info", "Financial worker stopped");
   }
 }

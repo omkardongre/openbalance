@@ -156,6 +156,13 @@ export class VenueRelayJournal {
     this.#key.fill(0);
   }
 
+  assertReady(): void {
+    const result = this.#database.prepare("PRAGMA quick_check").get() as
+      | { quick_check?: string }
+      | undefined;
+    if (result?.quick_check !== "ok") throw new Error("Venue relay journal integrity check failed");
+  }
+
   ingest(receipt: VoucherReceipt, now = Date.now()): { created: boolean; record: JournalRecord } {
     return this.#ingest(receipt, now);
   }

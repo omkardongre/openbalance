@@ -3,6 +3,10 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "files": [
+    "dist",
+    "package.json"
+  ],
   "exports": {
     ".": "./dist/journal.js",
     "./app": "./dist/app.js",
@@ -20,6 +24,7 @@
   "dependencies": {
     "@fastify/rate-limit": "11.2.0",
     "@openbalance/protocol": "workspace:*",
+    "@openbalance/observability": "workspace:*",
     "fastify": "5.12.3",
     "viem": "2.56.3",
     "zod": "4.6.1"

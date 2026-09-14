@@ -1,5 +1,6 @@
 import cors from "@fastify/cors";
 import rateLimit from "@fastify/rate-limit";
+import { attachHttpOperations, type ReadinessCheck } from "@openbalance/observability";
 import type { AuthenticationResponseJSON, RegistrationResponseJSON } from "@simplewebauthn/server";
 import Fastify, { type FastifyReply } from "fastify";
 import { z } from "zod";
@@ -49,6 +50,7 @@ export async function buildApp(
   access?: AccountAccessService,
   operations?: OperationalReadService,
   control?: OperationsControl,
+  readiness: ReadinessCheck[] = [],
 ) {
   const app = Fastify({ logger: false, bodyLimit: 32_768 });
 
@@ -58,6 +60,7 @@ export async function buildApp(
     origin: origin ?? false,
   });
   await app.register(rateLimit, { max: 20, timeWindow: "1 minute" });
+  await attachHttpOperations(app, { serviceName: "openbalance-api", readiness });
 
   if (enrollment && origin) {
     const bodySchema = z.object({
