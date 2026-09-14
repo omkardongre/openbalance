@@ -127,6 +127,9 @@ importers:
       '@openbalance/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
+      '@openbalance/verifier':
+        specifier: workspace:*
+        version: link:../../packages/verifier
       '@simplewebauthn/browser':
         specifier: 14.0.0
         version: 14.0.0

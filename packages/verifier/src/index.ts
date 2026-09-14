@@ -76,6 +76,13 @@ export interface VerificationReader {
 }
 
 export function createVerificationReader(rpcUrl: string, chain: Chain): VerificationReader {
+  const url = new URL(rpcUrl);
+  if (
+    (url.protocol !== "https:" && !["localhost", "127.0.0.1", "::1"].includes(url.hostname)) ||
+    url.username ||
+    url.password
+  )
+    throw new VerificationFailed("RPC URL must use HTTPS and contain no embedded credentials");
   const client = createPublicClient({
     chain,
     transport: http(rpcUrl, { retryCount: 2, timeout: 10_000 }),

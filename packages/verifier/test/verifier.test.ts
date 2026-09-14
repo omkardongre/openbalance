@@ -1,6 +1,7 @@
 import { exactPayRouterAbi, type ReserveChannelConfig } from "@openbalance/protocol";
 import {
   type Address,
+  type Chain,
   encodeAbiParameters,
   encodeEventTopics,
   type Hex,
@@ -9,6 +10,7 @@ import {
 } from "viem";
 import { describe, expect, it } from "vitest";
 import {
+  createVerificationReader,
   type DeploymentManifest,
   VerificationFailed,
   type VerificationReader,
@@ -142,6 +144,9 @@ function paymentReceipt(): TransactionReceipt {
 
 describe("independent verifier", () => {
   it("verifies deployment code and immutable cross-bindings at finalized state", async () => {
+    expect(() => createVerificationReader("http://rpc.example", {} as Chain)).toThrow(
+      "RPC URL must use HTTPS",
+    );
     const reader = new Reader();
     await expect(verifyDeployment(reader, manifest)).resolves.toEqual({
       chainId: 10143,

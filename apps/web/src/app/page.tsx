@@ -24,6 +24,9 @@ export default function HomePage() {
             <Link className="secondary-action" href="/operations">
               Open operations desk
             </Link>
+            <Link className="secondary-action" href="/verify">
+              Verify independently
+            </Link>
           </div>
         </section>
         <section className="feature-grid" aria-label="OpenBalance guarantees">
