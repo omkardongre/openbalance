@@ -101,11 +101,22 @@ export class TerminalDeviceController {
       nowSeconds,
     );
     const voucher = decodeOfflineVoucher(attendeeSigned.request.voucher);
+    const authorizeCommit = () => {
+      this.#requiredClock().authorizeSale({
+        ...this.monotonicClock.read(),
+        acceptFrom: voucher.acceptedAt,
+        acceptUntil: voucher.acceptUntil,
+        expiresAt: attendeeSigned.request.expiresAt,
+      });
+    };
+    authorizeCommit();
     const terminalSignature = await this.terminalKey.signDigest(offlineVoucherDigest(voucher));
     const accepted = await this.journal.acceptSale(
       requestId,
       `receipt:${sha256(stringToHex(requestId)).slice(2)}`,
       terminalSignature,
+      Date.now(),
+      authorizeCommit,
     );
     if (!accepted.receipt) throw new TerminalDeviceNotReady("Accepted sale has no receipt");
     return { sale: accepted, receiptQrPayload: canonicalVoucherReceipt(accepted.receipt) };

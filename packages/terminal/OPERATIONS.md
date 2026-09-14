@@ -8,6 +8,19 @@
 3. Recover expired upload leases before starting the upload loop.
 4. Refuse offline acceptance if trusted time or channel provenance cannot be established.
 
+`SignedHttpsTimeSource` accepts an HTTPS authority endpoint and an independently provisioned
+Ed25519 public key. The authority must return JSON with `nonce`, `unixMs`, `uncertaintyMs`, and
+a lowercase hex `signature` over `timeAttestationPayload(...)`. Its uncertainty must come from
+monitored clock synchronization; signing an unchecked wall clock is not a trusted time service.
+Every request uses a new nonce. The client verifies the signature, bounds response size and
+round-trip duration, and includes the full elapsed request time in the latest possible instant.
+The device must supply a suspend-aware monotonic clock and boot identity. No live authority or
+Android adapter is configured by this package.
+
+The controller checks the trusted window before signing and again after signature recovery,
+immediately before the journal's synchronous acceptance transaction. If signing crosses expiry,
+the attendee response remains durable but the terminal does not acknowledge acceptance.
+
 ## Sale lifecycle
 
 `PREPARED` records reserve sequence and cumulative amount atomically. `ATTENDEE_SIGNED` preserves

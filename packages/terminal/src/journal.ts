@@ -439,6 +439,7 @@ export class TerminalJournal {
     receiptId: string,
     terminalSignature: Hex,
     now = Date.now(),
+    authorizeCommit?: () => void,
   ): Promise<TerminalSale> {
     if (!signature.test(terminalSignature))
       throw new InvalidTerminalTransition("Invalid terminal signature");
@@ -466,6 +467,9 @@ export class TerminalJournal {
       terminalSignature,
     });
     validateVoucherReceipt(receipt);
+
+    // Run after asynchronous signature recovery, immediately before the synchronous transaction.
+    authorizeCommit?.();
 
     this.#database.exec("BEGIN IMMEDIATE");
     try {
