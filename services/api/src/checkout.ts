@@ -1,4 +1,4 @@
-import { createHash, createHmac, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import {
   decodePaymentIntent,
   encodePaymentIntent,
@@ -8,7 +8,15 @@ import {
   receiptCommitment,
 } from "@openbalance/protocol";
 import type { Pool } from "pg";
-import { encodeAbiParameters, getAddress, type Hex, keccak256, recoverAddress } from "viem";
+import {
+  encodeAbiParameters,
+  getAddress,
+  type Hex,
+  keccak256,
+  recoverAddress,
+  stringToHex,
+  toHex,
+} from "viem";
 import type { AccountIdentity } from "./account-access.js";
 import type { CheckoutPolicyVerifier } from "./checkout-chain.js";
 import type { CheckoutEventPolicy, CheckoutManifest } from "./checkout-manifest.js";
@@ -21,6 +29,8 @@ export class CheckoutRejected extends Error {}
 const idempotencyPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$/;
 const capabilityPattern = /^[A-Za-z0-9_-]{43}$/;
 const signaturePattern = /^0x[0-9a-fA-F]{130}$/;
+const provisioningChallengePattern = /^[A-Za-z0-9_-]{43}$/;
+const terminalProvisioningDomain = keccak256(stringToHex("openbalance:terminal-provisioning:v1"));
 
 function hasControlCharacters(value: string) {
   return Array.from(value).some((character) => {
@@ -60,7 +70,7 @@ type OrderRow = {
   encoded_intent: Hex | null;
   display: CheckoutDisplay;
   reserve_policy: ReservePolicy;
-  state: "CREATED" | "BOUND" | "READY";
+  state: "CREATED" | "OFFLINE_IMPORTED" | "BOUND" | "READY";
   terminal_signature: Hex | null;
   request_hash: Hex;
   expires_at: Date;
@@ -106,8 +116,12 @@ export class CheckoutService {
   }
 
   async assertReady() {
-    const result = await this.pool.query("SELECT to_regclass('public.checkout_orders') AS orders");
-    if (!result.rows[0]?.orders) throw new Error("Checkout migration is not installed");
+    const result = await this.pool.query(
+      `SELECT to_regclass('public.checkout_orders') AS orders,
+              to_regclass('public.terminal_provisioning_challenges') AS challenges`,
+    );
+    if (!result.rows[0]?.orders || !result.rows[0]?.challenges)
+      throw new Error("Checkout migration is not installed");
   }
 
   policy(identity: OperationsIdentity) {
@@ -125,6 +139,172 @@ export class CheckoutService {
       destinationVersion: vendor.destinationVersion.toString(),
       terminalSigner: vendor.terminal.signer,
     };
+  }
+
+  /**
+   * Returns only untouched finalized channels and unresolved POS orders for the authenticated
+   * terminal scope. The Android client independently verifies every channel against its RPC.
+   */
+  async beginTerminalProvisioning(identity: OperationsIdentity) {
+    const { event, vendor } = this.vendorPolicy(identity);
+    const challenge = randomBytes(32).toString("base64url");
+    await this.pool.query(
+      `DELETE FROM terminal_provisioning_challenges WHERE challenge_hash IN (
+         SELECT challenge_hash FROM terminal_provisioning_challenges
+         WHERE expires_at<clock_timestamp()-interval '1 day' LIMIT 1000
+       )`,
+    );
+    await this.pool.query(
+      `INSERT INTO terminal_provisioning_challenges
+       (challenge_hash,stream_id,event_id,vendor_id,terminal_instance_id,expires_at)
+       VALUES ($1,$2,$3,$4,$5,clock_timestamp()+interval '5 minutes')`,
+      [
+        tokenHash(challenge),
+        identity.streamId,
+        event.eventId,
+        vendor.vendorId,
+        vendor.terminal.instanceId,
+      ],
+    );
+    return {
+      schemaVersion: 1 as const,
+      challenge,
+      chainId: this.#chainId,
+      eventId: event.eventId,
+      terminalInstanceId: vendor.terminal.instanceId,
+    };
+  }
+
+  async terminalProvisioning(identity: OperationsIdentity, challenge: string, signature: Hex) {
+    const { event, vendor } = this.vendorPolicy(identity);
+    if (!provisioningChallengePattern.test(challenge) || !signaturePattern.test(signature))
+      throw new CheckoutRejected("Terminal proof is malformed");
+    const challengeBytes = Buffer.from(challenge, "base64url");
+    if (challengeBytes.length !== 32) throw new CheckoutRejected("Terminal proof is malformed");
+    const digest = keccak256(
+      encodeAbiParameters(
+        [
+          { type: "bytes32" },
+          { type: "uint256" },
+          { type: "bytes32" },
+          { type: "bytes32" },
+          { type: "bytes32" },
+        ],
+        [
+          terminalProvisioningDomain,
+          BigInt(this.#chainId),
+          event.eventId,
+          vendor.terminal.instanceId,
+          toHex(challengeBytes, { size: 32 }),
+        ],
+      ),
+    );
+    let signer: `0x${string}`;
+    try {
+      signer = await recoverAddress({ hash: digest, signature });
+    } catch {
+      throw new CheckoutRejected("Terminal proof is invalid");
+    }
+    if (signer !== vendor.terminal.signer) throw new CheckoutRejected("Terminal proof is invalid");
+    const db = await this.pool.connect();
+    try {
+      await db.query("BEGIN ISOLATION LEVEL REPEATABLE READ");
+      const consumed = await db.query(
+        `UPDATE terminal_provisioning_challenges SET used_at=clock_timestamp()
+         WHERE challenge_hash=$1 AND stream_id=$2 AND event_id=$3 AND vendor_id=$4
+           AND terminal_instance_id=$5 AND used_at IS NULL AND expires_at>clock_timestamp()
+         RETURNING challenge_hash`,
+        [
+          tokenHash(challenge),
+          identity.streamId,
+          event.eventId,
+          vendor.vendorId,
+          vendor.terminal.instanceId,
+        ],
+      );
+      if (consumed.rowCount !== 1)
+        throw new CheckoutRejected("Terminal proof expired or was replayed");
+      const cursor = await db.query(
+        "SELECT block_number,block_hash FROM indexer_cursors WHERE stream_id=$1",
+        [identity.streamId],
+      );
+      const channels = await db.query(
+        `SELECT channel_id FROM channel_projections
+           WHERE stream_id=$1 AND vendor_id=$2 AND terminal_instance_id=$3
+             AND reclaimed=false AND spent_units=0 AND next_sequence=1
+             AND accept_until>EXTRACT(EPOCH FROM clock_timestamp())
+           ORDER BY channel_id LIMIT 101`,
+        [identity.streamId, vendor.vendorId, vendor.terminal.instanceId],
+      );
+      const orders = await db.query<OrderRow>(
+        `SELECT * FROM checkout_orders
+           WHERE stream_id=$1 AND event_id=$2 AND vendor_id=$3 AND terminal_instance_id=$4
+             AND state IN ('CREATED','OFFLINE_IMPORTED') AND expires_at>clock_timestamp()
+           ORDER BY created_at,order_id LIMIT 101 FOR UPDATE`,
+        [identity.streamId, event.eventId, vendor.vendorId, vendor.terminal.instanceId],
+      );
+      if (cursor.rowCount !== 1) throw new CheckoutRejected("Finalized projection is unavailable");
+      if (channels.rows.length > 100 || orders.rows.length > 100)
+        throw new CheckoutRejected("Terminal provisioning backlog exceeds the safe batch limit");
+      const newlyImported = orders.rows.filter((row) => row.state === "CREATED");
+      if (newlyImported.length > 0) {
+        const updated = await db.query(
+          `UPDATE checkout_orders SET state='OFFLINE_IMPORTED',offline_imported_at=clock_timestamp()
+           WHERE order_id=ANY($1::uuid[]) AND state='CREATED'`,
+          [newlyImported.map((row) => row.order_id)],
+        );
+        if (updated.rowCount !== newlyImported.length) throw new CheckoutConflict();
+      }
+      await db.query("COMMIT");
+      return {
+        schemaVersion: 1 as const,
+        deployment: {
+          chainId: this.#chainId,
+          eventId: event.eventId,
+          asset: event.asset,
+          registry: {
+            address: event.registry,
+            runtimeCodeHash: event.runtimeCodeHashes.registry,
+          },
+          ledger: { address: event.ledger, runtimeCodeHash: event.runtimeCodeHashes.ledger },
+          router: { address: event.router, runtimeCodeHash: event.runtimeCodeHashes.router },
+          vault: { address: event.vault, runtimeCodeHash: event.runtimeCodeHashes.vault },
+        },
+        terminal: {
+          terminalInstanceId: vendor.terminal.instanceId,
+          terminalKeyVersion: vendor.terminal.keyVersion.toString(),
+          terminalSigner: vendor.terminal.signer,
+        },
+        projection: {
+          finalizedBlockNumber: cursor.rows[0].block_number.toString(),
+          finalizedBlockHash: cursor.rows[0].block_hash as Hex,
+        },
+        channelIds: channels.rows.map((row) => row.channel_id as Hex),
+        orders: orders.rows.map((row) => ({
+          orderId: row.order_id,
+          state: "OFFLINE_IMPORTED" as const,
+          orderRefHash: row.order_ref_hash,
+          orderVersion: row.order_version.toString(),
+          grossUnits: row.gross_units.toString(),
+          receiptCommitment: receiptCommitment({
+            vendorName: row.display.vendorName,
+            orderReference: row.display.orderReference,
+            orderVersion: BigInt(row.display.orderVersion),
+            description: row.display.description,
+            assetSymbol: row.display.assetSymbol,
+            assetDecimals: row.display.assetDecimals,
+            grossUnits: BigInt(row.gross_units),
+          }),
+          expiresAt: row.expires_at.toISOString(),
+          display: row.display,
+        })),
+      };
+    } catch (error) {
+      await db.query("ROLLBACK");
+      throw error;
+    } finally {
+      db.release();
+    }
   }
 
   async create(
@@ -271,6 +451,7 @@ export class CheckoutService {
     );
     const current = found.rows[0];
     if (!current) throw new CheckoutNotFound();
+    if (current.state === "OFFLINE_IMPORTED") throw new CheckoutConflict();
     if (current.payer_account) {
       if (getAddress(current.payer_account) !== getAddress(identity.account))
         throw new CheckoutConflict();

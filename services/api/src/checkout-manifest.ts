@@ -17,7 +17,16 @@ const manifestSchema = z
             eventId: bytes32,
             router: address,
             registry: address,
+            ledger: address,
             vault: address,
+            runtimeCodeHashes: z
+              .object({
+                registry: bytes32,
+                ledger: bytes32,
+                router: bytes32,
+                vault: bytes32,
+              })
+              .strict(),
             asset: address,
             assetSymbol: z.string().regex(/^[A-Z0-9]{2,12}$/),
             assetDecimals: z.number().int().min(0).max(36),
@@ -79,7 +88,9 @@ export type CheckoutEventPolicy = {
   eventId: Hex;
   router: Address;
   registry: Address;
+  ledger: Address;
   vault: Address;
+  runtimeCodeHashes: { registry: Hex; ledger: Hex; router: Hex; vault: Hex };
   asset: Address;
   assetSymbol: string;
   assetDecimals: number;
@@ -99,7 +110,14 @@ export async function loadCheckoutManifest(path: string): Promise<CheckoutManife
     eventId: event.eventId.toLowerCase() as Hex,
     router: getAddress(event.router),
     registry: getAddress(event.registry),
+    ledger: getAddress(event.ledger),
     vault: getAddress(event.vault),
+    runtimeCodeHashes: {
+      registry: event.runtimeCodeHashes.registry.toLowerCase() as Hex,
+      ledger: event.runtimeCodeHashes.ledger.toLowerCase() as Hex,
+      router: event.runtimeCodeHashes.router.toLowerCase() as Hex,
+      vault: event.runtimeCodeHashes.vault.toLowerCase() as Hex,
+    },
     asset: getAddress(event.asset),
     configVersion: BigInt(event.configVersion),
     vendors: event.vendors.map((vendor) => ({

@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { decodePaymentIntent, paymentIntentDigest } from "@openbalance/protocol";
 import { Pool } from "pg";
-import { getAddress } from "viem";
+import { encodeAbiParameters, getAddress, keccak256, stringToHex, toHex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { expect, it } from "vitest";
 import { CheckoutConflict, CheckoutService } from "../src/checkout.js";
@@ -162,7 +162,14 @@ postgresIt("keeps cashier checkout issuance exact, scoped, and idempotent", asyn
         eventId,
         router: address("1"),
         registry: address("2"),
+        ledger: address("5"),
         vault: address("3"),
+        runtimeCodeHashes: {
+          registry: hex("1"),
+          ledger: hex("2"),
+          router: hex("3"),
+          vault: hex("4"),
+        },
         asset: address("4"),
         assetSymbol: "USDC",
         assetDecimals: 6,
@@ -191,7 +198,7 @@ postgresIt("keeps cashier checkout issuance exact, scoped, and idempotent", asyn
   const verifier: CheckoutPolicyVerifier = { assert: async () => undefined };
   const now = new Date();
   const service = new CheckoutService(pool, manifest, verifier, Buffer.alloc(32, 7), () => now);
-  let orderId: string | undefined;
+  const orderIds: string[] = [];
   try {
     const request = {
       orderReference: "ORDER-1042",
@@ -201,15 +208,19 @@ postgresIt("keeps cashier checkout issuance exact, scoped, and idempotent", asyn
       idempotencyKey: "checkout-postgres-0001",
     };
     const created = await service.create(identity, request);
-    orderId = created.orderId;
+    orderIds.push(created.orderId);
     const replay = await service.create(identity, request);
-    expect(replay).toMatchObject({ created: false, orderId, capability: created.capability });
+    expect(replay).toMatchObject({
+      created: false,
+      orderId: created.orderId,
+      capability: created.capability,
+    });
     await expect(service.create(identity, { ...request, grossUnits: 1n })).rejects.toBeInstanceOf(
       CheckoutConflict,
     );
     const bound = await service.bind(
       { enrollmentId: randomUUID(), account: address("5") },
-      orderId,
+      created.orderId,
       created.capability,
     );
     if (!("encodedIntent" in bound) || !bound.encodedIntent)
@@ -217,12 +228,72 @@ postgresIt("keeps cashier checkout issuance exact, scoped, and idempotent", asyn
     const signature = await terminal.sign({
       hash: paymentIntentDigest(decodePaymentIntent(bound.encodedIntent)),
     });
-    const ready = await service.attachSignature(identity, orderId, signature);
-    const resolved = await service.resolve(orderId, `Checkout ${ready.capability}`);
-    expect(resolved).toMatchObject({ orderId, terminalSignature: signature.toLowerCase() });
+    const ready = await service.attachSignature(identity, created.orderId, signature);
+    const resolved = await service.resolve(created.orderId, `Checkout ${ready.capability}`);
+    expect(resolved).toMatchObject({
+      orderId: created.orderId,
+      terminalSignature: signature.toLowerCase(),
+    });
     expect(resolved).not.toHaveProperty("capability");
+
+    const offline = await service.create(identity, {
+      ...request,
+      orderReference: "ORDER-1043",
+      idempotencyKey: "checkout-postgres-0002",
+    });
+    orderIds.push(offline.orderId);
+    await pool.query(
+      `INSERT INTO indexer_cursors
+       (stream_id,chain_id,deployment_block,block_number,block_hash)
+       VALUES ($1,10143,10,10,$2)`,
+      [streamId, hex("d")],
+    );
+    const challenge = await service.beginTerminalProvisioning(identity);
+    const provisioningDigest = keccak256(
+      encodeAbiParameters(
+        [
+          { type: "bytes32" },
+          { type: "uint256" },
+          { type: "bytes32" },
+          { type: "bytes32" },
+          { type: "bytes32" },
+        ],
+        [
+          keccak256(stringToHex("openbalance:terminal-provisioning:v1")),
+          10_143n,
+          eventId,
+          hex("c"),
+          toHex(Buffer.from(challenge.challenge, "base64url"), { size: 32 }),
+        ],
+      ),
+    );
+    const provisioningSignature = await terminal.sign({ hash: provisioningDigest });
+    const provisioned = await service.terminalProvisioning(
+      identity,
+      challenge.challenge,
+      provisioningSignature,
+    );
+    expect(provisioned).toMatchObject({
+      schemaVersion: 1,
+      terminal: { terminalInstanceId: hex("c"), terminalSigner: terminal.address },
+      projection: { finalizedBlockNumber: "10", finalizedBlockHash: hex("d") },
+      orders: [{ orderId: offline.orderId, state: "OFFLINE_IMPORTED" }],
+    });
+    await expect(
+      service.bind(
+        { enrollmentId: randomUUID(), account: address("5") },
+        offline.orderId,
+        offline.capability,
+      ),
+    ).rejects.toBeInstanceOf(CheckoutConflict);
+    await expect(
+      service.terminalProvisioning(identity, challenge.challenge, provisioningSignature),
+    ).rejects.toThrow("Terminal proof expired or was replayed");
   } finally {
-    if (orderId) await pool.query("DELETE FROM checkout_orders WHERE order_id=$1", [orderId]);
+    if (orderIds.length)
+      await pool.query("DELETE FROM checkout_orders WHERE order_id=ANY($1::uuid[])", [orderIds]);
+    await pool.query("DELETE FROM indexer_cursors WHERE stream_id=$1", [streamId]);
+    await pool.query("DELETE FROM terminal_provisioning_challenges WHERE stream_id=$1", [streamId]);
     await pool.end();
   }
 });
@@ -251,7 +322,14 @@ postgresIt("keeps organizer configuration preparation and finality exact", async
         eventId,
         router: address("1"),
         registry: address("2"),
+        ledger: address("8"),
         vault: address("3"),
+        runtimeCodeHashes: {
+          registry: hex("1"),
+          ledger: hex("2"),
+          router: hex("3"),
+          vault: hex("4"),
+        },
         asset: address("4"),
         assetSymbol: "USDC",
         assetDecimals: 6,
