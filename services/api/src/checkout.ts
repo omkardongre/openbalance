@@ -39,6 +39,7 @@ type CheckoutDisplay = {
 };
 type ReservePolicy = {
   vault: `0x${string}`;
+  terminalSigner: `0x${string}`;
   maximumReserveUnits: string;
   maximumPerVoucherUnits: string;
   maximumVoucherCount: number;
@@ -162,6 +163,7 @@ export class CheckoutService {
     };
     const reservePolicy: ReservePolicy = {
       vault: event.vault,
+      terminalSigner: vendor.terminal.signer,
       maximumReserveUnits: vendor.reservePolicy.maximumReserveUnits.toString(),
       maximumPerVoucherUnits: vendor.reservePolicy.maximumPerVoucherUnits.toString(),
       maximumVoucherCount: vendor.reservePolicy.maximumVoucherCount,

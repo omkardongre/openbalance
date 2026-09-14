@@ -14,7 +14,6 @@ import {
   formatUnits,
   getAddress,
   type Hex,
-  isAddress,
   keccak256,
 } from "viem";
 import {
@@ -23,6 +22,11 @@ import {
   paymentCommand,
   reserveCommand,
 } from "../../lib/financial-client";
+import {
+  activateOfflineChannel,
+  createOfflineChannelKey,
+  stageOfflineChannel,
+} from "../../lib/offline-wallet";
 
 type Operation = {
   operationId: string;
@@ -106,8 +110,9 @@ export default function CheckoutPage() {
   const [channelOperation, setChannelOperation] = useState<Operation>();
   const [channel, setChannel] = useState<ChannelProjection>();
   const [channelId, setChannelId] = useState<Hex>();
-  const [channelSigner, setChannelSigner] = useState("");
+  const [channelKey, setChannelKey] = useState<{ keyId: string; signer: Address }>();
   const [reserveAmount, setReserveAmount] = useState("");
+  const [reserveDraft, setReserveDraft] = useState<ReserveChannelConfig>();
   const [status, setStatus] = useState("Reading checkout…");
   const [busy, setBusy] = useState(false);
 
@@ -290,11 +295,15 @@ export default function CheckoutPage() {
               ),
             );
           } else if (channelId) {
-            setChannel(
-              await serviceRequest<ChannelProjection>(api, `/v1/reserve-channels/${channelId}`, {
+            const finalizedChannel = await serviceRequest<ChannelProjection>(
+              api,
+              `/v1/reserve-channels/${channelId}`,
+              {
                 headers: { Authorization: `Bearer ${identity.sessionToken}` },
-              }),
+              },
             );
+            setChannel(finalizedChannel);
+            await activateOfflineChannel(channelId);
           }
           setStatus("Finalized state verified from the indexed chain record.");
         } catch {
@@ -314,13 +323,13 @@ export default function CheckoutPage() {
     if (!checkout || !identity) return;
     setBusy(true);
     try {
-      if (!isAddress(channelSigner)) throw new Error("Enter the offline device signer address.");
-      const reserveUnits = BigInt(reserveAmount);
+      if (!channelKey) throw new Error("Create this device's offline key first.");
+      const reserveUnits = reserveDraft?.reserveUnits ?? BigInt(reserveAmount);
       const maximum = BigInt(checkout.reservePolicy.maximumReserveUnits);
       const maxPerVoucher = BigInt(checkout.reservePolicy.maximumPerVoucherUnits);
       if (reserveUnits < 1n || reserveUnits > maximum)
         throw new Error("Reserve amount is outside the disclosed event limit.");
-      const signer = getAddress(channelSigner);
+      const signer = getAddress(channelKey.signer);
       const derivedId = keccak256(
         encodeAbiParameters(
           [{ type: "bytes32" }, { type: "address" }, { type: "bytes32" }, { type: "address" }],
@@ -329,7 +338,7 @@ export default function CheckoutPage() {
       );
       const now = Math.floor(Date.now() / 1_000);
       const acceptUntil = now + checkout.reservePolicy.acceptanceDurationSeconds;
-      const config: ReserveChannelConfig = {
+      const config: ReserveChannelConfig = reserveDraft ?? {
         channelId: derivedId,
         eventId: checkout.intent.eventId,
         asset: checkout.intent.asset,
@@ -354,7 +363,23 @@ export default function CheckoutPage() {
           ),
         ),
       };
-      const deadline = BigInt(Math.min(acceptUntil, now + 300));
+      setReserveDraft(config);
+      const deadline = BigInt(Math.min(config.acceptUntil, now + 300));
+      const idempotencyKey = financialIdempotencyKey("RESERVE_OPEN", derivedId);
+      await stageOfflineChannel({
+        keyId: channelKey.keyId,
+        signer,
+        chainId: checkout.intent.chainId,
+        vault: getAddress(checkout.reservePolicy.vault),
+        terminalSigner: getAddress(checkout.reservePolicy.terminalSigner),
+        config,
+        operationId: idempotencyKey,
+        display: {
+          vendorName: checkout.display.vendorName,
+          assetSymbol: checkout.display.assetSymbol,
+          assetDecimals: checkout.display.assetDecimals,
+        },
+      });
       const calldata = await reserveCommand({
         identity,
         chainId: checkout.intent.chainId,
@@ -368,7 +393,7 @@ export default function CheckoutPage() {
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${identity.sessionToken}`,
-          "Idempotency-Key": financialIdempotencyKey("RESERVE_OPEN", derivedId),
+          "Idempotency-Key": idempotencyKey,
         },
         body: JSON.stringify({ kind: "RESERVE_OPEN", calldata }),
       });
@@ -377,6 +402,18 @@ export default function CheckoutPage() {
       setStatus("Reserve opening is pending network finality. No offline spend is final yet.");
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Reserve creation failed.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function createDeviceKey() {
+    setBusy(true);
+    try {
+      setChannelKey(await createOfflineChannelKey());
+      setStatus("Offline device key created and encrypted in this browser.");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Offline key creation failed.");
     } finally {
       setBusy(false);
     }
@@ -492,23 +529,31 @@ export default function CheckoutPage() {
             </p>
             {!channelOperation ? (
               <>
-                <label>
-                  Offline device signer address
-                  <input
-                    value={channelSigner}
-                    onChange={(event) => setChannelSigner(event.target.value)}
-                  />
-                </label>
+                {!channelKey ? (
+                  <button type="button" disabled={busy} onClick={createDeviceKey}>
+                    Protect an offline key on this device
+                  </button>
+                ) : (
+                  <div className="device-key-summary">
+                    <span>Device key ready</span>
+                    <code>{short(channelKey.signer)}</code>
+                    <small>
+                      This scoped key cannot move funds outside the reserve and is not recoverable
+                      if this browser's protected storage is cleared.
+                    </small>
+                  </div>
+                )}
                 <label>
                   Reserve amount in base units (maximum {checkout.reservePolicy.maximumReserveUnits}
                   )
                   <input
                     inputMode="numeric"
                     value={reserveAmount}
+                    disabled={Boolean(reserveDraft)}
                     onChange={(event) => setReserveAmount(event.target.value)}
                   />
                 </label>
-                <button type="button" disabled={busy} onClick={openReserve}>
+                <button type="button" disabled={busy || !channelKey} onClick={openReserve}>
                   Create bounded reserve
                 </button>
               </>
@@ -535,6 +580,11 @@ export default function CheckoutPage() {
                         </button>
                       )}
                   </div>
+                )}
+                {channel?.status === "ACTIVE" && (
+                  <a className="primary-action" href="/offline">
+                    Open offline wallet
+                  </a>
                 )}
               </>
             )}
