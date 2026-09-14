@@ -2,6 +2,7 @@ import { z } from "zod";
 
 export * from "./accounts.js";
 export * from "./checkout.js";
+export * from "./offline-exchange.js";
 export * from "./payments.js";
 export * from "./terminal.js";
 

@@ -50,6 +50,23 @@ export function canonicalVoucherReceipt(receipt: VoucherReceipt): string {
   });
 }
 
+export function decodeVoucherReceipt(value: string): VoucherReceipt {
+  if (value.length < 2 || value.length > 16_384) throw new Error("Invalid voucher receipt");
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new Error("Invalid voucher receipt");
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed))
+    throw new Error("Invalid voucher receipt");
+  const receipt = parsed as VoucherReceipt;
+  validateVoucherReceipt(receipt);
+  if (canonicalVoucherReceipt(receipt) !== value)
+    throw new Error("Voucher receipt is not canonical");
+  return receipt;
+}
+
 export function voucherReceiptPayloadHash(receipt: VoucherReceipt): string {
   return sha256(stringToHex(canonicalVoucherReceipt(receipt))).slice(2);
 }

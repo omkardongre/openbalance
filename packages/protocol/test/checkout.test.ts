@@ -48,6 +48,7 @@ it("binds attendee-visible checkout details to the encoded payment intent", () =
       display,
       reservePolicy: {
         vault: "0x0000000000000000000000000000000000000606",
+        terminalSigner: "0x0000000000000000000000000000000000000707",
         maximumReserveUnits: "50000000",
         maximumPerVoucherUnits: "15000000",
         maximumVoucherCount: 8,

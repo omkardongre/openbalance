@@ -42,6 +42,7 @@ const resolvedSchema = z
     reservePolicy: z
       .object({
         vault: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
+        terminalSigner: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
         maximumReserveUnits: unsigned,
         maximumPerVoucherUnits: unsigned,
         maximumVoucherCount: z.number().int().min(1).max(10_000),
