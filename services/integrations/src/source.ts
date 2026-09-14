@@ -34,6 +34,23 @@ export class FinalizedPaymentImporter {
     if (new Set(keys).size !== keys.length) throw new Error("Duplicate integration mapping");
   }
 
+  async assertReady(): Promise<void> {
+    const [indexer, api, state] = await Promise.all([
+      this.indexer.query(
+        "SELECT to_regclass('public.payment_projections') AS payments,to_regclass('public.finalized_chain_logs') AS logs",
+      ),
+      this.api.query("SELECT to_regclass('public.checkout_orders') AS orders"),
+      this.state.query("SELECT to_regclass('public.integration_source_cursors') AS cursors"),
+    ]);
+    if (
+      !indexer.rows[0]?.payments ||
+      !indexer.rows[0]?.logs ||
+      !api.rows[0]?.orders ||
+      !state.rows[0]?.cursors
+    )
+      throw new Error("Integration source migrations are not installed");
+  }
+
   async importOnce(streamId: string, limit = 100): Promise<number> {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 500)
       throw new Error("Invalid integration import limit");
@@ -66,7 +83,7 @@ export class FinalizedPaymentImporter {
       if (!mapping)
         throw new IntegrationMappingRequired("Finalized payment has no approved partner mapping");
       const checkout = await this.api.query(
-        `SELECT order_reference FROM checkout_orders
+        `SELECT display->>'orderReference' AS order_reference FROM checkout_orders
          WHERE payment_id=$1 AND stream_id=$2 AND event_id=$3 AND vendor_id=$4 AND state='READY'`,
         [row.payment_id, streamId, row.event_id, row.vendor_id],
       );
@@ -74,10 +91,17 @@ export class FinalizedPaymentImporter {
         throw new IntegrationMappingRequired(
           "Finalized payment has no unique ready checkout order",
         );
+      const orderReference = checkout.rows[0]?.order_reference;
+      if (
+        typeof orderReference !== "string" ||
+        orderReference.length < 1 ||
+        orderReference.length > 160
+      )
+        throw new IntegrationMappingRequired("Ready checkout order has no valid reference");
       const payment: FinalizedPaymentWrite = {
         transitionId: row.transition_id,
         company: mapping.company,
-        orderReference: checkout.rows[0].order_reference,
+        orderReference,
         paymentId: row.payment_id as Hex,
         payer: getAddress(row.payer),
         amountUnits: BigInt(row.gross_units),

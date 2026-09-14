@@ -12,7 +12,9 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "check": "tsc --noEmit",
+    "dev": "tsx watch src/server.ts",
     "migrate": "tsx src/migrate.ts",
+    "start": "node dist/server.js",
     "test": "vitest run"
   },
   "dependencies": {

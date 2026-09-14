@@ -1,3 +1,4 @@
+export * from "./config.js";
 export * from "./erpnext.js";
 export * from "./http.js";
 export * from "./journal.js";
