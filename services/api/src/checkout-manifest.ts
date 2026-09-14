@@ -51,7 +51,6 @@ const manifestSchema = z
                   })
                   .strict(),
               )
-              .min(1)
               .max(1_000),
           })
           .strict(),

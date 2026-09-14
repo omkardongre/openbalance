@@ -13,6 +13,8 @@ import { IncidentService } from "./incidents.js";
 import { OperationalReadService } from "./operations.js";
 import { OperationsAccessService } from "./operations-access.js";
 import { OperationsReportingService } from "./operations-reporting.js";
+import { OrganizerConfigurationService } from "./organizer-configuration.js";
+import { ViemOrganizerConfigurationChain } from "./organizer-configuration-chain.js";
 
 const environment = loadEnvironment(process.env);
 const pool = environment.DATABASE_URL
@@ -67,8 +69,14 @@ if (pool && environment.PROJECTION_READS_ENABLED) {
       new ViemCheckoutPolicyVerifier(environment.ACCOUNT_RPC_URL as string),
       capabilityKey,
     );
-    await checkout.assertReady();
+    const organizerConfiguration = new OrganizerConfigurationService(
+      pool,
+      checkoutManifest,
+      new ViemOrganizerConfigurationChain(environment.ACCOUNT_RPC_URL as string),
+    );
+    await Promise.all([checkout.assertReady(), organizerConfiguration.assertReady()]);
     control.checkout = checkout;
+    control.organizerConfiguration = organizerConfiguration;
   }
 }
 if (

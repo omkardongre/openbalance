@@ -36,6 +36,10 @@
       "types": "./src/operations-reporting.ts",
       "default": "./dist/operations-reporting.js"
     },
+    "./organizer-configuration": {
+      "types": "./src/organizer-configuration.ts",
+      "default": "./dist/organizer-configuration.js"
+    },
     "./sponsorship": {
       "types": "./src/sponsorship.ts",
       "default": "./dist/sponsorship.js"

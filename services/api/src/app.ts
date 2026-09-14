@@ -26,12 +26,20 @@ import {
   OperationsScopeRejected,
 } from "./operations-access.js";
 import type { OperationsReportingService } from "./operations-reporting.js";
+import {
+  OrganizerConfigurationConflict,
+  OrganizerConfigurationNotFound,
+  OrganizerConfigurationRejected,
+  type OrganizerConfigurationService,
+} from "./organizer-configuration.js";
+import { OrganizerConfigurationMismatch } from "./organizer-configuration-chain.js";
 
 export type OperationsControl = {
   access: OperationsAccessService;
   reporting: OperationsReportingService;
   incidents: IncidentService;
   checkout?: CheckoutService;
+  organizerConfiguration?: OrganizerConfigurationService;
 };
 
 export async function buildApp(
@@ -274,10 +282,149 @@ export async function buildApp(
         return reply.code(404).send({ error: "operational_record_not_found", retryable: false });
       if (error instanceof IncidentConflict)
         return reply.code(409).send({ error: "idempotency_conflict", retryable: false });
-      if (error instanceof IncidentRejected || error instanceof RangeError)
+      if (error instanceof OrganizerConfigurationConflict)
+        return reply.code(409).send({ error: "configuration_conflict", retryable: false });
+      if (error instanceof OrganizerConfigurationMismatch)
+        return reply.code(409).send({ error: "configuration_state_mismatch", retryable: false });
+      if (error instanceof OrganizerConfigurationNotFound)
+        return reply
+          .code(404)
+          .send({ error: "configuration_operation_not_found", retryable: false });
+      if (
+        error instanceof IncidentRejected ||
+        error instanceof OrganizerConfigurationRejected ||
+        error instanceof RangeError
+      )
         return reply.code(422).send({ error: "operational_request_rejected", retryable: false });
       throw error;
     };
+
+    if (control.organizerConfiguration) {
+      const organizerConfiguration = control.organizerConfiguration;
+      const address = z.string().regex(/^0x[0-9a-fA-F]{40}$/);
+      const positive = z.coerce.bigint().positive();
+      const timestamp = z.coerce
+        .bigint()
+        .nonnegative()
+        .lt(1n << 48n);
+      const command = z.discriminatedUnion("kind", [
+        z
+          .object({
+            kind: z.literal("CONFIG"),
+            version: positive,
+            validAfter: timestamp,
+            validUntil: timestamp,
+            organizerFeeBps: z.number().int().min(0).max(10_000),
+            platformFeeBps: z.number().int().min(0).max(10_000),
+            maximumAcceptanceDuration: positive.lt(1n << 48n),
+            maximumSubmissionDelay: positive.lt(1n << 48n),
+            organizerDestination: address,
+            platformDestination: address,
+            termsHash: bytes32,
+            enabled: z.boolean(),
+          })
+          .strict(),
+        z.object({ kind: z.literal("VENDOR"), vendorId: bytes32, authority: address }).strict(),
+        z
+          .object({
+            kind: z.literal("DESTINATION"),
+            vendorId: bytes32,
+            version: positive,
+            destination: address,
+            deadline: positive,
+            vendorSignature: z.string().regex(/^0x[0-9a-fA-F]{130}$/),
+          })
+          .strict(),
+        z
+          .object({
+            kind: z.literal("TERMINAL"),
+            terminalId: bytes32,
+            version: positive,
+            vendorId: bytes32,
+            signer: address,
+            validAfter: timestamp,
+            validUntil: timestamp,
+          })
+          .strict(),
+      ]);
+      const operationParams = z
+        .object({ eventId: bytes32, operationId: z.string().uuid() })
+        .strict();
+
+      app.post("/v1/events/:eventId/configuration-operations", async (request, reply) => {
+        const params = z.object({ eventId: bytes32 }).strict().safeParse(request.params);
+        const body = command.safeParse(request.body);
+        const idempotencyKey = request.headers["idempotency-key"];
+        if (!params.success || !body.success || typeof idempotencyKey !== "string")
+          return reply.code(400).send({ error: "invalid_configuration_request", retryable: false });
+        try {
+          const identity = await control.access.authenticate(request.headers.authorization);
+          control.access.assertRole(identity, ["ORGANIZER"]);
+          control.access.assertEvent(identity, params.data.eventId as `0x${string}`);
+          const result = await organizerConfiguration.prepare(
+            identity,
+            params.data.eventId as `0x${string}`,
+            body.data as Parameters<OrganizerConfigurationService["prepare"]>[2],
+            idempotencyKey,
+          );
+          return reply.code(result.created ? 201 : 200).send(result);
+        } catch (error) {
+          return operationsError(reply, error);
+        }
+      });
+
+      app.post(
+        "/v1/events/:eventId/configuration-operations/:operationId/confirmations",
+        async (request, reply) => {
+          const params = operationParams.safeParse(request.params);
+          const body = z.object({ transactionHash: bytes32 }).strict().safeParse(request.body);
+          if (!params.success || !body.success)
+            return reply.code(400).send({
+              error: "invalid_configuration_confirmation",
+              retryable: false,
+            });
+          try {
+            const identity = await control.access.authenticate(request.headers.authorization);
+            control.access.assertRole(identity, ["ORGANIZER"]);
+            control.access.assertEvent(identity, params.data.eventId as `0x${string}`);
+            const result = await organizerConfiguration.confirm(
+              identity,
+              params.data.eventId as `0x${string}`,
+              params.data.operationId,
+              body.data.transactionHash.toLowerCase() as `0x${string}`,
+            );
+            return reply.code("confirmation" in result ? 202 : 200).send(result);
+          } catch (error) {
+            return operationsError(reply, error);
+          }
+        },
+      );
+
+      app.get(
+        "/v1/events/:eventId/configuration-operations/:operationId",
+        async (request, reply) => {
+          reply.header("Cache-Control", "private, no-store");
+          const params = operationParams.safeParse(request.params);
+          if (!params.success)
+            return reply.code(404).send({
+              error: "configuration_operation_not_found",
+              retryable: false,
+            });
+          try {
+            const identity = await control.access.authenticate(request.headers.authorization);
+            control.access.assertRole(identity, ["ORGANIZER"]);
+            control.access.assertEvent(identity, params.data.eventId as `0x${string}`);
+            return await organizerConfiguration.get(
+              identity,
+              params.data.eventId as `0x${string}`,
+              params.data.operationId,
+            );
+          } catch (error) {
+            return operationsError(reply, error);
+          }
+        },
+      );
+    }
 
     if (control.checkout) {
       const checkout = control.checkout;
@@ -406,6 +553,10 @@ export async function buildApp(
           checkoutPolicy:
             control.checkout && identity.role === "VENDOR"
               ? control.checkout.policy(identity)
+              : null,
+          organizerPolicy:
+            control.organizerConfiguration && identity.role === "ORGANIZER"
+              ? control.organizerConfiguration.policy(identity)
               : null,
         };
       } catch (error) {

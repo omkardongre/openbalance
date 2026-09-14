@@ -120,6 +120,7 @@ export class CheckoutService {
       assetDecimals: event.assetDecimals,
       asset: event.asset,
       router: event.router,
+      registry: event.registry,
       destinationVersion: vendor.destinationVersion.toString(),
       terminalSigner: vendor.terminal.signer,
     };

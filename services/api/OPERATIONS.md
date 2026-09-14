@@ -35,6 +35,9 @@ The API exposes:
 - `GET /v1/events/{eventId}/incidents`
 - `POST /v1/incidents`
 - `POST /v1/incidents/{incidentId}/resolutions`
+- `POST /v1/events/{eventId}/configuration-operations`
+- `GET /v1/events/{eventId}/configuration-operations/{operationId}`
+- `POST /v1/events/{eventId}/configuration-operations/{operationId}/confirmations`
 
 `VENDOR` can read only its bound statement and incidents and can open incidents only for that
 vendor. `ORGANIZER` and `FINANCE` can read statements and reconciliation. Every role can open and
@@ -48,3 +51,11 @@ reports `STALE` when its last successful run does not cover the current finalize
 
 Incident creation and resolution are idempotent, event-scoped, and append an audit action. Resolving
 an incident does not alter any payment, refund, withdrawal, reserve, or integrity record.
+
+Organizer configuration endpoints are enabled with the checkout manifest and RPC configuration.
+They prepare exact registry calldata for immutable configuration, vendor, destination, and terminal
+registrations and retain it in PostgreSQL. The operations credential does not sign or submit the
+transaction. The configured registry organizer wallet must send the exact prepared call, and the API
+records completion only after canonical finalized transaction and event read-back. Destination
+registration additionally requires the vendor authority's EIP-712 approval; organizer access never
+substitutes for that signature.

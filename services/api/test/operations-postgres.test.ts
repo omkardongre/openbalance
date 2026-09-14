@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { decodePaymentIntent, paymentIntentDigest } from "@openbalance/protocol";
 import { Pool } from "pg";
+import { getAddress } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { expect, it } from "vitest";
 import { CheckoutConflict, CheckoutService } from "../src/checkout.js";
@@ -9,6 +10,14 @@ import type { CheckoutManifest } from "../src/checkout-manifest.js";
 import { IncidentService } from "../src/incidents.js";
 import { OperationsAccessService } from "../src/operations-access.js";
 import { OperationsReportingService } from "../src/operations-reporting.js";
+import {
+  OrganizerConfigurationConflict,
+  OrganizerConfigurationService,
+} from "../src/organizer-configuration.js";
+import type {
+  OrganizerConfigurationChain,
+  PreparedOrganizerCommand,
+} from "../src/organizer-configuration-chain.js";
 
 const databaseUrl = process.env.OPERATIONS_TEST_DATABASE_URL;
 const eligible = (() => {
@@ -214,6 +223,115 @@ postgresIt("keeps cashier checkout issuance exact, scoped, and idempotent", asyn
     expect(resolved).not.toHaveProperty("capability");
   } finally {
     if (orderId) await pool.query("DELETE FROM checkout_orders WHERE order_id=$1", [orderId]);
+    await pool.end();
+  }
+});
+
+postgresIt("keeps organizer configuration preparation and finality exact", async () => {
+  if (!databaseUrl) throw new Error("Missing isolated operations test database");
+  const pool = new Pool({ connectionString: databaseUrl, max: 2 });
+  const eventId = hex("d");
+  const streamId = `test:10143:${randomUUID()}`;
+  const organizer = address("e");
+  const transactionHash = hex("f");
+  const identity = {
+    credentialId: randomUUID(),
+    principalId: `organizer:${randomUUID()}`,
+    role: "ORGANIZER" as const,
+    streamId,
+    eventId,
+    vendorId: null,
+  };
+  const manifest: CheckoutManifest = {
+    schemaVersion: 1,
+    chainId: 10_143,
+    events: [
+      {
+        streamId,
+        eventId,
+        router: address("1"),
+        registry: address("2"),
+        vault: address("3"),
+        asset: address("4"),
+        assetSymbol: "USDC",
+        assetDecimals: 6,
+        configVersion: 1n,
+        organizerFeeBps: 400,
+        platformFeeBps: 100,
+        intentLifetimeSeconds: 600,
+        vendors: [
+          {
+            vendorId: hex("5"),
+            vendorName: "North Gate Coffee",
+            destinationVersion: 1n,
+            terminal: { instanceId: hex("6"), keyVersion: 1n, signer: address("7") },
+            reservePolicy: {
+              maximumReserveUnits: 50_000_000n,
+              maximumPerVoucherUnits: 15_000_000n,
+              maximumVoucherCount: 8,
+              acceptanceDurationSeconds: 3_600,
+              submissionDelaySeconds: 3_600,
+            },
+          },
+        ],
+      },
+    ],
+  };
+  let finalized = false;
+  let preparedCommand: PreparedOrganizerCommand | undefined;
+  const chain: OrganizerConfigurationChain = {
+    prepare: async (_event, command) => {
+      preparedCommand = command;
+      return { organizer, blockNumber: 100n, blockHash: hex("8") };
+    },
+    confirm: async (_event, command, expectedOrganizer, hash) => {
+      expect(command).toMatchObject({
+        kind: preparedCommand?.kind,
+        aggregateId: preparedCommand?.aggregateId,
+        calldata: preparedCommand?.calldata,
+      });
+      expect(expectedOrganizer).toBe(getAddress(organizer));
+      expect(hash).toBe(transactionHash);
+      return finalized ? { blockNumber: 110n, blockHash: hex("9") } : null;
+    },
+  };
+  const service = new OrganizerConfigurationService(pool, manifest, chain);
+  let operationId: string | undefined;
+  try {
+    const request = { kind: "VENDOR" as const, vendorId: hex("a"), authority: address("b") };
+    const created = await service.prepare(identity, eventId, request, "organizer-command-0001");
+    operationId = created.operationId;
+    expect(created).toMatchObject({
+      created: true,
+      state: "PREPARED",
+      transaction: { from: getAddress(organizer) },
+    });
+    expect(
+      await service.prepare(identity, eventId, request, "organizer-command-0001"),
+    ).toMatchObject({ created: false, operationId });
+    await expect(
+      service.prepare(
+        identity,
+        eventId,
+        { ...request, authority: address("c") },
+        "organizer-command-0001",
+      ),
+    ).rejects.toBeInstanceOf(OrganizerConfigurationConflict);
+    expect(await service.confirm(identity, eventId, operationId, transactionHash)).toMatchObject({
+      state: "PREPARED",
+      confirmation: "PENDING",
+    });
+    finalized = true;
+    expect(await service.confirm(identity, eventId, operationId, transactionHash)).toMatchObject({
+      state: "FINALIZED",
+      transactionHash,
+      finalizedBlock: "110",
+    });
+  } finally {
+    if (operationId)
+      await pool.query("DELETE FROM organizer_configuration_operations WHERE operation_id=$1", [
+        operationId,
+      ]);
     await pool.end();
   }
 });
