@@ -1,0 +1,17 @@
+FROM node:24.21.0-bookworm-slim@sha256:2fe369e969550cde8e867afc3fe370b260140cab4a23d467074295b42163d553 AS build
+ARG SERVICE
+WORKDIR /source
+RUN npm install --global pnpm@12.3.4
+COPY . .
+RUN test -n "$SERVICE" && pnpm install --frozen-lockfile
+RUN pnpm exec turbo run build --filter="@openbalance/$SERVICE"
+RUN pnpm --filter="@openbalance/$SERVICE" deploy --prod /runtime
+
+FROM node:24.21.0-bookworm-slim@sha256:2fe369e969550cde8e867afc3fe370b260140cab4a23d467074295b42163d553 AS runtime
+ARG PROCESS=server
+ENV NODE_ENV=production OPENBALANCE_PROCESS=$PROCESS
+WORKDIR /app
+COPY --from=build --chown=node:node /runtime/ /app/
+COPY --chown=node:node deploy/run-service.sh /usr/local/bin/openbalance-service
+USER node
+ENTRYPOINT ["/usr/local/bin/openbalance-service"]

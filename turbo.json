@@ -2,7 +2,12 @@
   "$schema": "https://turborepo.com/schema.json",
   "tasks": {
     "build": {
-      "env": ["NEXT_PUBLIC_API_URL", "NEXT_PUBLIC_RELAYER_URL"],
+      "env": [
+        "NEXT_PUBLIC_API_URL",
+        "NEXT_PUBLIC_RELAYER_URL",
+        "NEXT_PUBLIC_FINANCIAL_RPC_URL",
+        "NEXT_PUBLIC_WEBAUTHN_RP_ID"
+      ],
       "dependsOn": ["^build"],
       "outputs": [".next/**", "!.next/cache/**", "dist/**"]
     },
