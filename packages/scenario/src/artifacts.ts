@@ -1,7 +1,8 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import type { Abi } from "viem";
 
-export type ForgeArtifact = { abi: readonly unknown[]; bytecode: `0x${string}` };
+export type ForgeArtifact = { abi: Abi; bytecode: `0x${string}` };
 
 const artifactsRoot = new URL("../../../contracts/out/", import.meta.url);
 

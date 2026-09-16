@@ -13,6 +13,7 @@
     "evidence:package": "node scripts/package-evidence.mjs",
     "sbom": "node scripts/generate-sbom.mjs evidence/sbom.cdx.json",
     "verify:postgres": "node scripts/verify-postgres.mjs",
+    "verify:relay": "node scripts/verify-relay-scenario.mjs",
     "verify:scenario": "node scripts/verify-scenario.mjs",
     "verify:local": "node scripts/verify-local-system.mjs",
     "verify:local-chain": "node scripts/verify-local-chain.mjs",

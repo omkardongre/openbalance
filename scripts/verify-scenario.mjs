@@ -81,9 +81,8 @@ const anvil = spawn(
   { cwd: root, shell: false, stdio: "ignore" },
 );
 
-try {
-  await waitForRpc(rpcUrl);
-  const output = await capture("node", [scenarioCli], {
+function runScenario(kind) {
+  return capture("node", [scenarioCli], {
     cwd: root,
     env: {
       ...process.env,
@@ -91,14 +90,43 @@ try {
       SCENARIO_DEPLOYER_PRIVATE_KEY: privateKeyHex,
       SCENARIO_RP_ID: "localhost",
       SCENARIO_ORIGIN: "http://localhost:3000",
+      SCENARIO_KIND: kind,
     },
   });
-  const result = JSON.parse(output);
-  if (result.kind !== "account-ownership" || result.staleAssertionRejected !== true)
+}
+
+try {
+  await waitForRpc(rpcUrl);
+  const account = JSON.parse(await runScenario("account"));
+  if (account.kind !== "account-ownership" || account.staleAssertionRejected !== true)
     throw new Error("Account ownership scenario did not prove recovery invalidation");
-  if (result.account.toLowerCase() !== result.predictedAccount.toLowerCase())
+  if (account.account.toLowerCase() !== account.predictedAccount.toLowerCase())
     throw new Error("Account was not deployed at its predicted address");
-  process.stdout.write(`${JSON.stringify({ passed: true, ...result })}\n`);
+
+  const offline = JSON.parse(await runScenario("offline"));
+  if (offline.kind !== "offline-reserve")
+    throw new Error("Offline reserve scenario returned an unexpected result");
+  for (const field of ["replayRejected", "earlyReclaimRejected", "lateSettlementRejected"]) {
+    if (offline[field] !== true) throw new Error(`Offline reserve scenario did not prove ${field}`);
+  }
+  if (offline.ledgerCustody !== offline.settledUnits)
+    throw new Error("Ledger custody does not equal settled gross");
+
+  process.stdout.write(
+    `${JSON.stringify({
+      passed: true,
+      scenarios: [
+        { kind: "account-ownership", account: account.account, epoch: account.accountEpoch },
+        {
+          kind: "offline-reserve",
+          channelId: offline.channelId,
+          settledUnits: offline.settledUnits,
+          reclaimedUnits: offline.reclaimedUnits,
+          ledgerCustody: offline.ledgerCustody,
+        },
+      ],
+    })}\n`,
+  );
 } finally {
   if (anvil.exitCode === null) {
     anvil.kill("SIGTERM");

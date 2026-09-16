@@ -10,3 +10,15 @@ export {
   type VirtualAuthenticatorState,
   type WebAuthnAssertion,
 } from "./authenticator.js";
+export {
+  type OfflineReserveContext,
+  type OfflineReserveOptions,
+  type OfflineReserveResult,
+  prepareOfflineReserve,
+  runOfflineReserveScenario,
+} from "./event-scenario.js";
+export {
+  type RelayScenarioOptions,
+  type RelayScenarioResult,
+  runRelayProcessScenario,
+} from "./relay-scenario.js";

@@ -6,6 +6,7 @@ const root = fileURLToPath(new URL("../", import.meta.url));
 const checks = [
   ["ephemeral-anvil-deployment", "pnpm", ["verify:local-chain"]],
   ["account-ownership-scenario", "pnpm", ["verify:scenario"]],
+  ["relay-process-scenario", "pnpm", ["verify:relay"]],
   ["static", "pnpm", ["check"]],
   ["protocol-and-contracts", "pnpm", ["test"]],
   ["database-crash-replay", "pnpm", ["verify:postgres"]],
@@ -51,6 +52,9 @@ if (!outputPath) {
     completedAt: new Date().toISOString(),
     passed: results.length === checks.length && results.every((result) => result.exitCode === 0),
     scenarios: {
+      accountOwnership: "scripts/verify-scenario.mjs (account-ownership)",
+      offlineReserve: "scripts/verify-scenario.mjs (offline-reserve)",
+      relayProcessSettlement: "scripts/verify-relay-scenario.mjs",
       terminalRestart: "packages/terminal/test/journal.test.ts",
       duplicateAndOrdering: "packages/terminal/test/journal.test.ts",
       relayUncertainAcknowledgement: "packages/terminal/test/upload.test.ts",
