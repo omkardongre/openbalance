@@ -249,6 +249,8 @@ export const accountAbi = parseAbi([
   "function sessionRevisions(bytes32 sessionId) view returns (uint256)",
   "function onlineSessionState(bytes32 sessionId) view returns (uint256 spentGross,uint256 revision,bool active,uint256 accountEpoch)",
   "function commandDigest(bytes32 action, bytes32 terms, uint256 deadline) view returns (bytes32)",
+  "function withdraw(address asset, address recipient, uint256 amount, uint256 deadline, bool backup, (bytes32 r,bytes32 s,uint256 challengeIndex,uint256 typeIndex,bytes authenticatorData,string clientDataJSON) auth)",
+  "function rotate((bytes32 x, bytes32 y) primary, (bytes32 x, bytes32 y) backup, address recovery, uint256 deadline, bool backup, (bytes32 r,bytes32 s,uint256 challengeIndex,uint256 typeIndex,bytes authenticatorData,string clientDataJSON) auth)",
   "function setValidator(address validator, bool enabled, uint256 deadline, bool backup, (bytes32 r,bytes32 s,uint256 challengeIndex,uint256 typeIndex,bytes authenticatorData,string clientDataJSON) auth)",
   "function isValidSignature(bytes32 hash, bytes signature) view returns (bytes4)",
   "function pay(address router, bytes intent, bytes terminalSignature, uint256 deadline, bool backup, (bytes32 r,bytes32 s,uint256 challengeIndex,uint256 typeIndex,bytes authenticatorData,string clientDataJSON) auth)",
