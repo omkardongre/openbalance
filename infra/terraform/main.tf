@@ -1,12 +1,16 @@
 locals {
   prefix = "openbalance-${var.environment}"
   services = {
-    api     = { image = var.api_image, port = 3001, account = "api" }
-    relayer = { image = var.relayer_image, port = 3002, account = "relayer" }
-    web     = { image = var.web_image, port = 3000, account = "web" }
+    api         = { image = var.api_image, port = 3001, account = "api" }
+    relayer     = { image = var.relayer_image, port = 3002, account = "relayer" }
+    web         = { image = var.web_image, port = 3000, account = "web" }
+    venue-relay = { image = var.venue_relay_image, port = 3003, account = "venue-relay" }
   }
-  service_accounts = toset(["api", "relayer", "web", "indexer", "integrations", "financial-worker", "evidence"])
-  workers          = toset(["indexer", "integrations", "financial-worker"])
+  service_accounts = toset([
+    "api", "relayer", "web", "indexer", "integrations", "financial-worker", "evidence",
+    "venue-relay", "venue-relay-settlement",
+  ])
+  workers = toset(["indexer", "integrations", "financial-worker", "venue-relay-settlement"])
   apis = toset([
     "artifactregistry.googleapis.com", "compute.googleapis.com", "iam.googleapis.com",
     "run.googleapis.com", "secretmanager.googleapis.com", "servicenetworking.googleapis.com",
@@ -103,7 +107,10 @@ resource "google_storage_bucket" "evidence" {
 }
 
 resource "google_secret_manager_secret" "runtime" {
-  for_each  = toset(["account-manifest", "event-manifest", "checkout-capability", "integration-mapping", "relayer-signer"])
+  for_each = toset([
+    "account-manifest", "event-manifest", "checkout-capability", "integration-mapping",
+    "relayer-signer", "venue-relay-key", "venue-relay-settlement-signer", "terminal-snapshot",
+  ])
   secret_id = "${local.prefix}-${each.value}"
   replication {
     auto {}
@@ -177,6 +184,19 @@ resource "google_compute_instance_template" "workers" {
   metadata = {
     enable-oslogin         = "TRUE"
     block-project-ssh-keys = "TRUE"
+    gce-container-declaration = yamlencode({
+      spec = {
+        containers = [{
+          name  = each.key
+          image = var.worker_images[each.key]
+          env = [
+            { name = "NODE_ENV", value = "production" },
+            { name = "OPENBALANCE_PROCESS", value = each.key },
+          ]
+        }]
+        restartPolicy = "Always"
+      }
+    })
   }
   shielded_instance_config {
     enable_secure_boot          = true
