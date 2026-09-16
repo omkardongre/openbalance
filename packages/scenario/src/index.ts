@@ -18,6 +18,11 @@ export {
   runOfflineReserveScenario,
 } from "./event-scenario.js";
 export {
+  type FaucetScenarioOptions,
+  type FaucetScenarioResult,
+  runFaucetScenario,
+} from "./faucet-scenario.js";
+export {
   type RelayScenarioOptions,
   type RelayScenarioResult,
   runRelayProcessScenario,

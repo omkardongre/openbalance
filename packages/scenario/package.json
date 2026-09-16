@@ -15,11 +15,14 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@openbalance/api": "workspace:*",
     "@openbalance/protocol": "workspace:*",
+    "pg": "8.23.0",
     "viem": "2.56.3"
   },
   "devDependencies": {
     "@types/node": "24.13.4",
+    "@types/pg": "8.23.1",
     "typescript": "7.0.2",
     "vitest": "5.0.0"
   }

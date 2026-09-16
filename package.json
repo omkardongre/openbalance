@@ -12,6 +12,7 @@
     "coverage:contracts": "forge coverage --root contracts --ir-minimum --report summary",
     "evidence:package": "node scripts/package-evidence.mjs",
     "sbom": "node scripts/generate-sbom.mjs evidence/sbom.cdx.json",
+    "verify:faucet": "node scripts/verify-faucet-scenario.mjs",
     "verify:postgres": "node scripts/verify-postgres.mjs",
     "verify:relay": "node scripts/verify-relay-scenario.mjs",
     "verify:scenario": "node scripts/verify-scenario.mjs",
