@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 const root = fileURLToPath(new URL("../", import.meta.url));
 const checks = [
   ["ephemeral-anvil-deployment", "pnpm", ["verify:local-chain"]],
+  ["account-ownership-scenario", "pnpm", ["verify:scenario"]],
   ["static", "pnpm", ["check"]],
   ["protocol-and-contracts", "pnpm", ["test"]],
   ["database-crash-replay", "pnpm", ["verify:postgres"]],
