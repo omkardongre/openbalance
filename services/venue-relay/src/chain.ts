@@ -29,11 +29,14 @@ export type ViemVoucherSettlementGatewayOptions = {
   account: Account;
   vault: Address;
   deploymentBlock: bigint;
+  /** Finality policy: public networks use `finalized`; local development chains use `latest`. */
+  finalityTag?: "finalized" | "safe" | "latest";
 };
 
 export class ViemVoucherSettlementGateway implements VoucherSettlementGateway {
   readonly #vault: Address;
   readonly #deploymentBlock: bigint;
+  readonly #finalityTag: "finalized" | "safe" | "latest";
   readonly #publicClient;
   readonly #walletClient;
   readonly #account: Account;
@@ -44,6 +47,7 @@ export class ViemVoucherSettlementGateway implements VoucherSettlementGateway {
       throw new Error("Invalid voucher settlement gateway configuration");
     this.#vault = getAddress(options.vault);
     this.#deploymentBlock = options.deploymentBlock;
+    this.#finalityTag = options.finalityTag ?? "finalized";
     this.#account = options.account;
     this.#chain = options.chain;
     this.#publicClient = createPublicClient({
@@ -62,7 +66,7 @@ export class ViemVoucherSettlementGateway implements VoucherSettlementGateway {
   ): Promise<SettlementObservation> {
     const voucher = decodeVoucher(receipt);
     this.#assertVault(voucher.vault);
-    const finalized = await this.#publicClient.getBlock({ blockTag: "finalized" });
+    const finalized = await this.#publicClient.getBlock({ blockTag: this.#finalityTag });
     const logs = await this.#publicClient.getLogs({
       address: this.#vault,
       event: voucherSettledEvent,

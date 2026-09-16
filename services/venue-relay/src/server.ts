@@ -1,17 +1,9 @@
-import { readFile } from "node:fs/promises";
 import { startTelemetry } from "@openbalance/observability";
 import { buildVenueRelayApp } from "./app.js";
 import { loadVenueRelayEnvironment } from "./config.js";
 import { loadTerminalSnapshotDirectory } from "./directory.js";
 import { VenueRelayJournal } from "./journal.js";
-
-async function loadRelayKey(path: string): Promise<Buffer> {
-  const bytes = await readFile(path);
-  if (bytes.byteLength === 32) return Buffer.from(bytes);
-  const text = bytes.toString("utf8").trim();
-  if (/^[0-9a-fA-F]{64}$/.test(text)) return Buffer.from(text, "hex");
-  throw new Error("Venue relay key file must contain exactly 32 raw bytes or 64 hex characters");
-}
+import { loadRelayKey } from "./key.js";
 
 const environment = loadVenueRelayEnvironment(process.env);
 const telemetry = await startTelemetry({

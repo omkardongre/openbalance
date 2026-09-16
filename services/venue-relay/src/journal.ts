@@ -111,7 +111,9 @@ export class VenueRelayJournal {
     this.#key = Buffer.from(encryptionKey);
     this.#database = new DatabaseSync(path);
     this.#database.exec(
-      "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;",
+      // The relay and the settlement worker are separate processes over one journal, so writers
+      // must wait for each other's short transactions instead of failing on SQLITE_BUSY.
+      "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;",
     );
     this.#database.exec(`
       CREATE TABLE IF NOT EXISTS voucher_receipts (
