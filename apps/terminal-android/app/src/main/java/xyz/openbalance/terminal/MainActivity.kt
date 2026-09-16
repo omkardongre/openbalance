@@ -90,6 +90,9 @@ private fun TerminalScreen(model: TerminalViewModel = viewModel()) {
                             Button(onClick = model::synchronize, enabled = state.configured && !state.busy) { Text("Synchronize") }
                         }
                         Button(onClick = model::refreshTime, enabled = state.configured && !state.busy) { Text("Refresh trusted time") }
+                        Button(onClick = model::synchronizeReceipts, enabled = state.configured && !state.busy) {
+                            Text("Sync pending receipts")
+                        }
                     }
                 }
             }
@@ -134,6 +137,9 @@ private fun TerminalScreen(model: TerminalViewModel = viewModel()) {
                             Text(sale.requestId, fontWeight = FontWeight.SemiBold)
                             Text(sale.state)
                         }
+                        Text("Relay ${sale.relayState}", style = MaterialTheme.typography.bodySmall)
+                        sale.transactionHash?.let { Text("Transaction ${it.take(18)}…", style = MaterialTheme.typography.bodySmall) }
+                        sale.lastUploadError?.let { Text(it, color = Color(0xFFFF9F80), style = MaterialTheme.typography.bodySmall) }
                         Text("Channel ${sale.channelId.take(14)}…", style = MaterialTheme.typography.bodySmall)
                         if (sale.state == "PREPARED" || sale.state == "ATTENDEE_SIGNED") {
                             RequestQr(sale.requestQr, Modifier.fillMaxWidth().height(260.dp))
@@ -146,7 +152,10 @@ private fun TerminalScreen(model: TerminalViewModel = viewModel()) {
                             }
                         }
                         if (sale.state == "ACCEPTED") {
-                            Text("Accepted pending settlement", color = Color(0xFFFFD166))
+                            Text(
+                                if (sale.relayState == "SETTLED") "Finalized onchain" else "Accepted pending settlement",
+                                color = if (sale.relayState == "SETTLED") Color(0xFF63E6BE) else Color(0xFFFFD166),
+                            )
                             sale.receiptJson?.let { receipt ->
                                 RequestQr(receipt, Modifier.fillMaxWidth().height(300.dp))
                                 Text("Attendee: scan to retain your signed receipt.")

@@ -44,18 +44,26 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
         viewModelScope.launch(Dispatchers.IO) {
             runCatching {
                 val identity = app.keys.getOrCreate()
+                val config = app.provisioning.current()
                 _state.value = _state.value.copy(
                     signer = identity.signer,
-                    configured = timeSource != null && app.provisioning.current() != null,
+                    configured = timeSource != null && config != null,
                     sales = app.repository.recoverSales(),
                     channels = app.repository.channelViews(),
                     orders = app.repository.orderViews(),
                     message = when {
                         timeSource == null -> "Trusted-time configuration required"
-                        app.provisioning.current() == null -> "Scan the operator-issued terminal enrollment QR"
+                        config == null -> "Scan the operator-issued terminal enrollment QR"
                         else -> "Synchronize while connected, then refresh trusted time"
                     },
                 )
+                if (config != null) {
+                    val summary = app.relay.runBatch(config)
+                    _state.value = _state.value.copy(
+                        sales = app.repository.recoverSales(),
+                        message = relayMessage("Restart recovery", summary.uploaded, summary.settled, summary.retried, summary.quarantined),
+                    )
+                }
             }.onFailure(::fail)
         }
     }
@@ -82,6 +90,7 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
         if (_state.value.scanPurpose == "ENROLLMENT") {
             runBusy("Installing protected terminal enrollment") {
                 app.provisioning.installQr(value)
+                app.scheduleRelay()
                 _state.value.copy(configured = timeSource != null, scanOpen = false, scanPurpose = null, message = "Enrollment installed; synchronize terminal", busy = false)
             }
             return@launch
@@ -94,6 +103,7 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
             val accepted = app.repository.recordAttendeeResponse(requestId, value, (window.second + 999) / 1000, System.currentTimeMillis())
             val current = source.current(sample)
             val completed = app.repository.accept(accepted.requestId, (current.second + 999) / 1000, System.currentTimeMillis()) { source.current(sample) }
+            app.scheduleRelay()
             _state.value.copy(
                 sales = app.repository.recoverSales(), activeRequestId = null, scanOpen = false, scanPurpose = null,
                 message = "Receipt ${completed.requestId} durably accepted pending settlement", busy = false,
@@ -128,6 +138,18 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
+    fun synchronizeReceipts() = viewModelScope.launch(Dispatchers.IO) {
+        runBusy("Uploading ordered receipts and checking finality") {
+            val config = requireNotNull(app.provisioning.current()) { "Terminal enrollment is not installed" }
+            val summary = app.relay.runBatch(config)
+            _state.value.copy(
+                sales = app.repository.recoverSales(),
+                message = relayMessage("Relay sync", summary.uploaded, summary.settled, summary.retried, summary.quarantined),
+                busy = false,
+            )
+        }
+    }
+
     fun selectChannel(channelId: String) {
         _state.value = _state.value.copy(selectedChannelId = channelId, message = "Channel selected")
     }
@@ -156,6 +178,7 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
             val sample = requireNotNull(_state.value.trustedTime) { "Refresh authenticated time first" }
             val current = source.current(sample)
             app.repository.accept(requestId, (current.second + 999) / 1000, System.currentTimeMillis()) { source.current(sample) }
+            app.scheduleRelay()
             _state.value.copy(sales = app.repository.recoverSales(), busy = false, message = "Receipt recovered; settlement pending")
         }
     }
@@ -168,4 +191,7 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
     private fun fail(error: Throwable) {
         _state.value = _state.value.copy(busy = false, scanOpen = false, scanPurpose = null, message = error.message ?: "Terminal operation failed")
     }
+
+    private fun relayMessage(prefix: String, uploaded: Int, settled: Int, retried: Int, quarantined: Int) =
+        "$prefix: $uploaded stored, $settled finalized, $retried retrying, $quarantined quarantined"
 }
