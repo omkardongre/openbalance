@@ -5,6 +5,7 @@ import org.web3j.crypto.Sign
 import xyz.openbalance.terminal.security.Keccak
 import java.math.BigInteger
 import java.nio.charset.StandardCharsets
+import java.security.MessageDigest
 import java.util.Base64
 
 private const val QR_PREFIX = "obqr1:"
@@ -14,6 +15,7 @@ private val ADDRESS = Regex("^0x[0-9a-fA-F]{40}$")
 private val SIGNATURE = Regex("^0x[0-9a-fA-F]{130}$")
 private const val VOUCHER_TYPE = "OfflineVoucher(uint32 protocolVersion,uint256 chainId,address vault,bytes32 channelId,uint32 sequence,bytes32 previousVoucherDigest,bytes32 paymentId,bytes32 orderRefHash,uint256 grossUnits,uint256 cumulativeGrossUnits,bytes32 receiptCommitment,uint48 acceptedAt,uint48 acceptUntil,uint48 submitUntil,uint256 configVersion)"
 private const val DOMAIN_TYPE = "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
+private const val TERMINAL_INGRESS_TYPE = "OpenBalanceTerminalIngress(bytes32 audienceHash,bytes32 terminalId,uint256 keyVersion,uint64 sentAt,bytes32 nonce,bytes32 payloadHash)"
 
 class InvalidOfflineExchange(message: String) : IllegalArgumentException(message)
 
@@ -224,6 +226,32 @@ object OfflineProtocol {
             "\"attendeeSignature\":\"${receipt.attendeeSignature.lowercase()}\"",
             "\"terminalSignature\":\"${receipt.terminalSignature.lowercase()}\"",
         ).joinToString(",") + "}"
+    }
+
+    fun receiptPayloadHash(receipt: VoucherReceipt): String = hex(
+        MessageDigest.getInstance("SHA-256").digest(canonicalReceipt(receipt).toByteArray(StandardCharsets.UTF_8)),
+    )
+
+    fun terminalIngressDigest(
+        audience: String,
+        terminalId: String,
+        keyVersion: BigInteger,
+        sentAt: Long,
+        nonce: String,
+        payloadHash: String,
+    ): ByteArray {
+        if (audience.isEmpty() || audience.length > 512 || keyVersion <= BigInteger.ZERO || sentAt < 0)
+            throw InvalidOfflineExchange("Invalid terminal authorization")
+        listOf(terminalId, nonce, payloadHash).forEach(::requireHex32)
+        return hashSlots(
+            Keccak.digest(TERMINAL_INGRESS_TYPE.toByteArray(StandardCharsets.UTF_8)),
+            Keccak.digest(audience.toByteArray(StandardCharsets.UTF_8)),
+            bytes32(terminalId),
+            uint(keyVersion),
+            uint(sentAt),
+            bytes32(nonce),
+            bytes32(payloadHash),
+        )
     }
 
     private fun canonicalRequest(request: TerminalPaymentRequest): String {

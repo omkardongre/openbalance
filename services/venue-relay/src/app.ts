@@ -94,6 +94,7 @@ export async function buildVenueRelayApp(options: VenueRelayAppOptions) {
       return reply.code(result.created ? 201 : 200).send({
         receiptId: result.record.receiptId,
         state: result.record.state,
+        transactionHash: result.record.transactionHash,
         duplicate: !result.created,
       });
     } catch (error) {

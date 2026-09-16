@@ -53,5 +53,20 @@ class OfflineProtocolTest {
         }
     }
 
+    @Test
+    fun matchesSharedTerminalIngressDigest() {
+        assertEquals(
+            "e9024814580bd8331ef833d1fecbcbac93622d652efc92f5bb0e6edc183aa070",
+            OfflineProtocol.terminalIngressDigest(
+                "https://relay.example/v1/vouchers",
+                h('7'),
+                BigInteger.ONE,
+                110,
+                h('9'),
+                h('a'),
+            ).toHex(),
+        )
+    }
+
     private fun ByteArray.toHex() = joinToString("") { "%02x".format(it.toInt() and 0xff) }
 }

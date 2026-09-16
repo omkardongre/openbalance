@@ -134,9 +134,9 @@ class FinalizedChannelVerifier(rpcEndpoint: String, private val timeoutMs: Int =
     private fun BigInteger.boundedLong(min: Long, max: Long, field: String) = longValueExact().also { require(it in min..max) { "$field is invalid" } }
 }
 
-private data class RpcBlock(val number: BigInteger, val hash: String)
+internal data class RpcBlock(val number: BigInteger, val hash: String)
 
-private class RpcTransport(endpoint: String, private val timeoutMs: Int) {
+internal class RpcTransport(endpoint: String, private val timeoutMs: Int) {
     private val url = URL(endpoint)
     private val ids = AtomicLong()
     init {
@@ -150,6 +150,8 @@ private class RpcTransport(endpoint: String, private val timeoutMs: Int) {
             ?: throw IllegalStateException("RPC block is unavailable")
         return RpcBlock(parseQuantity(json.getString("number")), json.getString("hash").lowercase().also { require(it.matches(Regex("^0x[0-9a-f]{64}$"))) })
     }
+    fun objectResult(method: String, params: JSONArray): JSONObject = result(method, params) as? JSONObject
+        ?: throw IllegalStateException("RPC object result is unavailable")
     private fun result(method: String, params: JSONArray): Any {
         val id = ids.incrementAndGet()
         val request = JSONObject().put("jsonrpc", "2.0").put("id", id).put("method", method).put("params", params).toString().toByteArray()
