@@ -1,0 +1,79 @@
+groups:
+  - name: openbalance-availability
+    rules:
+      - alert: OpenBalanceServiceDown
+        expr: up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "OpenBalance target {{ $labels.instance }} is not scrapeable"
+          runbook: "deploy/RUNBOOK.md#service-down"
+
+      - alert: OpenBalanceServerErrorRate
+        expr: |
+          sum by (job, route) (rate(openbalance_http_requests{status=~"5.."}[5m]))
+            /
+          sum by (job, route) (rate(openbalance_http_requests[5m])) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "More than 5% of requests on {{ $labels.route }} are failing"
+          runbook: "deploy/RUNBOOK.md#server-error-rate"
+
+      - alert: OpenBalanceLatencyHigh
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le, route) (rate(openbalance_http_duration_bucket[5m]))
+          ) > 2000
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "p95 latency on {{ $labels.route }} exceeds two seconds"
+          runbook: "deploy/RUNBOOK.md#latency"
+
+  - name: openbalance-money-path
+    rules:
+      - alert: OpenBalanceVoucherQuarantined
+        expr: increase(openbalance_voucher_settlement_outcomes{state="QUARANTINED"}[15m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "A voucher receipt was quarantined by the settlement worker"
+          runbook: "deploy/RUNBOOK.md#voucher-quarantined"
+
+      - alert: OpenBalanceFinancialQuarantined
+        expr: increase(openbalance_financial_operation_outcomes{state="QUARANTINED"}[15m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "A financial operation was quarantined by the relayer worker"
+          runbook: "deploy/RUNBOOK.md#financial-quarantined"
+
+      - alert: OpenBalanceReconciliationDifference
+        expr: increase(openbalance_reconciliation_differences[15m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "Finalized reconciliation reported a custody difference"
+          runbook: "deploy/RUNBOOK.md#reconciliation-difference"
+
+      - alert: OpenBalanceIntegrationDeliveryFailure
+        expr: increase(openbalance_integration_delivery_runs{state=~"FAILED|QUARANTINED"}[15m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Partner delivery failed or was quarantined"
+          runbook: "deploy/RUNBOOK.md#integration-delivery"
+
+      - alert: OpenBalanceFinalizedIndexerStalled
+        expr: increase(openbalance_finalized_transitions[30m]) == 0 and up == 1
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Finalized indexer produced no transitions for 30 minutes"
+          runbook: "deploy/RUNBOOK.md#indexer-stalled"
