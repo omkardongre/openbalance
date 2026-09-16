@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { startTelemetry } from "@openbalance/observability";
 import { Pool } from "pg";
+import { type Address, defineChain } from "viem";
 import { AccountAccessService } from "./account-access.js";
 import { buildApp } from "./app.js";
 import { CheckoutService } from "./checkout.js";
@@ -10,6 +11,12 @@ import { loadEnvironment } from "./config.js";
 import { DeploymentChain } from "./deployment-chain.js";
 import { DeploymentService } from "./deployments.js";
 import { EnrollmentService } from "./enrollment.js";
+import {
+  FaucetService,
+  loadFaucetAccount,
+  PostgresFaucetLedger,
+  ViemFaucetChain,
+} from "./faucet.js";
 import { IncidentService } from "./incidents.js";
 import { OperationalReadService } from "./operations.js";
 import { OperationsAccessService } from "./operations-access.js";
@@ -105,6 +112,38 @@ if (
     origin: environment.WEBAUTHN_ORIGIN,
   });
 }
+let faucet: FaucetService | undefined;
+if (
+  pool &&
+  environment.FAUCET_RPC_URL &&
+  environment.FAUCET_CHAIN_ID &&
+  environment.FAUCET_CHAIN_NAME &&
+  environment.FAUCET_TOKEN_ADDRESS &&
+  environment.FAUCET_PRIVATE_KEY_PATH &&
+  environment.FAUCET_MAX_AMOUNT &&
+  environment.FAUCET_DAILY_LIMIT
+) {
+  const ledger = new PostgresFaucetLedger(pool);
+  await ledger.assertReady();
+  const account = await loadFaucetAccount(environment.FAUCET_PRIVATE_KEY_PATH);
+  const token = environment.FAUCET_TOKEN_ADDRESS as Address;
+  const chain = defineChain({
+    id: environment.FAUCET_CHAIN_ID,
+    name: environment.FAUCET_CHAIN_NAME,
+    nativeCurrency: { name: "Native token", symbol: "NATIVE", decimals: 18 },
+    rpcUrls: { default: { http: [environment.FAUCET_RPC_URL] } },
+  });
+  faucet = new FaucetService(
+    ledger,
+    new ViemFaucetChain({ rpcUrl: environment.FAUCET_RPC_URL, chain, account, token }),
+    {
+      chainId: environment.FAUCET_CHAIN_ID,
+      token,
+      maxAmount: BigInt(environment.FAUCET_MAX_AMOUNT),
+      dailyLimit: BigInt(environment.FAUCET_DAILY_LIMIT),
+    },
+  );
+}
 const app = await buildApp(
   service,
   environment.WEBAUTHN_ORIGIN,
@@ -112,6 +151,7 @@ const app = await buildApp(
   access,
   operations,
   control,
+  faucet,
   pool
     ? [
         {

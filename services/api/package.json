@@ -29,6 +29,10 @@
       "types": "./src/enrollment.ts",
       "default": "./dist/enrollment.js"
     },
+    "./faucet": {
+      "types": "./src/faucet.ts",
+      "default": "./dist/faucet.js"
+    },
     "./operations": {
       "types": "./src/operations.ts",
       "default": "./dist/operations.js"

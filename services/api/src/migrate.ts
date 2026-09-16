@@ -12,6 +12,7 @@ const migrations = [
   "006_checkout_orders",
   "007_organizer_configuration",
   "008_terminal_order_import",
+  "009_faucet_grants",
 ] as const;
 
 const environment = z

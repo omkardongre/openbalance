@@ -14,6 +14,7 @@ import {
 import { DeploymentMismatch } from "./deployment-chain.js";
 import type { DeploymentService } from "./deployments.js";
 import { EnrollmentRejected, type EnrollmentService } from "./enrollment.js";
+import { FaucetExhausted, FaucetRejected, type FaucetService } from "./faucet.js";
 import {
   IncidentConflict,
   IncidentNotFound,
@@ -50,6 +51,7 @@ export async function buildApp(
   access?: AccountAccessService,
   operations?: OperationalReadService,
   control?: OperationsControl,
+  faucet?: FaucetService,
   readiness: ReadinessCheck[] = [],
 ) {
   const app = Fastify({ logger: false, bodyLimit: 32_768 });
@@ -154,6 +156,31 @@ export async function buildApp(
           throw error;
         }
       });
+
+      if (faucet) {
+        app.post("/v1/funding/faucet", async (request, reply) => {
+          reply.header("Cache-Control", "no-store");
+          const parsed = z
+            .object({ amount: z.string().regex(/^[1-9][0-9]*$/) })
+            .strict()
+            .safeParse(request.body);
+          if (!parsed.success)
+            return reply.code(400).send({ error: "invalid_faucet_request", retryable: false });
+          try {
+            const identity = await access.authenticate(request.headers.authorization);
+            return await faucet.fund(identity.account, BigInt(parsed.data.amount));
+          } catch (error) {
+            if (error instanceof AccountAccessRejected)
+              return reply.code(401).send({ error: "session_invalid", retryable: false });
+            if (error instanceof FaucetExhausted)
+              return reply.code(429).send({ error: "faucet_exhausted", retryable: false });
+            if (error instanceof FaucetRejected)
+              return reply.code(422).send({ error: "faucet_rejected", retryable: false });
+            // RPC errors can embed credential-bearing URLs; keep details out of HTTP responses.
+            return reply.code(503).send({ error: "faucet_unavailable", retryable: true });
+          }
+        });
+      }
 
       if (operations) {
         const identifierSchema = z.object({
