@@ -6,12 +6,17 @@ import org.json.JSONObject
 import xyz.openbalance.terminal.security.EncryptedJournalPayloads
 import java.net.URL
 
-data class ProvisioningConfig(val apiEndpoint: String, val rpcEndpoint: String, val accessToken: String)
+data class ProvisioningConfig(
+    val apiEndpoint: String,
+    val rpcEndpoint: String,
+    val relayEndpoint: String,
+    val accessToken: String,
+)
 
 class ProvisioningStore(context: Context) {
-    private val preferences = context.getSharedPreferences("terminal-provisioning-v1", Context.MODE_PRIVATE)
+    private val preferences = context.getSharedPreferences("terminal-provisioning-v2", Context.MODE_PRIVATE)
     private val payloads = EncryptedJournalPayloads()
-    private val aad = "openbalance:terminal-provisioning:v1".toByteArray()
+    private val aad = "openbalance:terminal-provisioning:v2".toByteArray()
 
     fun current(): ProvisioningConfig? {
         val nonce = preferences.getString("nonce", null) ?: return null
@@ -28,9 +33,9 @@ class ProvisioningStore(context: Context) {
     }
 
     fun installQr(value: String): ProvisioningConfig {
-        require(value.startsWith("obterm1:") && value.length <= 4_096) { "Invalid terminal enrollment QR" }
+        require(value.startsWith("obterm2:") && value.length <= 4_096) { "Invalid terminal enrollment QR" }
         val bytes = Base64.decode(
-            value.removePrefix("obterm1:"),
+            value.removePrefix("obterm2:"),
             Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP,
         )
         require(bytes.size <= 2_048) { "Terminal enrollment payload exceeds limit" }
@@ -49,10 +54,11 @@ class ProvisioningStore(context: Context) {
 
     private fun decode(value: String): ProvisioningConfig {
         val json = JSONObject(value)
-        require(json.length() == 4 && json.getInt("schemaVersion") == 1) { "Unsupported terminal enrollment" }
+        require(json.length() == 5 && json.getInt("schemaVersion") == 2) { "Unsupported terminal enrollment" }
         return ProvisioningConfig(
             apiEndpoint = endpoint(json.getString("apiEndpoint")),
             rpcEndpoint = endpoint(json.getString("rpcEndpoint")),
+            relayEndpoint = relayEndpoint(json.getString("relayEndpoint")),
             accessToken = json.getString("accessToken").also {
                 require(it.matches(Regex("^[A-Za-z0-9_-]{43}$"))) { "Invalid terminal credential" }
             },
@@ -60,9 +66,10 @@ class ProvisioningStore(context: Context) {
     }
 
     private fun encode(value: ProvisioningConfig) = JSONObject().apply {
-        put("schemaVersion", 1)
+        put("schemaVersion", 2)
         put("apiEndpoint", value.apiEndpoint)
         put("rpcEndpoint", value.rpcEndpoint)
+        put("relayEndpoint", value.relayEndpoint)
         put("accessToken", value.accessToken)
     }.toString()
 
@@ -72,5 +79,13 @@ class ProvisioningStore(context: Context) {
             "Provisioning endpoints must use HTTPS without embedded credentials"
         }
         return value.trimEnd('/')
+    }
+
+    private fun relayEndpoint(value: String): String {
+        val normalized = endpoint(value)
+        require(URL(normalized).path == "/v1/vouchers") {
+            "Relay endpoint must target the authenticated voucher ingress"
+        }
+        return normalized
     }
 }

@@ -27,7 +27,14 @@ data class ChannelEntity(
     val updatedAt: Long,
 )
 
-@Entity(tableName = "sales", indices = [Index(value = ["channelId", "sequence"], unique = true), Index(value = ["paymentId"], unique = true)])
+@Entity(
+    tableName = "sales",
+    indices = [
+        Index(value = ["channelId", "sequence"], unique = true),
+        Index(value = ["paymentId"], unique = true),
+        Index(value = ["relayState", "nextUploadAt", "uploadLeaseUntil", "createdAt"], name = "index_sales_relay_ready"),
+    ],
+)
 data class SaleEntity(
     @PrimaryKey val requestId: String,
     val channelId: String,
@@ -36,6 +43,14 @@ data class SaleEntity(
     val state: String,
     val payloadNonce: ByteArray,
     val payloadCiphertext: ByteArray,
+    val relayState: String,
+    val uploadAttempts: Int,
+    val nextUploadAt: Long,
+    val uploadLeaseOwner: String?,
+    val uploadLeaseUntil: Long?,
+    val transactionHash: String?,
+    val lastUploadError: String?,
+    val relayAcknowledgedAt: Long?,
     val createdAt: Long,
     val updatedAt: Long,
 )
@@ -71,6 +86,18 @@ interface TerminalDao {
     @Query("SELECT * FROM sales ORDER BY createdAt DESC LIMIT :limit") suspend fun sales(limit: Int = 100): List<SaleEntity>
     @Query("UPDATE sales SET state=:state, payloadNonce=:nonce, payloadCiphertext=:ciphertext, updatedAt=:now WHERE requestId=:requestId AND state=:expectedState")
     suspend fun transition(requestId: String, expectedState: String, state: String, nonce: ByteArray, ciphertext: ByteArray, now: Long): Int
+    @Query("UPDATE sales SET relayState='PENDING',nextUploadAt=:now,updatedAt=:now WHERE requestId=:requestId AND state='ACCEPTED' AND relayState='NOT_READY'")
+    suspend fun markRelayPending(requestId: String, now: Long): Int
+    @Query("""SELECT * FROM sales s WHERE s.state='ACCEPTED' AND s.relayState IN ('PENDING','RETRY','UPLOADING','RELAYED') AND s.nextUploadAt<=:now AND (s.uploadLeaseUntil IS NULL OR s.uploadLeaseUntil<=:now) AND NOT EXISTS (SELECT 1 FROM sales p WHERE p.channelId=s.channelId AND p.sequence<s.sequence AND p.relayAcknowledgedAt IS NULL AND p.relayState!='SETTLED') ORDER BY s.createdAt,s.requestId LIMIT :limit""")
+    suspend fun uploadCandidates(now: Long, limit: Int): List<SaleEntity>
+    @Query("""UPDATE sales SET relayState='UPLOADING',uploadAttempts=uploadAttempts+1,uploadLeaseOwner=:owner,uploadLeaseUntil=:leaseUntil,updatedAt=:now WHERE requestId=:requestId AND state='ACCEPTED' AND relayState IN ('PENDING','RETRY','UPLOADING','RELAYED') AND (uploadLeaseUntil IS NULL OR uploadLeaseUntil<=:now)""")
+    suspend fun leaseUpload(requestId: String, owner: String, now: Long, leaseUntil: Long): Int
+    @Query("""UPDATE sales SET payloadNonce=:nonce,payloadCiphertext=:ciphertext,updatedAt=:now WHERE requestId=:requestId AND relayState='UPLOADING' AND uploadLeaseOwner=:owner AND uploadLeaseUntil>:now""")
+    suspend fun saveUploadPayload(requestId: String, owner: String, nonce: ByteArray, ciphertext: ByteArray, now: Long): Int
+    @Query("""UPDATE sales SET relayState=:relayState,nextUploadAt=:nextUploadAt,transactionHash=COALESCE(:transactionHash,transactionHash),lastUploadError=:lastError,relayAcknowledgedAt=COALESCE(:acknowledgedAt,relayAcknowledgedAt),uploadLeaseOwner=NULL,uploadLeaseUntil=NULL,updatedAt=:now WHERE requestId=:requestId AND relayState='UPLOADING' AND uploadLeaseOwner=:owner AND uploadLeaseUntil>:now""")
+    suspend fun completeUploadLease(requestId: String, owner: String, relayState: String, nextUploadAt: Long, transactionHash: String?, lastError: String?, acknowledgedAt: Long?, now: Long): Int
+    @Query("SELECT COUNT(*) FROM sales WHERE state='ACCEPTED' AND relayState IN ('PENDING','RETRY','UPLOADING','RELAYED')")
+    suspend fun pendingRelayCount(): Int
     @Query("SELECT * FROM orders WHERE orderId = :orderId") suspend fun order(orderId: String): OrderEntity?
     @Query("SELECT * FROM orders ORDER BY importedAt,orderId LIMIT :limit") suspend fun orders(limit: Int = 100): List<OrderEntity>
     @Insert(onConflict = OnConflictStrategy.IGNORE) suspend fun insertOrder(order: OrderEntity): Long
@@ -78,7 +105,7 @@ interface TerminalDao {
     suspend fun markOrderRequested(orderId: String, requestId: String, nowSeconds: Long, now: Long): Int
 }
 
-@Database(entities = [ChannelEntity::class, SaleEntity::class, OrderEntity::class], version = 2, exportSchema = true)
+@Database(entities = [ChannelEntity::class, SaleEntity::class, OrderEntity::class], version = 3, exportSchema = true)
 abstract class TerminalDatabase : RoomDatabase() {
     abstract fun terminalDao(): TerminalDao
 
@@ -105,13 +132,26 @@ abstract class TerminalDatabase : RoomDatabase() {
                 db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_orders_requestId ON orders(requestId)")
             }
         }
+        private val migration2To3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE sales ADD COLUMN relayState TEXT NOT NULL DEFAULT 'NOT_READY'")
+                db.execSQL("ALTER TABLE sales ADD COLUMN uploadAttempts INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE sales ADD COLUMN nextUploadAt INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE sales ADD COLUMN uploadLeaseOwner TEXT")
+                db.execSQL("ALTER TABLE sales ADD COLUMN uploadLeaseUntil INTEGER")
+                db.execSQL("ALTER TABLE sales ADD COLUMN transactionHash TEXT")
+                db.execSQL("ALTER TABLE sales ADD COLUMN lastUploadError TEXT")
+                db.execSQL("ALTER TABLE sales ADD COLUMN relayAcknowledgedAt INTEGER")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_sales_relay_ready ON sales(relayState,nextUploadAt,uploadLeaseUntil,createdAt)")
+            }
+        }
 
         fun open(context: Context): TerminalDatabase = Room.databaseBuilder(
             context.applicationContext,
             TerminalDatabase::class.java,
             "openbalance-terminal.db",
         ).setJournalMode(JournalMode.WRITE_AHEAD_LOGGING)
-            .addMigrations(migration1To2)
+            .addMigrations(migration1To2, migration2To3)
             .addCallback(object : Callback() {
                 override fun onOpen(db: SupportSQLiteDatabase) {
                     db.execSQL("PRAGMA synchronous=FULL")

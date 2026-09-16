@@ -15,8 +15,30 @@ import java.math.BigInteger
 import java.security.SecureRandom
 import java.util.UUID
 
-data class SalePayload(val request: TerminalPaymentRequest, val attendeeSignature: String?, val receipt: VoucherReceipt?)
-data class SaleView(val requestId: String, val channelId: String, val state: String, val requestQr: String, val receiptJson: String?)
+data class UploadAuthorization(val keyVersion: Long, val sentAt: Long, val nonce: String, val signature: String)
+data class SalePayload(
+    val request: TerminalPaymentRequest,
+    val attendeeSignature: String?,
+    val receipt: VoucherReceipt?,
+    val uploadAuthorization: UploadAuthorization? = null,
+)
+data class SaleView(
+    val requestId: String,
+    val channelId: String,
+    val state: String,
+    val relayState: String,
+    val requestQr: String,
+    val receiptJson: String?,
+    val transactionHash: String?,
+    val lastUploadError: String?,
+)
+data class RelayUploadLease(
+    val requestId: String,
+    val receipt: VoucherReceipt,
+    val authorization: UploadAuthorization?,
+    val attempts: Int,
+    val acknowledged: Boolean,
+)
 data class OrderView(
     val orderId: String,
     val orderReference: String,
@@ -105,9 +127,7 @@ class TerminalRepository(
                 acceptedAt, expiresAt, requestId,
             )
             val sealed = seal(requestId, SalePayload(request, null, null))
-            dao.insertSale(
-                SaleEntity(requestId, channel.channelId, channel.nextSequence, paymentId, "PREPARED", sealed.first, sealed.second, now, now),
-            )
+            dao.insertSale(newSale(requestId, channel.channelId, channel.nextSequence, paymentId, sealed, now))
             check(dao.markOrderRequested(orderId, requestId, nowSeconds, now) == 1) { "POS order was already used" }
             view(requireNotNull(dao.sale(requestId)))
         }
@@ -131,9 +151,7 @@ class TerminalRepository(
         )
         val payload = SalePayload(request, null, null)
         val sealed = seal(requestId, payload)
-        dao.insertSale(
-            SaleEntity(requestId, channel.channelId, channel.nextSequence, paymentId.lowercase(), "PREPARED", sealed.first, sealed.second, now, now),
-        )
+        dao.insertSale(newSale(requestId, channel.channelId, channel.nextSequence, paymentId.lowercase(), sealed, now))
         view(requireNotNull(dao.sale(requestId)))
     }
 
@@ -176,11 +194,69 @@ class TerminalRepository(
         val receiptJson = OfflineProtocol.canonicalReceipt(receipt)
         val sealed = seal(requestId, payload.copy(receipt = receipt))
         check(dao.transition(requestId, "ATTENDEE_SIGNED", "ACCEPTED", sealed.first, sealed.second, now) == 1)
+        check(dao.markRelayPending(requestId, now) == 1)
         check(dao.advanceChannel(row.channelId, voucher.sequence, voucher.sequence + 1, voucher.cumulativeGrossUnits.toString(), "0x" + OfflineProtocol.voucherDigest(voucher).toHex(), now) == 1)
         view(requireNotNull(dao.sale(requestId))).copy(receiptJson = receiptJson)
     }
 
+    suspend fun leaseRelayUploads(limit: Int, owner: String, now: Long, leaseMilliseconds: Long): List<RelayUploadLease> =
+        database.withTransaction {
+            require(limit in 1..100 && owner.matches(Regex("^[A-Za-z0-9:_-]{1,128}$")))
+            require(now >= 0 && leaseMilliseconds in 1_000..300_000)
+            val leases = mutableListOf<RelayUploadLease>()
+            for (candidate in dao.uploadCandidates(now, limit)) {
+                val leaseUntil = Math.addExact(now, leaseMilliseconds)
+                if (dao.leaseUpload(candidate.requestId, owner, now, leaseUntil) != 1) continue
+                val leased = requireNotNull(dao.sale(candidate.requestId))
+                val payload = open(leased)
+                leases += RelayUploadLease(
+                    requestId = leased.requestId,
+                    receipt = requireNotNull(payload.receipt) { "Accepted sale is missing its receipt" },
+                    authorization = payload.uploadAuthorization,
+                    attempts = leased.uploadAttempts,
+                    acknowledged = leased.relayAcknowledgedAt != null,
+                )
+            }
+            leases
+        }
+
+    suspend fun saveUploadAuthorization(
+        requestId: String,
+        owner: String,
+        authorization: UploadAuthorization,
+        now: Long,
+    ) = database.withTransaction {
+        val row = requireNotNull(dao.sale(requestId)) { "Sale not found" }
+        val payload = open(row).copy(uploadAuthorization = authorization)
+        val sealed = seal(requestId, payload)
+        check(dao.saveUploadPayload(requestId, owner, sealed.first, sealed.second, now) == 1) {
+            "Relay upload lease was lost"
+        }
+    }
+
+    suspend fun completeRelayUpload(
+        requestId: String,
+        owner: String,
+        relayState: String,
+        nextAttemptAt: Long,
+        transactionHash: String?,
+        lastError: String?,
+        acknowledgedAt: Long?,
+        now: Long,
+    ) {
+        require(relayState in setOf("RETRY", "RELAYED", "SETTLED", "QUARANTINED"))
+        require(nextAttemptAt >= now && (transactionHash == null || transactionHash.matches(Regex("^0x[0-9a-fA-F]{64}$"))))
+        require(lastError == null || lastError.length in 1..500)
+        check(
+            dao.completeUploadLease(
+                requestId, owner, relayState, nextAttemptAt, transactionHash?.lowercase(),
+                lastError, acknowledgedAt, now,
+            ) == 1,
+        ) { "Relay upload lease was lost" }
+    }
+
     suspend fun recoverSales(): List<SaleView> = dao.sales().map(::view)
+    suspend fun pendingRelayCount(): Int = dao.pendingRelayCount()
     suspend fun channels(): List<ChannelEntity> = dao.channels()
     suspend fun channelViews(): List<ChannelView> = dao.channels().map { row ->
         val snapshot = parseSnapshot(row.snapshotJson)
@@ -196,7 +272,11 @@ class TerminalRepository(
 
     private fun view(row: SaleEntity): SaleView {
         val payload = open(row)
-        return SaleView(row.requestId, row.channelId, row.state, OfflineProtocol.encodeRequestQr(payload.request), payload.receipt?.let(OfflineProtocol::canonicalReceipt))
+        return SaleView(
+            row.requestId, row.channelId, row.state, row.relayState,
+            OfflineProtocol.encodeRequestQr(payload.request), payload.receipt?.let(OfflineProtocol::canonicalReceipt),
+            row.transactionHash, row.lastUploadError,
+        )
     }
 
     private fun seal(requestId: String, payload: SalePayload): Pair<ByteArray, ByteArray> = payloads.seal(
@@ -210,13 +290,21 @@ class TerminalRepository(
         put("requestQr", OfflineProtocol.encodeRequestQr(value.request))
         put("attendeeSignature", value.attendeeSignature ?: JSONObject.NULL)
         put("receipt", value.receipt?.let(OfflineProtocol::canonicalReceipt) ?: JSONObject.NULL)
+        put("uploadAuthorization", value.uploadAuthorization?.let { authorizationJson(it) } ?: JSONObject.NULL)
     }.toString()
 
     private fun parsePayload(value: String): SalePayload {
         val json = JSONObject(value)
         val request = decodeRequestQr(json.getString("requestQr"))
         val receipt = if (json.isNull("receipt")) null else parseReceipt(json.getString("receipt"))
-        return SalePayload(request, if (json.isNull("attendeeSignature")) null else json.getString("attendeeSignature"), receipt)
+        val authorization = if (!json.has("uploadAuthorization") || json.isNull("uploadAuthorization")) null
+        else parseAuthorization(json.getJSONObject("uploadAuthorization"))
+        return SalePayload(
+            request,
+            if (json.isNull("attendeeSignature")) null else json.getString("attendeeSignature"),
+            receipt,
+            authorization,
+        )
     }
 
     private fun decodeRequestQr(value: String): TerminalPaymentRequest {
@@ -230,6 +318,44 @@ class TerminalRepository(
         VoucherReceipt(j.getString("receiptId"), j.getString("terminalId"), j.getString("channelId"), j.getLong("sequence"), j.getString("paymentId"), j.getString("voucher"), j.getString("attendeeSignature"), j.getString("terminalSignature"))
             .also { check(OfflineProtocol.canonicalReceipt(it) == value) }
     }
+
+    private fun authorizationJson(value: UploadAuthorization) = JSONObject().apply {
+        put("keyVersion", value.keyVersion)
+        put("sentAt", value.sentAt)
+        put("nonce", value.nonce.lowercase())
+        put("signature", value.signature.lowercase())
+    }
+
+    private fun parseAuthorization(value: JSONObject) = UploadAuthorization(
+        value.getLong("keyVersion"), value.getLong("sentAt"), value.getString("nonce"), value.getString("signature"),
+    )
+
+    private fun newSale(
+        requestId: String,
+        channelId: String,
+        sequence: Long,
+        paymentId: String,
+        sealed: Pair<ByteArray, ByteArray>,
+        now: Long,
+    ) = SaleEntity(
+        requestId = requestId,
+        channelId = channelId,
+        sequence = sequence,
+        paymentId = paymentId,
+        state = "PREPARED",
+        payloadNonce = sealed.first,
+        payloadCiphertext = sealed.second,
+        relayState = "NOT_READY",
+        uploadAttempts = 0,
+        nextUploadAt = 0,
+        uploadLeaseOwner = null,
+        uploadLeaseUntil = null,
+        transactionHash = null,
+        lastUploadError = null,
+        relayAcknowledgedAt = null,
+        createdAt = now,
+        updatedAt = now,
+    )
 
     private fun snapshotJson(s: ChannelSnapshot) = JSONObject().apply {
         put("channelId", s.channelId.lowercase()); put("terminalId", s.terminalId.lowercase()); put("chainId", s.chainId.toString())
