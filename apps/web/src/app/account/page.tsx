@@ -30,6 +30,15 @@ function short(value: string) {
   return `${value.slice(0, 8)}…${value.slice(-6)}`;
 }
 
+/** Converts a decimal test amount to base units; returns undefined when it is not representable. */
+function toBaseUnits(value: string, decimals: number): string | undefined {
+  if (!/^\d+(\.\d+)?$/.test(value)) return undefined;
+  const [whole = "", fraction = ""] = value.split(".");
+  if (fraction.length > decimals) return undefined;
+  const units = `${whole}${fraction.padEnd(decimals, "0")}`.replace(/^0+(?=\d)/, "");
+  return /^[1-9]\d*$/.test(units) ? units : undefined;
+}
+
 export default function AccountPage() {
   const [account, setAccount] = useState("");
   const [session, setSession] = useState<string>();
@@ -39,6 +48,8 @@ export default function AccountPage() {
   const [channelId, setChannelId] = useState("");
   const [channel, setChannel] = useState<Channel>();
   const [reclaimOperation, setReclaimOperation] = useState<Operation>();
+  const [fundAmount, setFundAmount] = useState("5");
+  const [funding, setFunding] = useState<string>();
   const api = process.env.NEXT_PUBLIC_API_URL;
 
   async function request(path: string, init: RequestInit) {
@@ -206,6 +217,40 @@ export default function AccountPage() {
     }
   }
 
+  async function fundTestBalance() {
+    if (!session || !api) return;
+    const units = toBaseUnits(fundAmount, 6);
+    if (!units) {
+      setStatus("Enter a valid test amount with up to six decimals.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const response = await fetch(`${api}/v1/funding/faucet`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${session}` },
+        body: JSON.stringify({ amount: units }),
+        cache: "no-store",
+        signal: AbortSignal.timeout(30_000),
+      });
+      if (!response.ok) {
+        const body = (await response.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(
+          body?.error === "faucet_exhausted"
+            ? "The test faucet has reached its daily limit."
+            : "Test funding is unavailable right now.",
+        );
+      }
+      const result = (await response.json()) as { transactionHash: string };
+      setFunding(result.transactionHash);
+      setStatus("Test balance funded. This is test money, not card funding.");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Test funding is unavailable.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <main>
       <section className="shell account-shell">
@@ -269,6 +314,39 @@ export default function AccountPage() {
                   </li>
                 ))}
               </ol>
+            )}
+          </section>
+        )}
+        {session && (
+          <section className="activity" aria-labelledby="funding-heading">
+            <div className="section-heading">
+              <div>
+                <p className="eyebrow">Test money</p>
+                <h2 id="funding-heading">Fund a test balance</h2>
+              </div>
+              <p>Test asset only</p>
+            </div>
+            <p className="summary">
+              This faucet grants a clearly labelled test asset on the test network. It is not card
+              funding and cannot be withdrawn as real money.
+            </p>
+            <label>
+              Test amount
+              <input
+                inputMode="decimal"
+                value={fundAmount}
+                disabled={busy}
+                onChange={(event) => setFundAmount(event.target.value)}
+              />
+            </label>
+            <button type="button" disabled={busy} onClick={fundTestBalance}>
+              Fund test balance
+            </button>
+            {funding && (
+              <div className="proof-ref">
+                <span>Test funding finalized</span>
+                <code title={funding}>{short(funding)}</code>
+              </div>
             )}
           </section>
         )}
