@@ -43,6 +43,33 @@ export type WebAuthnRegistration = {
   response: { clientDataJSON: string; attestationObject: string };
 };
 
+/** Authentication response in the shape `@simplewebauthn/server` verifies. */
+export type WebAuthnAuthentication = {
+  id: string;
+  rawId: string;
+  type: "public-key";
+  clientExtensionResults: Record<string, never>;
+  response: {
+    clientDataJSON: string;
+    authenticatorData: string;
+    signature: string;
+    userHandle: string | null;
+  };
+};
+
+/** ASN.1 DER ECDSA signature, which is what browsers send and the passkey server expects. */
+function derSignature(r: Buffer, s: Buffer): Buffer {
+  const encodeInteger = (value: Buffer): Buffer => {
+    let start = 0;
+    while (start < value.length - 1 && value[start] === 0) start += 1;
+    let bytes = value.subarray(start);
+    if ((bytes[0] ?? 0) & 0x80) bytes = Buffer.concat([Buffer.from([0]), bytes]);
+    return Buffer.concat([Buffer.from([0x02, bytes.length]), bytes]);
+  };
+  const body = Buffer.concat([encodeInteger(r), encodeInteger(s)]);
+  return Buffer.concat([Buffer.from([0x30, body.length]), body]);
+}
+
 function cborHead(major: number, value: number): Buffer {
   if (value < 24) return Buffer.from([(major << 5) | value]);
   if (value < 0x100) return Buffer.from([(major << 5) | 24, value]);
@@ -257,6 +284,29 @@ export class VirtualAuthenticator {
       response: {
         clientDataJSON: base64Url(Buffer.from(clientDataJSON, "utf8")),
         attestationObject: base64Url(attestationObject),
+      },
+    };
+  }
+
+  /** Produces the authentication (assertion) response for a challenge. */
+  authentication(challenge: Hex): WebAuthnAuthentication {
+    const assertion = this.assert(challenge);
+    const credentialId = base64Url(Buffer.from(this.credentialId.slice(2), "hex"));
+    return {
+      id: credentialId,
+      rawId: credentialId,
+      type: "public-key",
+      clientExtensionResults: {},
+      response: {
+        clientDataJSON: base64Url(Buffer.from(assertion.clientDataJSON, "utf8")),
+        authenticatorData: base64Url(Buffer.from(assertion.authenticatorData.slice(2), "hex")),
+        signature: base64Url(
+          derSignature(
+            Buffer.from(assertion.r.slice(2), "hex"),
+            Buffer.from(assertion.s.slice(2), "hex"),
+          ),
+        ),
+        userHandle: null,
       },
     };
   }
