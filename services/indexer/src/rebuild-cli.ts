@@ -22,6 +22,7 @@ async function main() {
     const source = new ViemFinalizedChainSource({
       rpcUrl: config.rpcUrl,
       contracts: config.contracts,
+      finalityTag: config.finalityTag,
       chain: defineChain({
         id: config.chainId,
         name: config.chainName,

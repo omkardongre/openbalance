@@ -104,6 +104,7 @@ if (
   const chain = new DeploymentChain(
     JSON.parse(await readFile(environment.ACCOUNT_MANIFEST_PATH, "utf8")),
     environment.ACCOUNT_RPC_URL,
+    environment.ACCOUNT_FINALITY_TAG,
   );
   await chain.checkpoint();
   await pool.query("SELECT enrollment_id FROM account_deployments LIMIT 0");

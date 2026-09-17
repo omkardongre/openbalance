@@ -28,6 +28,7 @@ const schema = z
     WEBAUTHN_ORIGIN: z.string().url(),
     ACCOUNT_MANIFEST_PATH: z.string().min(1),
     ACCOUNT_RPC_URL: z.string().url(),
+    ACCOUNT_FINALITY_TAG: z.enum(["finalized", "safe", "latest"]).default("finalized"),
     SPONSOR_PRIVATE_KEY_PATH: z.string().min(1),
     SPONSOR_DAILY_DEPLOYMENTS: z.coerce.number().int().min(1).max(10_000),
     SPONSOR_MAX_DEPLOYMENT_GAS: positiveInteger,

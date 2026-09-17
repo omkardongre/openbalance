@@ -55,6 +55,7 @@ const schema = z
     INDEXER_DATABASE_POOL_SIZE: positiveInteger.max(20).default(5),
     INDEXER_PROVISIONAL_ENABLED: z.enum(["true", "false"]).default("false"),
     INDEXER_PROVISIONAL_REORG_DEPTH: positiveInteger.max(512).default(128),
+    INDEXER_FINALITY_TAG: z.enum(["finalized", "safe", "latest"]).default("finalized"),
     INDEXER_ENVIRONMENT: z.string().regex(/^[a-z][a-z0-9_-]{0,31}$/),
   })
   .passthrough();
@@ -74,6 +75,7 @@ export type IndexerConfig = {
   streamId: string;
   provisionalEnabled: boolean;
   provisionalReorgDepth: number;
+  finalityTag: "finalized" | "safe" | "latest";
 };
 
 export function loadIndexerDatabaseConfig(environment: NodeJS.ProcessEnv): {
@@ -112,5 +114,6 @@ export function loadIndexerConfig(environment: NodeJS.ProcessEnv): IndexerConfig
     streamId: `${parsed.INDEXER_ENVIRONMENT}:${parsed.INDEXER_CHAIN_ID}:${parsed.INDEXER_EVENT_ID.toLowerCase()}`,
     provisionalEnabled: parsed.INDEXER_PROVISIONAL_ENABLED === "true",
     provisionalReorgDepth: parsed.INDEXER_PROVISIONAL_REORG_DEPTH,
+    finalityTag: parsed.INDEXER_FINALITY_TAG,
   };
 }

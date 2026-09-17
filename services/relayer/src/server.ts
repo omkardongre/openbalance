@@ -33,6 +33,7 @@ const policy = { rpId: environment.WEBAUTHN_RP_ID, origin: environment.WEBAUTHN_
 const chain = new DeploymentChain(
   JSON.parse(await readFile(environment.ACCOUNT_MANIFEST_PATH, "utf8")),
   environment.ACCOUNT_RPC_URL,
+  environment.ACCOUNT_FINALITY_TAG,
 );
 await chain.checkpoint();
 await pool.query("SELECT id FROM deployment_sponsorships LIMIT 0");

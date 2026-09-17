@@ -45,6 +45,7 @@ async function main() {
     rpcUrl: config.rpcUrl,
     chain,
     contracts: config.contracts,
+    finalityTag: config.finalityTag,
   });
   const indexer = new FinalizedIndexer({
     streamId: config.streamId,

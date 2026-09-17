@@ -37,6 +37,8 @@ export type ViemFinalizedChainSourceOptions = {
   rpcUrl: string;
   chain: Chain;
   contracts: IndexedContracts;
+  /** Finality policy: public networks use `finalized`; local development chains use `latest`. */
+  finalityTag?: "finalized" | "safe" | "latest";
 };
 
 export class DeploymentManifestMismatch extends Error {}
@@ -65,9 +67,11 @@ function completeLog(log: Log): RawChainLog {
 export class ViemFinalizedChainSource implements FinalizedChainSource {
   readonly #client;
   readonly #contracts: IndexedContracts;
+  readonly #finalityTag: "finalized" | "safe" | "latest";
 
   constructor(options: ViemFinalizedChainSourceOptions) {
     if (!URL.canParse(options.rpcUrl)) throw new Error("Invalid indexer RPC URL");
+    this.#finalityTag = options.finalityTag ?? "finalized";
     this.#contracts = {
       router: getAddress(options.contracts.router),
       ledger: getAddress(options.contracts.ledger),
@@ -90,25 +94,25 @@ export class ViemFinalizedChainSource implements FinalizedChainSource {
         address: this.#contracts.router,
         abi: exactPayRouterAbi,
         functionName: "eventId",
-        blockTag: "finalized",
+        blockTag: this.#finalityTag,
       }),
       this.#client.readContract({
         address: this.#contracts.vault,
         abi: resilienceVaultAbi,
         functionName: "eventId",
-        blockTag: "finalized",
+        blockTag: this.#finalityTag,
       }),
       this.#client.readContract({
         address: this.#contracts.ledger,
         abi: ledgerBindingAbi,
         functionName: "router",
-        blockTag: "finalized",
+        blockTag: this.#finalityTag,
       }),
       this.#client.readContract({
         address: this.#contracts.ledger,
         abi: ledgerBindingAbi,
         functionName: "vault",
-        blockTag: "finalized",
+        blockTag: this.#finalityTag,
       }),
     ]);
     if (
@@ -127,7 +131,7 @@ export class ViemFinalizedChainSource implements FinalizedChainSource {
   }
 
   async getFinalizedHead(): Promise<FinalizedBlock> {
-    const block = await this.#client.getBlock({ blockTag: "finalized" });
+    const block = await this.#client.getBlock({ blockTag: this.#finalityTag });
     if (block.hash === null) throw new Error("Finalized head has no hash");
     return {
       number: block.number,

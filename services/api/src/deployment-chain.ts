@@ -43,8 +43,14 @@ export class DeploymentChain {
   readonly client: PublicClient;
   readonly manifest: AccountManifest;
   readonly manifestHash: Hex;
-  constructor(manifest: unknown, rpcUrl: string) {
+  readonly #finalityTag: "finalized" | "safe" | "latest";
+  constructor(
+    manifest: unknown,
+    rpcUrl: string,
+    finalityTag: "finalized" | "safe" | "latest" = "finalized",
+  ) {
     this.manifest = accountManifestSchema.parse(manifest);
+    this.#finalityTag = finalityTag;
     this.manifestHash = keccak256(stringToHex(JSON.stringify(this.manifest)));
     const url = new URL(rpcUrl);
     if (
@@ -60,7 +66,7 @@ export class DeploymentChain {
   async checkpoint() {
     if ((await this.client.getChainId()) !== this.manifest.chainId)
       throw new DeploymentMismatch("chain");
-    const block = await this.client.getBlock({ blockTag: "finalized" });
+    const block = await this.client.getBlock({ blockTag: this.#finalityTag });
     const blockNumber = block.number;
     const [factoryCode, implementationCode, implementation] = await Promise.all([
       this.client.getCode({ address: this.manifest.factory, blockNumber }),

@@ -8,6 +8,7 @@ const environmentSchema = z.object({
   WEBAUTHN_ORIGIN: z.string().url().optional(),
   ACCOUNT_MANIFEST_PATH: z.string().min(1).optional(),
   ACCOUNT_RPC_URL: z.string().url().optional(),
+  ACCOUNT_FINALITY_TAG: z.enum(["finalized", "safe", "latest"]).default("finalized"),
   PROJECTION_READS_ENABLED: z
     .enum(["true", "false"])
     .default("false")
