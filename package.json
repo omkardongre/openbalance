@@ -18,6 +18,7 @@
     "verify:postgres": "node scripts/verify-postgres.mjs",
     "verify:relay": "node scripts/verify-relay-scenario.mjs",
     "verify:scenario": "node scripts/verify-scenario.mjs",
+    "verify:system": "node scripts/verify-system-scenario.mjs",
     "verify:local": "node scripts/verify-local-system.mjs",
     "verify:local-chain": "node scripts/verify-local-chain.mjs",
     "test:tooling": "node --test scripts/*.test.mjs",
