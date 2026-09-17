@@ -10,6 +10,7 @@
   "scripts": {
     "android:build": "./apps/terminal-android/gradlew -p apps/terminal-android :app:testDebugUnitTest :app:assembleDebug",
     "coverage:contracts": "forge coverage --root contracts --ir-minimum --report summary",
+    "evidence:local": "node scripts/local-evidence.mjs",
     "evidence:package": "node scripts/package-evidence.mjs",
     "sbom": "node scripts/generate-sbom.mjs evidence/sbom.cdx.json",
     "verify:faucet": "node scripts/verify-faucet-scenario.mjs",

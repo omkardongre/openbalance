@@ -9,6 +9,7 @@ export {
   VirtualAuthenticator,
   type VirtualAuthenticatorState,
   type WebAuthnAssertion,
+  type WebAuthnRegistration,
 } from "./authenticator.js";
 export {
   type OfflineReserveContext,

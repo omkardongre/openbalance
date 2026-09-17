@@ -255,6 +255,9 @@ importers:
         specifier: 2.56.3
         version: 2.56.3(typescript@7.0.2)(zod@4.6.1)
     devDependencies:
+      '@simplewebauthn/server':
+        specifier: 14.0.1
+        version: 14.0.1
       '@types/node':
         specifier: 24.13.4
         version: 24.13.4

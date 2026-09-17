@@ -34,6 +34,58 @@ export type WebAuthnAssertion = {
   clientDataJSON: string;
 };
 
+/** Registration response in the shape `@simplewebauthn/server` verifies. */
+export type WebAuthnRegistration = {
+  id: string;
+  rawId: string;
+  type: "public-key";
+  clientExtensionResults: Record<string, never>;
+  response: { clientDataJSON: string; attestationObject: string };
+};
+
+function cborHead(major: number, value: number): Buffer {
+  if (value < 24) return Buffer.from([(major << 5) | value]);
+  if (value < 0x100) return Buffer.from([(major << 5) | 24, value]);
+  if (value < 0x10000) {
+    const out = Buffer.alloc(3);
+    out[0] = (major << 5) | 25;
+    out.writeUInt16BE(value, 1);
+    return out;
+  }
+  const out = Buffer.alloc(5);
+  out[0] = (major << 5) | 26;
+  out.writeUInt32BE(value, 1);
+  return out;
+}
+
+function cborInt(value: number): Buffer {
+  return value >= 0 ? cborHead(0, value) : cborHead(1, -1 - value);
+}
+
+function cborText(value: string): Buffer {
+  const bytes = Buffer.from(value, "utf8");
+  return Buffer.concat([cborHead(3, bytes.byteLength), bytes]);
+}
+
+function cborBytes(value: Buffer): Buffer {
+  return Buffer.concat([cborHead(2, value.byteLength), value]);
+}
+
+function cborMap(entries: [Buffer, Buffer][]): Buffer {
+  return Buffer.concat([cborHead(5, entries.length), ...entries.flatMap(([k, v]) => [k, v])]);
+}
+
+/** ES256 COSE key for a P-256 public key. */
+function cosePublicKey(x: Buffer, y: Buffer): Buffer {
+  return cborMap([
+    [cborInt(1), cborInt(2)],
+    [cborInt(3), cborInt(-7)],
+    [cborInt(-1), cborInt(1)],
+    [cborInt(-2), cborBytes(x)],
+    [cborInt(-3), cborBytes(y)],
+  ]);
+}
+
 function base64Url(bytes: Buffer): string {
   return bytes.toString("base64url");
 }
@@ -170,6 +222,42 @@ export class VirtualAuthenticator {
       typeIndex: 0n,
       authenticatorData: hexOf(authenticatorData),
       clientDataJSON,
+    };
+  }
+
+  /** Produces the registration (attestation) response for a challenge. */
+  registration(challenge: Hex): WebAuthnRegistration {
+    if (!HEX_32.test(challenge)) throw new Error("Invalid WebAuthn challenge");
+    const clientDataJSON = `{"type":"webauthn.create","challenge":"${base64Url(
+      Buffer.from(challenge.slice(2), "hex"),
+    )}","origin":"${this.origin}"}`;
+    const credentialId = Buffer.from(this.credentialId.slice(2), "hex");
+    const authData = Buffer.concat([
+      Buffer.from(this.rpIdHash.slice(2), "hex"),
+      Buffer.from([0x45]), // user present | user verified | attested credential data
+      counterBytes(this.#signCount),
+      Buffer.alloc(16),
+      Buffer.from([(credentialId.byteLength >> 8) & 0xff, credentialId.byteLength & 0xff]),
+      credentialId,
+      cosePublicKey(
+        Buffer.from(this.publicKey.x.slice(2), "hex"),
+        Buffer.from(this.publicKey.y.slice(2), "hex"),
+      ),
+    ]);
+    const attestationObject = cborMap([
+      [cborText("fmt"), cborText("none")],
+      [cborText("attStmt"), cborMap([])],
+      [cborText("authData"), cborBytes(authData)],
+    ]);
+    return {
+      id: this.credentialId,
+      rawId: this.credentialId,
+      type: "public-key",
+      clientExtensionResults: {},
+      response: {
+        clientDataJSON: base64Url(Buffer.from(clientDataJSON, "utf8")),
+        attestationObject: base64Url(attestationObject),
+      },
     };
   }
 }
