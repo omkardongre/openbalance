@@ -8,6 +8,7 @@
       "!!**/coverage",
       "!!**/build",
       "!!apps/terminal-android/app/schemas",
+      "!!packages/sdk/src/generated",
       "!!**/dist",
       "!!contracts/out",
       "!!contracts/cache",

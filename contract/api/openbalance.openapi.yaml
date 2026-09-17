@@ -1,0 +1,380 @@
+openapi: 3.1.0
+info:
+  title: OpenBalance API
+  version: "1.0.0"
+  description: |
+    Consumer payments and vendor settlement for events on Monad. This specification covers the
+    request surface a client needs: passkey enrollment and sign-in, test-asset funding, finalized
+    account activity, payment and reserve reads, and vendor checkout issuance.
+servers:
+  - url: http://127.0.0.1:3001
+    description: Local development
+tags:
+  - name: health
+  - name: accounts
+  - name: funding
+  - name: payments
+  - name: reserves
+  - name: checkout
+paths:
+  /health/live:
+    get:
+      tags: [health]
+      operationId: healthLive
+      responses:
+        "200":
+          description: Process is running
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Health" }
+  /health/ready:
+    get:
+      tags: [health]
+      operationId: healthReady
+      responses:
+        "200":
+          description: Dependencies are ready
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Readiness" }
+        "503":
+          description: A dependency probe failed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Readiness" }
+  /v1/accounts/enrollment-challenges:
+    post:
+      tags: [accounts]
+      operationId: createEnrollmentChallenge
+      responses:
+        "200":
+          description: Registration challenge options
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+  /v1/accounts/enrollment/register:
+    post:
+      tags: [accounts]
+      operationId: registerPasskey
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EnrollmentSubmission" }
+      responses:
+        "200":
+          description: Registration accepted
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "400":
+          $ref: "#/components/responses/BadRequest"
+  /v1/accounts/authentication-challenges:
+    post:
+      tags: [accounts]
+      operationId: createAuthenticationChallenge
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [account]
+              properties:
+                account: { $ref: "#/components/schemas/Address" }
+      responses:
+        "200":
+          description: Authentication challenge options
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /v1/accounts/authentications:
+    post:
+      tags: [accounts]
+      operationId: authenticatePasskey
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [challengeToken, response]
+              properties:
+                challengeToken: { type: string }
+                response: { type: object, additionalProperties: true }
+      responses:
+        "200":
+          description: Session issued
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Session" }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /v1/accounts/me:
+    get:
+      tags: [accounts]
+      operationId: readAccount
+      security: [{ bearerSession: [] }]
+      responses:
+        "200":
+          description: Authenticated account
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /v1/accounts/me/activity:
+    get:
+      tags: [accounts]
+      operationId: readAccountActivity
+      security: [{ bearerSession: [] }]
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 25 }
+        - name: beforeBlock
+          in: query
+          schema: { type: string }
+        - name: beforeTransitionId
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: Finalized account transitions
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Activity" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /v1/funding/faucet:
+    post:
+      tags: [funding]
+      operationId: fundTestBalance
+      description: Grants clearly labelled test assets to the caller's own account.
+      security: [{ bearerSession: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amount]
+              properties:
+                amount:
+                  type: string
+                  pattern: "^[1-9][0-9]*$"
+                  description: Amount in base units.
+      responses:
+        "200":
+          description: Grant finalized on chain
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FaucetGrant" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          $ref: "#/components/responses/BadRequest"
+        "429":
+          description: The daily faucet limit was reached
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "503":
+          description: The funding source is temporarily unavailable
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /v1/payment-intents/{id}:
+    get:
+      tags: [payments]
+      operationId: readPaymentIntent
+      security: [{ bearerSession: [] }]
+      parameters:
+        - $ref: "#/components/parameters/Identifier"
+      responses:
+        "200":
+          description: Finalized payment projection
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/reserve-channels/{id}:
+    get:
+      tags: [reserves]
+      operationId: readReserveChannel
+      security: [{ bearerSession: [] }]
+      parameters:
+        - $ref: "#/components/parameters/Identifier"
+      responses:
+        "200":
+          description: Finalized reserve state
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReserveChannel" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/checkout-orders:
+    post:
+      tags: [checkout]
+      operationId: createCheckoutOrder
+      security: [{ bearerSession: [] }]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CheckoutOrderRequest" }
+      responses:
+        "200":
+          description: Order created or replayed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CheckoutOrder" }
+        "201":
+          description: Order created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CheckoutOrder" }
+        "409":
+          description: Idempotency conflict
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "422":
+          $ref: "#/components/responses/BadRequest"
+components:
+  securitySchemes:
+    bearerSession:
+      type: http
+      scheme: bearer
+      description: Short-lived account session issued by `authenticatePasskey`.
+  parameters:
+    Identifier:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, pattern: "^0x[0-9a-fA-F]{64}$" }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema: { type: string, maxLength: 128 }
+  responses:
+    BadRequest:
+      description: The request was rejected
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unauthorized:
+      description: The session is missing or invalid
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Forbidden:
+      description: The caller is not permitted
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: The record was not found
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+  schemas:
+    Address:
+      type: string
+      pattern: "^0x[0-9a-fA-F]{40}$"
+    Health:
+      type: object
+      required: [status, service]
+      properties:
+        status: { type: string }
+        service: { type: string }
+    Readiness:
+      type: object
+      required: [status]
+      properties:
+        status: { type: string, enum: [ready, not_ready] }
+        checks:
+          type: array
+          items:
+            type: object
+            properties:
+              name: { type: string }
+              status: { type: string }
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+        action: { type: string }
+        retryable: { type: boolean }
+    Session:
+      type: object
+      required: [account, sessionToken]
+      properties:
+        account: { $ref: "#/components/schemas/Address" }
+        sessionToken: { type: string }
+    EnrollmentSubmission:
+      type: object
+      required: [token, response]
+      properties:
+        token: { type: string }
+        response: { type: object, additionalProperties: true }
+    ActivityItem:
+      type: object
+      required: [transitionId, kind, aggregateKind, aggregateId, transactionHash, blockNumber, blockHash]
+      properties:
+        transitionId: { type: string }
+        kind: { type: string }
+        aggregateKind: { type: string, enum: [PAYMENT, CHANNEL] }
+        aggregateId: { type: string }
+        transactionHash: { type: string }
+        blockNumber: { type: string }
+        blockHash: { type: string }
+    Activity:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/ActivityItem" }
+        nextCursor: { type: [object, "null"], additionalProperties: true }
+    FaucetGrant:
+      type: object
+      required: [transactionHash, amount, account]
+      properties:
+        transactionHash: { type: string, pattern: "^0x[0-9a-fA-F]{64}$" }
+        amount: { type: string }
+        account: { $ref: "#/components/schemas/Address" }
+    ReserveChannel:
+      type: object
+      required: [channelId, eventId, status, remainingUnits, submitUntil]
+      properties:
+        channelId: { type: string }
+        eventId: { type: string }
+        status: { type: string, enum: [ACTIVE, RECLAIMED] }
+        remainingUnits: { type: string }
+        submitUntil: { type: string }
+    CheckoutOrderRequest:
+      type: object
+      required: [orderReference, orderVersion, description, grossUnits]
+      properties:
+        orderReference: { type: string, maxLength: 160 }
+        orderVersion: { type: string, pattern: "^[1-9][0-9]*$" }
+        description: { type: string, maxLength: 160 }
+        grossUnits: { type: string, pattern: "^[1-9][0-9]*$" }
+    CheckoutOrder:
+      type: object
+      additionalProperties: true
+      required: [created]
+      properties:
+        created: { type: boolean }
