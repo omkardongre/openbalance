@@ -4,6 +4,11 @@ export {
   chainFor,
   runAccountScenario,
 } from "./account-scenario.js";
+export {
+  type ApiScenarioOptions,
+  type ApiScenarioResult,
+  runApiScenario,
+} from "./api-scenario.js";
 export { type ForgeArtifact, loadArtifact } from "./artifacts.js";
 export {
   VirtualAuthenticator,

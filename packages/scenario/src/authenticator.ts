@@ -14,6 +14,7 @@ const P256_ORDER = BigInt("0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b
 const HALF_ORDER = P256_ORDER >> 1n;
 
 const HEX_32 = /^0x[0-9a-fA-F]{64}$/;
+const BASE64URL = /^[A-Za-z0-9_-]{1,512}$/;
 
 /** Serialized key material so a scenario authenticator can survive a process restart. */
 export type VirtualAuthenticatorState = {
@@ -223,9 +224,13 @@ export class VirtualAuthenticator {
   /** Produces the strict assertion for a 32-byte command digest. */
   assert(challenge: Hex): WebAuthnAssertion {
     if (!HEX_32.test(challenge)) throw new Error("Invalid WebAuthn challenge");
-    const clientDataJSON = `{"type":"webauthn.get","challenge":"${base64Url(
-      Buffer.from(challenge.slice(2), "hex"),
-    )}","origin":"${this.origin}"}`;
+    return this.assertBase64Url(base64Url(Buffer.from(challenge.slice(2), "hex")));
+  }
+
+  /** Produces the strict assertion for a challenge already encoded as base64url. */
+  assertBase64Url(challenge: string): WebAuthnAssertion {
+    if (!BASE64URL.test(challenge)) throw new Error("Invalid WebAuthn challenge");
+    const clientDataJSON = `{"type":"webauthn.get","challenge":"${challenge}","origin":"${this.origin}"}`;
     const authenticatorData = Buffer.concat([
       Buffer.from(this.rpIdHash.slice(2), "hex"),
       Buffer.from([0x05]),
@@ -255,9 +260,13 @@ export class VirtualAuthenticator {
   /** Produces the registration (attestation) response for a challenge. */
   registration(challenge: Hex): WebAuthnRegistration {
     if (!HEX_32.test(challenge)) throw new Error("Invalid WebAuthn challenge");
-    const clientDataJSON = `{"type":"webauthn.create","challenge":"${base64Url(
-      Buffer.from(challenge.slice(2), "hex"),
-    )}","origin":"${this.origin}"}`;
+    return this.registrationBase64Url(base64Url(Buffer.from(challenge.slice(2), "hex")));
+  }
+
+  /** Produces the registration response for a challenge already encoded as base64url. */
+  registrationBase64Url(challenge: string): WebAuthnRegistration {
+    if (!BASE64URL.test(challenge)) throw new Error("Invalid WebAuthn challenge");
+    const clientDataJSON = `{"type":"webauthn.create","challenge":"${challenge}","origin":"${this.origin}"}`;
     const credentialId = Buffer.from(this.credentialId.slice(2), "hex");
     const authData = Buffer.concat([
       Buffer.from(this.rpIdHash.slice(2), "hex"),
@@ -290,7 +299,14 @@ export class VirtualAuthenticator {
 
   /** Produces the authentication (assertion) response for a challenge. */
   authentication(challenge: Hex): WebAuthnAuthentication {
-    const assertion = this.assert(challenge);
+    if (!HEX_32.test(challenge)) throw new Error("Invalid WebAuthn challenge");
+    return this.authenticationBase64Url(base64Url(Buffer.from(challenge.slice(2), "hex")));
+  }
+
+  /** Produces the authentication response for a challenge already encoded as base64url. */
+  authenticationBase64Url(challenge: string): WebAuthnAuthentication {
+    if (!BASE64URL.test(challenge)) throw new Error("Invalid WebAuthn challenge");
+    const assertion = this.assertBase64Url(challenge);
     const credentialId = base64Url(Buffer.from(this.credentialId.slice(2), "hex"));
     return {
       id: credentialId,

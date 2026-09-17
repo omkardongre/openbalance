@@ -1,5 +1,6 @@
 import type { Hex } from "viem";
 import { runAccountScenario } from "./account-scenario.js";
+import { runApiScenario } from "./api-scenario.js";
 import { runOfflineReserveScenario } from "./event-scenario.js";
 import { runFaucetScenario } from "./faucet-scenario.js";
 import { runRelayProcessScenario } from "./relay-scenario.js";
@@ -7,14 +8,16 @@ import { runRelayProcessScenario } from "./relay-scenario.js";
 const rpcUrl = process.env.SCENARIO_RPC_URL;
 const deployerPrivateKey = process.env.SCENARIO_DEPLOYER_PRIVATE_KEY;
 const databaseUrl = process.env.SCENARIO_DATABASE_URL;
+const apiUrl = process.env.SCENARIO_API_URL;
 const kind = process.env.SCENARIO_KIND ?? "account";
 const workspaceRoot = process.env.SCENARIO_WORKSPACE_ROOT ?? process.cwd();
-const kinds = ["account", "offline", "relay", "faucet"];
+const kinds = ["account", "offline", "relay", "faucet", "api"];
 const labels: Record<string, string> = {
   account: "account-ownership",
   offline: "offline-reserve",
   relay: "relay-process",
   faucet: "faucet",
+  api: "api-journey",
 };
 
 if (!rpcUrl || !deployerPrivateKey || !/^0x[0-9a-fA-F]{64}$/.test(deployerPrivateKey)) {
@@ -28,6 +31,9 @@ if (!rpcUrl || !deployerPrivateKey || !/^0x[0-9a-fA-F]{64}$/.test(deployerPrivat
 } else if (kind === "faucet" && !databaseUrl) {
   process.stderr.write("The faucet scenario requires SCENARIO_DATABASE_URL\n");
   process.exitCode = 64;
+} else if (kind === "api" && !apiUrl) {
+  process.stderr.write("The api scenario requires SCENARIO_API_URL\n");
+  process.exitCode = 64;
 } else {
   const options = {
     rpcUrl,
@@ -40,9 +46,16 @@ if (!rpcUrl || !deployerPrivateKey || !/^0x[0-9a-fA-F]{64}$/.test(deployerPrivat
       ? () => runRelayProcessScenario({ ...options, workspaceRoot })
       : kind === "faucet"
         ? () => runFaucetScenario({ ...options, databaseUrl: databaseUrl as string })
-        : kind === "offline"
-          ? () => runOfflineReserveScenario(options)
-          : () => runAccountScenario(options);
+        : kind === "api"
+          ? () =>
+              runApiScenario({
+                ...options,
+                apiUrl: apiUrl as string,
+                sponsorPrivateKey: deployerPrivateKey as Hex,
+              })
+          : kind === "offline"
+            ? () => runOfflineReserveScenario(options)
+            : () => runAccountScenario(options);
   run().then(
     (result) =>
       process.stdout.write(
