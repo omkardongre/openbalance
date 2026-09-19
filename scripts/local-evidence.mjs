@@ -7,6 +7,7 @@ import { packageEvidence } from "./package-evidence.mjs";
 const root = fileURLToPath(new URL("../", import.meta.url));
 const verificationPath = process.argv[2] ?? "evidence/local-verification.json";
 const sbomPath = "evidence/sbom.cdx.json";
+const sloPath = "evidence/slo-observations.json";
 const manifestPath = "evidence/local-evidence-manifest.json";
 const bundleDirectory = "evidence/bundle";
 
@@ -35,16 +36,18 @@ if (!(await exists(verificationPath))) {
 } else {
   if (!(await exists(sbomPath))) await run("node", ["scripts/generate-sbom.mjs", sbomPath]);
   await mkdir(resolve(root, "evidence"), { recursive: true });
+  const artifacts = [
+    { kind: "verification", path: verificationPath },
+    { kind: "sbom", path: sbomPath },
+  ];
+  if (await exists(sloPath)) artifacts.push({ kind: "workload", path: sloPath });
   await writeFile(
     resolve(root, manifestPath),
     `${JSON.stringify(
       {
         schemaVersion: 1,
         environment: "local",
-        artifacts: [
-          { kind: "verification", path: verificationPath },
-          { kind: "sbom", path: sbomPath },
-        ],
+        artifacts,
         limitations: [
           "This bundle records local verification only; it is not public-network or device proof.",
           "Every artifact is checksummed; no credentials or key material are included.",

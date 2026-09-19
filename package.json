@@ -23,6 +23,7 @@
     "verify:local-chain": "node scripts/verify-local-chain.mjs",
     "test:tooling": "node --test scripts/*.test.mjs",
     "workload": "node scripts/run-payment-workload.mjs",
+    "workload:slo": "node scripts/slo-workload.mjs",
     "build": "turbo run build && forge build --root contracts",
     "check": "biome check . && turbo run check && forge fmt --root contracts --check",
     "dev": "turbo run dev",
