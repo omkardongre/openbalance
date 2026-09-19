@@ -5,8 +5,12 @@ export {
   runAccountScenario,
 } from "./account-scenario.js";
 export {
+  type ApiEnrollmentResult,
+  type ApiFundingResult,
   type ApiScenarioOptions,
   type ApiScenarioResult,
+  runApiEnrollment,
+  runApiFunding,
   runApiScenario,
 } from "./api-scenario.js";
 export { type ForgeArtifact, loadArtifact } from "./artifacts.js";
@@ -34,3 +38,8 @@ export {
   type RelayScenarioResult,
   runRelayProcessScenario,
 } from "./relay-scenario.js";
+export {
+  runTreasuryScenario,
+  type TreasuryScenarioOptions,
+  type TreasuryScenarioResult,
+} from "./treasury-scenario.js";

@@ -1,7 +1,8 @@
+import { readFile, writeFile } from "node:fs/promises";
 import { type Address, createPublicClient, createWalletClient, type Hex, http } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { chainFor } from "./account-scenario.js";
-import { VirtualAuthenticator } from "./authenticator.js";
+import { VirtualAuthenticator, type VirtualAuthenticatorState } from "./authenticator.js";
 
 export type ApiScenarioOptions = {
   apiUrl: string;
@@ -12,6 +13,20 @@ export type ApiScenarioOptions = {
   fundAmount?: bigint;
 };
 
+export type ApiEnrollmentResult = {
+  kind: "api-enrollment";
+  enrollmentId: string;
+  account: Address;
+  deploymentBlock: string;
+};
+
+export type ApiFundingResult = {
+  kind: "api-funding";
+  account: Address;
+  fundedUnits: string;
+  activityCount: number;
+};
+
 export type ApiScenarioResult = {
   kind: "api-journey";
   enrollmentId: string;
@@ -19,6 +34,12 @@ export type ApiScenarioResult = {
   deploymentBlock: string;
   fundedUnits: string;
   activityCount: number;
+};
+
+type JourneyState = {
+  account: Address;
+  enrollmentId: string;
+  authenticator: VirtualAuthenticatorState;
 };
 
 let requestOrigin: string | undefined;
@@ -40,14 +61,15 @@ async function call<T>(url: string, path: string, init: RequestInit): Promise<T>
 }
 
 /**
- * Drives the real API through the passkey journey: enroll a credential, deploy the account with a
- * sponsored transaction, sign in, fund the test balance, and read finalized activity. Every step is
- * verified by the running service, not by this harness.
+ * Enrolls a passkey and deploys the account through the running API, persisting the authenticator
+ * and account so the journey can continue in another process. Every step is verified by the
+ * service, not by this harness.
  */
-export async function runApiScenario(options: ApiScenarioOptions): Promise<ApiScenarioResult> {
+export async function runApiEnrollment(
+  options: ApiScenarioOptions & { statePath: string },
+): Promise<ApiEnrollmentResult> {
   const rpId = options.rpId ?? "localhost";
   const origin = options.origin ?? "http://localhost:3000";
-  const fundAmount = options.fundAmount ?? 5_000_000n;
   requestOrigin = origin;
   const authenticator = VirtualAuthenticator.create({ rpId, origin });
 
@@ -69,7 +91,7 @@ export async function runApiScenario(options: ApiScenarioOptions): Promise<ApiSc
   );
   if (registered.status !== "prove")
     throw new Error("Enrollment did not advance to the proof step");
-  const verified = await call<{ status: string; enrollmentId: string; publicKey: { x: string } }>(
+  const verified = await call<{ status: string; enrollmentId: string }>(
     options.apiUrl,
     "/v1/accounts/enrollments/prove",
     {
@@ -84,7 +106,7 @@ export async function runApiScenario(options: ApiScenarioOptions): Promise<ApiSc
 
   const prepared = await call<{
     account: Address;
-    transaction: { to: Address; data: Hex; value: Hex; chainId: Hex };
+    transaction: { to: Address; data: Hex; value: Hex };
   }>(options.apiUrl, "/v1/accounts/deployments/prepare", {
     method: "POST",
     body: JSON.stringify({ token: begin.token }),
@@ -110,10 +132,37 @@ export async function runApiScenario(options: ApiScenarioOptions): Promise<ApiSc
   );
   if (confirmed.status !== "confirmed") throw new Error("Account deployment was not confirmed");
 
+  const state: JourneyState = {
+    account: prepared.account,
+    enrollmentId: verified.enrollmentId,
+    authenticator: authenticator.toJSON(),
+  };
+  await writeFile(options.statePath, JSON.stringify(state), "utf8");
+  return {
+    kind: "api-enrollment",
+    enrollmentId: verified.enrollmentId,
+    account: prepared.account,
+    deploymentBlock: confirmed.block,
+  };
+}
+
+/**
+ * Continues the journey in a fresh process: restores the enrolled credential, signs in, funds the
+ * test balance and reads finalized activity. Running this after a restart proves the service state
+ * survived.
+ */
+export async function runApiFunding(
+  options: ApiScenarioOptions & { statePath: string },
+): Promise<ApiFundingResult> {
+  const origin = options.origin ?? "http://localhost:3000";
+  requestOrigin = origin;
+  const state = JSON.parse(await readFile(options.statePath, "utf8")) as JourneyState;
+  const authenticator = VirtualAuthenticator.restore(state.authenticator);
+
   const challenge = await call<{ challengeToken: string; options: { challenge: string } }>(
     options.apiUrl,
     "/v1/accounts/authentication-challenges",
-    { method: "POST", body: JSON.stringify({ account: prepared.account }) },
+    { method: "POST", body: JSON.stringify({ account: state.account }) },
   );
   const session = await call<{ sessionToken: string; account: Address }>(
     options.apiUrl,
@@ -126,9 +175,10 @@ export async function runApiScenario(options: ApiScenarioOptions): Promise<ApiSc
       }),
     },
   );
-  if (session.account.toLowerCase() !== prepared.account.toLowerCase())
+  if (session.account.toLowerCase() !== state.account.toLowerCase())
     throw new Error("Session was issued for another account");
 
+  const fundAmount = options.fundAmount ?? 5_000_000n;
   const grant = await call<{ amount: string; transactionHash: Hex }>(
     options.apiUrl,
     "/v1/funding/faucet",
@@ -147,11 +197,24 @@ export async function runApiScenario(options: ApiScenarioOptions): Promise<ApiSc
   );
 
   return {
-    kind: "api-journey",
-    enrollmentId: verified.enrollmentId,
-    account: prepared.account,
-    deploymentBlock: confirmed.block,
+    kind: "api-funding",
+    account: state.account,
     fundedUnits: grant.amount,
     activityCount: activity.items.length,
+  };
+}
+
+/** Runs enrollment and funding in one process. */
+export async function runApiScenario(options: ApiScenarioOptions): Promise<ApiScenarioResult> {
+  const statePath = `${process.env.TMPDIR ?? "/tmp"}/openbalance-api-journey-${Date.now()}.json`;
+  const enrolled = await runApiEnrollment({ ...options, statePath });
+  const funded = await runApiFunding({ ...options, statePath });
+  return {
+    kind: "api-journey",
+    enrollmentId: enrolled.enrollmentId,
+    account: funded.account,
+    deploymentBlock: enrolled.deploymentBlock,
+    fundedUnits: funded.fundedUnits,
+    activityCount: funded.activityCount,
   };
 }

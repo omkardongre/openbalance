@@ -38,6 +38,40 @@ function run(command, args, options = {}) {
   });
 }
 
+async function runCombined(command, args, options = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd: options.cwd ?? root,
+      shell: false,
+      env: options.env ?? process.env,
+    });
+    let output = "";
+    child.stdout.on("data", (value) => {
+      output += value;
+    });
+    child.stderr.on("data", (value) => {
+      output += value;
+    });
+    child.once("error", reject);
+    child.once("exit", (code) =>
+      code === 0 ? resolve(output.trim()) : reject(new Error(`${command} failed`)),
+    );
+  });
+}
+
+async function runRetry(command, args, options = {}, attempts = 6) {
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await run(command, args, options);
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 3_000));
+    }
+  }
+  throw lastError;
+}
+
 async function availablePort() {
   const server = createServer();
   await new Promise((resolve, reject) => {
@@ -129,6 +163,16 @@ try {
     },
     60_000,
   );
+  // `pg_isready` also passes against the temporary init server, which then restarts. Wait for the
+  // post-init "ready to accept connections" line so a connection is never reset mid-initialisation.
+  await waitFor(
+    "PostgreSQL init",
+    async () => {
+      const logs = await runCombined("docker", ["logs", container]);
+      return (logs.match(/database system is ready to accept connections/g) ?? []).length >= 2;
+    },
+    60_000,
+  );
   const binding = await run("docker", ["port", container, "5432/tcp"]);
   const databaseUrl = `postgresql://postgres:${password}@${binding}/openbalance_system`;
 
@@ -139,7 +183,7 @@ try {
   await run("pnpm", ["--filter", "@openbalance/relayer", "build"]);
   await run("pnpm", ["--filter", "@openbalance/indexer", "build"]);
   for (const service of ["indexer", "api", "relayer", "integrations"]) {
-    await run("pnpm", ["--filter", `@openbalance/${service}`, "migrate"], {
+    await runRetry("pnpm", ["--filter", `@openbalance/${service}`, "migrate"], {
       env: {
         ...process.env,
         DATABASE_URL: databaseUrl,
@@ -296,6 +340,15 @@ try {
   );
   await writeFile(faucetKeyPath, faucet.private_key);
   await chmod(faucetKeyPath, 0o600);
+  const financialManifestPath = join(directory, "financial-manifest.json");
+  await writeFile(
+    financialManifestPath,
+    JSON.stringify({
+      schemaVersion: 1,
+      chainId: 31337,
+      events: [{ eventId, router, vault, ledger, asset: token, deploymentBlock: "0" }],
+    }),
+  );
 
   const apiPort = await availablePort();
   const relayerPort = await availablePort();
@@ -303,7 +356,7 @@ try {
   const indexerMetricsPort = await availablePort();
   const relayPort = await availablePort();
 
-  start("api", "services/api/dist/server.js", {
+  const apiEnvironment = {
     HOST: "127.0.0.1",
     PORT: String(apiPort),
     DATABASE_URL: databaseUrl,
@@ -322,7 +375,8 @@ try {
     FAUCET_MAX_AMOUNT: "5000000",
     FAUCET_DAILY_LIMIT: "50000000",
     METRICS_PORT: String(await availablePort()),
-  });
+  };
+  let api = start("api", "services/api/dist/server.js", apiEnvironment);
   start("relayer", "services/relayer/dist/server.js", {
     HOST: "127.0.0.1",
     PORT: String(relayerPort),
@@ -337,6 +391,7 @@ try {
     SPONSOR_MAX_DEPLOYMENT_GAS: "1000000",
     SPONSOR_MAX_FEE_PER_GAS_WEI: "1000000000",
     SPONSOR_MAX_COST_WEI: "1000000000000000",
+    FINANCIAL_EVENT_MANIFEST_PATH: financialManifestPath,
   });
   start("indexer", "services/indexer/dist/server.js", {
     INDEXER_DATABASE_URL: databaseUrl,
@@ -399,22 +454,74 @@ try {
     throw error;
   }
 
-  const output = await run("node", [scenarioCli], {
-    env: {
-      ...process.env,
-      SCENARIO_KIND: "api",
-      SCENARIO_API_URL: `http://127.0.0.1:${apiPort}`,
-      SCENARIO_RPC_URL: rpcUrl,
-      SCENARIO_DEPLOYER_PRIVATE_KEY: deployer.private_key,
-      SCENARIO_RP_ID: "localhost",
-      SCENARIO_ORIGIN: "http://localhost:3000",
-    },
-  });
-  const result = JSON.parse(output);
-  if (result.kind !== "api-journey") throw new Error("Unexpected api scenario result");
-  if (result.fundedUnits !== "5000000") throw new Error("Faucet did not grant the expected amount");
+  const journeyStatePath = join(directory, "journey.json");
+  const journeyEnvironment = {
+    ...process.env,
+    SCENARIO_API_URL: `http://127.0.0.1:${apiPort}`,
+    SCENARIO_RPC_URL: rpcUrl,
+    SCENARIO_DEPLOYER_PRIVATE_KEY: deployer.private_key,
+    SCENARIO_RP_ID: "localhost",
+    SCENARIO_ORIGIN: "http://localhost:3000",
+    SCENARIO_STATE_PATH: journeyStatePath,
+  };
+  const enrolled = JSON.parse(
+    await run("node", [scenarioCli], {
+      env: { ...journeyEnvironment, SCENARIO_KIND: "api-enroll" },
+    }),
+  );
+  if (enrolled.kind !== "api-enrollment") throw new Error("Unexpected enrollment result");
+
+  // Kill the API mid-journey and restart it: the enrollment and deployment must survive.
+  api.kill("SIGTERM");
+  await new Promise((resolve) => api.once("exit", resolve));
+  api = start("api", "services/api/dist/server.js", apiEnvironment);
+  await waitFor("API after restart", () => healthy(`http://127.0.0.1:${apiPort}/health/ready`));
+
+  const funded = JSON.parse(
+    await run("node", [scenarioCli], { env: { ...journeyEnvironment, SCENARIO_KIND: "api-fund" } }),
+  );
+  if (funded.kind !== "api-funding") throw new Error("Unexpected funding result");
+  if (funded.account.toLowerCase() !== enrolled.account.toLowerCase())
+    throw new Error("Restart changed the account for the enrolled credential");
+  if (funded.fundedUnits !== "5000000") throw new Error("Faucet did not grant the expected amount");
+
+  const vendorAuthority = (await run("cast", ["wallet", "new", "--json"])).data?.[0] ?? {};
+  const terminalKey = (await run("cast", ["wallet", "new", "--json"])).data?.[0] ?? {};
+  const vendorId = await run("cast", ["keccak", "vendor:treasury"]);
+  const provisioned = JSON.parse(
+    await run("pnpm", ["--filter", "@openbalance/relayer", "provision:vendor-treasury"], {
+      env: {
+        ...process.env,
+        DATABASE_URL: databaseUrl,
+        VENDOR_TREASURY_EVENT_ID: eventId,
+        VENDOR_TREASURY_VENDOR_ID: vendorId,
+        VENDOR_TREASURY_AUTHORITY: vendorAuthority.address,
+      },
+    }),
+  );
+  const treasury = JSON.parse(
+    await run("node", [scenarioCli], {
+      env: {
+        ...journeyEnvironment,
+        SCENARIO_KIND: "treasury",
+        SCENARIO_RELAYER_URL: `http://127.0.0.1:${relayerPort}`,
+        SCENARIO_VENDOR_TREASURY_TOKEN: provisioned.token,
+        SCENARIO_VENDOR_AUTHORITY_KEY: vendorAuthority.private_key,
+        SCENARIO_TERMINAL_KEY: terminalKey.private_key,
+        SCENARIO_EVENT: JSON.stringify({ eventId, registry, router, vault, ledger, token }),
+      },
+    }),
+  );
+  if (treasury.kind !== "treasury") throw new Error("Unexpected treasury result");
   process.stdout.write(
-    `${JSON.stringify({ passed: true, processes: ["postgres", "api", "relayer", "indexer", "venue-relay"], ...result })}\n`,
+    `${JSON.stringify({
+      passed: true,
+      processes: ["postgres", "api", "relayer", "indexer", "venue-relay"],
+      restarted: ["api"],
+      enrollment: enrolled,
+      funding: funded,
+      treasury,
+    })}\n`,
   );
 } finally {
   for (const child of children) if (child.exitCode === null) child.kill("SIGTERM");

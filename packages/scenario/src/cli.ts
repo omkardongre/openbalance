@@ -1,23 +1,37 @@
 import type { Hex } from "viem";
 import { runAccountScenario } from "./account-scenario.js";
-import { runApiScenario } from "./api-scenario.js";
+import { runApiEnrollment, runApiFunding, runApiScenario } from "./api-scenario.js";
 import { runOfflineReserveScenario } from "./event-scenario.js";
 import { runFaucetScenario } from "./faucet-scenario.js";
 import { runRelayProcessScenario } from "./relay-scenario.js";
+import { runTreasuryScenario } from "./treasury-scenario.js";
 
 const rpcUrl = process.env.SCENARIO_RPC_URL;
 const deployerPrivateKey = process.env.SCENARIO_DEPLOYER_PRIVATE_KEY;
 const databaseUrl = process.env.SCENARIO_DATABASE_URL;
 const apiUrl = process.env.SCENARIO_API_URL;
+const statePath = process.env.SCENARIO_STATE_PATH;
 const kind = process.env.SCENARIO_KIND ?? "account";
 const workspaceRoot = process.env.SCENARIO_WORKSPACE_ROOT ?? process.cwd();
-const kinds = ["account", "offline", "relay", "faucet", "api"];
+const kinds = [
+  "account",
+  "offline",
+  "relay",
+  "faucet",
+  "api",
+  "api-enroll",
+  "api-fund",
+  "treasury",
+];
 const labels: Record<string, string> = {
   account: "account-ownership",
   offline: "offline-reserve",
   relay: "relay-process",
   faucet: "faucet",
   api: "api-journey",
+  "api-enroll": "api-enrollment",
+  "api-fund": "api-funding",
+  treasury: "treasury",
 };
 
 if (!rpcUrl || !deployerPrivateKey || !/^0x[0-9a-fA-F]{64}$/.test(deployerPrivateKey)) {
@@ -33,6 +47,23 @@ if (!rpcUrl || !deployerPrivateKey || !/^0x[0-9a-fA-F]{64}$/.test(deployerPrivat
   process.exitCode = 64;
 } else if (kind === "api" && !apiUrl) {
   process.stderr.write("The api scenario requires SCENARIO_API_URL\n");
+  process.exitCode = 64;
+} else if ((kind === "api-enroll" || kind === "api-fund") && (!apiUrl || !statePath)) {
+  process.stderr.write("The api journey steps require SCENARIO_API_URL and SCENARIO_STATE_PATH\n");
+  process.exitCode = 64;
+} else if (
+  kind === "treasury" &&
+  (!apiUrl ||
+    !statePath ||
+    !process.env.SCENARIO_RELAYER_URL ||
+    !process.env.SCENARIO_VENDOR_TREASURY_TOKEN ||
+    !process.env.SCENARIO_VENDOR_AUTHORITY_KEY ||
+    !process.env.SCENARIO_TERMINAL_KEY ||
+    !process.env.SCENARIO_EVENT)
+) {
+  process.stderr.write(
+    "The treasury scenario requires the API, relayer, state and event settings\n",
+  );
   process.exitCode = 64;
 } else {
   const options = {
@@ -53,9 +84,37 @@ if (!rpcUrl || !deployerPrivateKey || !/^0x[0-9a-fA-F]{64}$/.test(deployerPrivat
                 apiUrl: apiUrl as string,
                 sponsorPrivateKey: deployerPrivateKey as Hex,
               })
-          : kind === "offline"
-            ? () => runOfflineReserveScenario(options)
-            : () => runAccountScenario(options);
+          : kind === "api-enroll"
+            ? () =>
+                runApiEnrollment({
+                  ...options,
+                  apiUrl: apiUrl as string,
+                  sponsorPrivateKey: deployerPrivateKey as Hex,
+                  statePath: statePath as string,
+                })
+            : kind === "api-fund"
+              ? () =>
+                  runApiFunding({
+                    ...options,
+                    apiUrl: apiUrl as string,
+                    sponsorPrivateKey: deployerPrivateKey as Hex,
+                    statePath: statePath as string,
+                  })
+              : kind === "treasury"
+                ? () =>
+                    runTreasuryScenario({
+                      ...options,
+                      apiUrl: apiUrl as string,
+                      relayerUrl: process.env.SCENARIO_RELAYER_URL as string,
+                      statePath: statePath as string,
+                      vendorTreasuryToken: process.env.SCENARIO_VENDOR_TREASURY_TOKEN as string,
+                      vendorAuthorityPrivateKey: process.env.SCENARIO_VENDOR_AUTHORITY_KEY as Hex,
+                      terminalPrivateKey: process.env.SCENARIO_TERMINAL_KEY as Hex,
+                      event: JSON.parse(process.env.SCENARIO_EVENT as string),
+                    })
+                : kind === "offline"
+                  ? () => runOfflineReserveScenario(options)
+                  : () => runAccountScenario(options);
   run().then(
     (result) =>
       process.stdout.write(

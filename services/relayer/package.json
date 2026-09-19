@@ -13,6 +13,7 @@
     "check": "tsc --noEmit",
     "dev": "tsx watch src/server.ts",
     "migrate": "tsx src/migrate.ts",
+    "provision:vendor-treasury": "tsx src/provision-vendor-treasury.ts",
     "start": "node dist/server.js",
     "start:financial-worker": "node dist/financial-worker-server.js",
     "test": "vitest run"
