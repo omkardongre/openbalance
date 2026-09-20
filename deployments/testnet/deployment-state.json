@@ -1,0 +1,21 @@
+{
+  "chainId": 10143,
+  "deployer": "0xA9d0D013f0d541d2FF96ab254Bef318787f80F83",
+  "asset": "0x534b2f3A21130d7a60830c2Df862319e593943A3",
+  "eventLabel": "openbalance:testnet:event:1",
+  "riskOperator": "0xA9d0D013f0d541d2FF96ab254Bef318787f80F83",
+  "maximumFeeBps": 500,
+  "accountFactory": {
+    "address": "0x6003785770b668B742e37cD5c519ef7Ef3554BbC",
+    "transactionHash": "0xe2a4b03907990101e21fc53d066c689637f0d5fd4851cefc8bf53e6c83a3f4e6"
+  },
+  "eventFactory": {
+    "address": "0xf45FE7551250400AD41f666d3bb42482642bd470",
+    "transactionHash": "0x127cd33b228f3e08ea3f57843df2d0e19ef8a58548effd2e5532199d4529f654"
+  },
+  "event": {
+    "eventId": "0x8b1e063dcbd16a795ae9978f60d5f8e92dee63e5762ea2fb9c6170f4f8b9936a",
+    "transactionHash": "0xf0c8bd3dc9944885c27b888807f32e02e7386d7a2ba8273a874c83b02f2c1b20",
+    "blockNumber": "64214896"
+  }
+}
