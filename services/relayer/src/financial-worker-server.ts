@@ -48,13 +48,27 @@ async function main() {
   });
   const journal = new FinancialOperationJournal(pool);
   await journal.assertReady();
-  const account = await loadSponsorAccount(config.FINANCIAL_SIGNER_PRIVATE_KEY_PATH);
+  // Sponsored throughput is capped per key by the chain's inflight gas budget, so concurrency comes
+  // from more keys rather than a larger allowance. Each path is loaded under the same permission
+  // checks, and duplicates are rejected so a repeated path cannot look like added capacity.
+  const keyPaths = [
+    config.FINANCIAL_SIGNER_PRIVATE_KEY_PATH,
+    ...(config.FINANCIAL_SIGNER_ADDITIONAL_KEY_PATHS?.split(",") ?? []),
+  ]
+    .map((path) => path.trim())
+    .filter((path) => path.length > 0);
+  if (new Set(keyPaths).size !== keyPaths.length)
+    throw new Error("Duplicate financial signing key path configured");
+  const accounts = await Promise.all(keyPaths.map((path) => loadSponsorAccount(path)));
   const worker = new FinancialOperationWorker({
     journal,
     gateway: new ViemFinancialTransactionGateway({
       rpcUrl: config.FINANCIAL_RPC_URL,
       chain,
-      account,
+      accounts,
+      gasLimitMarginBps: config.FINANCIAL_GAS_LIMIT_MARGIN_BPS,
+      reserveBalanceWei: BigInt(config.FINANCIAL_RESERVE_BALANCE_WEI),
+      finalityTag: config.FINANCIAL_FINALITY_TAG,
     }),
     policy: new DatabaseFinancialCommandPolicy({
       pool,

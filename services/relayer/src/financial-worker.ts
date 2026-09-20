@@ -1,9 +1,10 @@
 import { type Address, getAddress, type Hex } from "viem";
-import type {
-  FinancialOperation,
-  FinancialOperationJournal,
-  FinancialOperationKind,
-  SignedTransaction,
+import {
+  type FinancialOperation,
+  type FinancialOperationJournal,
+  type FinancialOperationKind,
+  FinancialReserveBudgetExhausted,
+  type SignedTransaction,
 } from "./financial-operations.js";
 
 const address = /^0x[0-9a-fA-F]{40}$/;
@@ -25,13 +26,22 @@ export type FinancialFinalityObservation =
 
 export interface FinancialTransactionGateway {
   readonly chainId: number;
-  readonly signerAddress: Address;
-  pendingNonce(): Promise<bigint>;
+  /** Every key available for sponsorship. Throughput per key is capped by its inflight gas budget. */
+  readonly signerAddresses: readonly Address[];
+  pendingNonce(signerAddress: Address): Promise<bigint>;
+  /**
+   * Total gas spend the chain will let this key hold inflight at once, in wei, or `null` when the
+   * chain enforces no such ceiling. `null` and `0n` are deliberately distinct: zero is a funded-but-
+   * exhausted key that must not be used, whereas an unfunded key reporting zero must not be mistaken
+   * for an unrestricted one.
+   */
+  inflightGasBudget(signerAddress: Address): Promise<bigint | null>;
   simulate(operation: FinancialOperation): Promise<FinancialCommandProposal>;
   sign(input: {
     operation: FinancialOperation;
     nonce: bigint;
     proposal: FinancialCommandProposal;
+    signerAddress: Address;
   }): Promise<SignedTransaction>;
   broadcast(rawTransaction: Hex): Promise<Hex>;
 }
@@ -175,7 +185,7 @@ export type FinancialOperationJournalPort = Pick<
   | "markSubmitted"
   | "quarantine"
   | "recoverExpiredLeases"
-  | "reserveNonce"
+  | "reserveNonceFromPool"
   | "retry"
 >;
 
@@ -217,7 +227,10 @@ export class FinancialOperationWorker {
     if (
       !workerId.test(input.owner) ||
       input.gateway.chainId !== input.policy.chainId ||
-      !address.test(input.gateway.signerAddress) ||
+      input.gateway.signerAddresses.length === 0 ||
+      !input.gateway.signerAddresses.every((signer) => address.test(signer)) ||
+      new Set(input.gateway.signerAddresses.map((signer) => signer.toLowerCase())).size !==
+        input.gateway.signerAddresses.length ||
       !Number.isSafeInteger(input.batchSize ?? 25) ||
       (input.batchSize ?? 25) < 1 ||
       (input.batchSize ?? 25) > 100 ||
@@ -272,14 +285,29 @@ export class FinancialOperationWorker {
       await this.#policy.assertCommand(operation);
       const proposal = await this.#gateway.simulate(operation);
       await this.#policy.assertProposal(operation, proposal);
-      const nonce = await this.#journal.reserveNonce(
+      // The declared limit is what the chain charges and what it counts against the inflight budget,
+      // so the commitment is the limit, never the eventual usage.
+      const commitmentWei = proposal.gasLimit * proposal.maxFeePerGas;
+      const candidates = await Promise.all(
+        this.#gateway.signerAddresses.map(async (signerAddress) => ({
+          signerAddress,
+          pendingNonce: await this.#gateway.pendingNonce(signerAddress),
+          budgetWei: await this.#gateway.inflightGasBudget(signerAddress),
+        })),
+      );
+      const { signerAddress, nonce } = await this.#journal.reserveNonceFromPool(
         operation.operationId,
         operation.leaseToken,
-        this.#gateway.signerAddress,
-        await this.#gateway.pendingNonce(),
+        candidates,
+        commitmentWei,
       );
-      const transaction = await this.#gateway.sign({ operation, nonce, proposal });
-      if (getAddress(transaction.signerAddress) !== getAddress(this.#gateway.signerAddress))
+      const transaction = await this.#gateway.sign({
+        operation,
+        nonce,
+        proposal,
+        signerAddress,
+      });
+      if (getAddress(transaction.signerAddress) !== getAddress(signerAddress))
         throw new FinancialOperationIntegrityFailure(
           "unexpected_signer",
           "Gateway returned a transaction for another signer",
@@ -307,9 +335,11 @@ export class FinancialOperationWorker {
         operation.operationId,
         operation.leaseToken,
         this.#backoff(operation.attempts),
-        error instanceof TransientFinancialOperationFailure
-          ? error.failureCode
-          : "pre_sign_unavailable",
+        error instanceof FinancialReserveBudgetExhausted
+          ? "reserve_budget_exhausted"
+          : error instanceof TransientFinancialOperationFailure
+            ? error.failureCode
+            : "pre_sign_unavailable",
       );
       return ["retried"];
     }

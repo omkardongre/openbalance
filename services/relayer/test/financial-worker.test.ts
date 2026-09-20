@@ -1,5 +1,9 @@
 import { expect, it, vi } from "vitest";
-import type { FinancialOperation, SignedTransaction } from "../src/financial-operations.js";
+import {
+  type FinancialOperation,
+  FinancialReserveBudgetExhausted,
+  type SignedTransaction,
+} from "../src/financial-operations.js";
 import {
   BoundedFinancialCommandPolicy,
   type FinancialFinalityVerifier,
@@ -57,7 +61,10 @@ function journal(overrides: Partial<FinancialOperationJournalPort> = {}) {
     expireUnclaimed: vi.fn(async () => 0),
     listForReconciliation: vi.fn(async () => []),
     claim: vi.fn(async () => []),
-    reserveNonce: vi.fn(async () => transaction.nonce),
+    reserveNonceFromPool: vi.fn(async () => ({
+      signerAddress: signer,
+      nonce: transaction.nonce,
+    })),
     markSigned: vi.fn(async () => financialOperation({ state: "SIGNED", transaction })),
     markSubmitted: vi.fn(async () => financialOperation({ state: "SUBMITTED", transaction })),
     markFinalized: vi.fn(async () => financialOperation({ state: "FINALIZED", transaction })),
@@ -75,8 +82,9 @@ function gateway(
 ): FinancialTransactionGateway {
   return {
     chainId: 10_143,
-    signerAddress: signer,
+    signerAddresses: [signer],
     pendingNonce: vi.fn(async () => transaction.nonce),
+    inflightGasBudget: vi.fn(async () => 10_000_000_000_000_000_000n),
     simulate: vi.fn(async () => ({
       gasLimit: transaction.gasLimit,
       maxFeePerGas: transaction.maxFeePerGas,
@@ -126,11 +134,11 @@ it("persists an approved signed command before broadcasting it", async () => {
   const run = await worker(operationJournal, transactionGateway).runOnce();
 
   expect(run).toMatchObject({ accepted: 1, signed: 1, submitted: 1 });
-  expect(operationJournal.reserveNonce).toHaveBeenCalledWith(
+  expect(operationJournal.reserveNonceFromPool).toHaveBeenCalledWith(
     operationId,
     leaseToken,
-    signer,
-    transaction.nonce,
+    [{ signerAddress: signer, pendingNonce: transaction.nonce, budgetWei: expect.any(BigInt) }],
+    transaction.gasLimit * transaction.maxFeePerGas,
   );
   expect(order).toEqual(["signed", "broadcast"]);
   expect(operationJournal.markSubmitted).toHaveBeenCalledWith(operationId, transaction.hash);
@@ -192,4 +200,61 @@ it("defers an uncertain broadcast instead of rebuilding a signed command", async
     "broadcast_unknown",
   );
   expect(transactionGateway.sign).not.toHaveBeenCalled();
+});
+
+it("offers every pool key with its own budget and commits the declared limit, not the estimate", async () => {
+  const second = `0x${"77".repeat(20)}` as const;
+  const operationJournal = journal({ claim: vi.fn(async () => [financialOperation()]) });
+  const transactionGateway = gateway({
+    signerAddresses: [signer, second],
+    pendingNonce: vi.fn(async (address: string) => (address === signer ? 7n : 3n)),
+    inflightGasBudget: vi.fn(async (address: string) => (address === signer ? 1n : 999n)),
+  });
+  await worker(operationJournal, transactionGateway).runOnce();
+
+  expect(operationJournal.reserveNonceFromPool).toHaveBeenCalledWith(
+    operationId,
+    leaseToken,
+    [
+      { signerAddress: signer, pendingNonce: 7n, budgetWei: 1n },
+      { signerAddress: second, pendingNonce: 3n, budgetWei: 999n },
+    ],
+    transaction.gasLimit * transaction.maxFeePerGas,
+  );
+});
+
+it("retries rather than failing when every key has committed its inflight budget", async () => {
+  const operationJournal = journal({
+    claim: vi.fn(async () => [financialOperation()]),
+    reserveNonceFromPool: vi.fn(async () => {
+      throw new FinancialReserveBudgetExhausted("exhausted");
+    }),
+  });
+  const transactionGateway = gateway();
+  const run = await worker(operationJournal, transactionGateway).runOnce();
+
+  // Budget frees as inflight transactions settle, so this must not consume the operation.
+  expect(run).toMatchObject({ retried: 1, signed: 0, reverted: 0, quarantined: 0 });
+  expect(operationJournal.retry).toHaveBeenCalledWith(
+    operationId,
+    leaseToken,
+    expect.any(Number),
+    "reserve_budget_exhausted",
+  );
+  expect(transactionGateway.sign).not.toHaveBeenCalled();
+});
+
+it("reports an unfunded key as zero budget, distinct from a chain that enforces no ceiling", async () => {
+  const operationJournal = journal({ claim: vi.fn(async () => [financialOperation()]) });
+  // A key with no balance has no capacity. Reporting that as "no ceiling" would sign transactions
+  // the key can never pay for, so zero and null must not collapse into the same value.
+  const transactionGateway = gateway({ inflightGasBudget: vi.fn(async () => 0n) });
+  await worker(operationJournal, transactionGateway).runOnce();
+
+  expect(operationJournal.reserveNonceFromPool).toHaveBeenCalledWith(
+    operationId,
+    leaseToken,
+    [{ signerAddress: signer, pendingNonce: transaction.nonce, budgetWei: 0n }],
+    transaction.gasLimit * transaction.maxFeePerGas,
+  );
 });

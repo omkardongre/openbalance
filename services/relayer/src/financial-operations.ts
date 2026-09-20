@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { Pool } from "pg";
-import { type Address, type Hex, keccak256 } from "viem";
+import { type Address, getAddress, type Hex, keccak256 } from "viem";
 
 export const financialOperationKinds = [
   "PAYMENT",
@@ -96,6 +96,12 @@ type OperationRow = {
 export class FinancialOperationConflict extends Error {}
 export class FinancialOperationRejected extends Error {}
 export class FinancialOperationTransitionRejected extends Error {}
+/**
+ * Every signing key in the pool has already committed its inflight gas budget. Transient by
+ * construction: budget frees as inflight transactions reach a terminal state, so the caller must
+ * retry rather than fail the operation or widen the budget.
+ */
+export class FinancialReserveBudgetExhausted extends Error {}
 
 const address = /^0x[0-9a-fA-F]{40}$/;
 const bytes32 = /^0x[0-9a-fA-F]{64}$/;
@@ -398,20 +404,54 @@ export class FinancialOperationJournal {
     );
   }
 
-  async reserveNonce(
+  /**
+   * Chooses a signing key with enough remaining inflight gas budget and reserves its next nonce, in
+   * one transaction.
+   *
+   * Selection and reservation cannot be separate steps. The chain bounds the summed gas spend of one
+   * account's inflight transactions, and exceeding that bound makes consensus *exclude* the
+   * transaction instead of including and reverting it — an outcome indistinguishable from a dropped
+   * network call at the point of broadcast. Two workers that each read a key's remaining budget and
+   * then independently decided to use it could therefore both overcommit it and lose transactions
+   * silently. Holding the key's cursor row while measuring its committed budget makes the decision
+   * and the reservation atomic per key.
+   *
+   * Committed budget is summed live from the operations still inflight rather than kept in a counter,
+   * so it releases when a transaction reaches a terminal state with no separate bookkeeping to drift.
+   *
+   * Candidates are locked in address order so concurrent workers acquire the same locks in the same
+   * sequence and cannot deadlock against each other.
+   */
+  async reserveNonceFromPool(
     operationId: string,
     leaseToken: string,
-    signerAddress: Address,
-    pendingNonce: bigint,
-  ): Promise<bigint> {
+    candidates: readonly {
+      signerAddress: Address;
+      pendingNonce: bigint;
+      budgetWei: bigint | null;
+    }[],
+    commitmentWei: bigint,
+  ): Promise<{ signerAddress: Address; nonce: bigint }> {
     if (
       !uuid.test(operationId) ||
       !uuid.test(leaseToken) ||
-      !address.test(signerAddress) ||
-      pendingNonce < 0n
+      candidates.length === 0 ||
+      commitmentWei <= 0n ||
+      candidates.some(
+        (candidate) =>
+          !address.test(candidate.signerAddress) ||
+          candidate.pendingNonce < 0n ||
+          (candidate.budgetWei !== null && candidate.budgetWei < 0n),
+      )
     )
       throw new FinancialOperationRejected("Invalid nonce reservation");
-    const signer = signerAddress.toLowerCase();
+    const ordered = [...candidates]
+      .map((candidate) => ({ ...candidate, signer: candidate.signerAddress.toLowerCase() }))
+      .sort((left, right) =>
+        left.signer < right.signer ? -1 : left.signer > right.signer ? 1 : 0,
+      );
+    if (new Set(ordered.map((candidate) => candidate.signer)).size !== ordered.length)
+      throw new FinancialOperationRejected("Duplicate signing key in pool");
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
@@ -426,6 +466,9 @@ export class FinancialOperationJournal {
         throw new FinancialOperationTransitionRejected(
           "Nonce reservation lease is stale or invalid",
         );
+      // A retry after an uncertain crash must return the original reservation. The signed bytes may
+      // already be committed to that key and nonce, so the recorded choice outranks a fresh one even
+      // if the key has since left the pool.
       const existing = await client.query<{
         signer_address: string;
         transaction_nonce: string;
@@ -434,36 +477,55 @@ export class FinancialOperationJournal {
         [operationId],
       );
       if (existing.rows[0]) {
-        if (existing.rows[0].signer_address !== signer)
-          throw new FinancialOperationConflict("Operation nonce is reserved to another signer");
         await client.query("COMMIT");
-        return BigInt(existing.rows[0].transaction_nonce);
+        return {
+          signerAddress: getAddress(existing.rows[0].signer_address as Address),
+          nonce: BigInt(existing.rows[0].transaction_nonce),
+        };
       }
-      await client.query(
-        `INSERT INTO relayer_nonce_cursors (signer_address,next_nonce)
-         VALUES ($1,$2) ON CONFLICT (signer_address) DO NOTHING`,
-        [signer, pendingNonce.toString()],
+      for (const candidate of ordered) {
+        await client.query(
+          `INSERT INTO relayer_nonce_cursors (signer_address,next_nonce)
+           VALUES ($1,$2) ON CONFLICT (signer_address) DO NOTHING`,
+          [candidate.signer, candidate.pendingNonce.toString()],
+        );
+        const cursor = await client.query<{ next_nonce: string }>(
+          "SELECT next_nonce FROM relayer_nonce_cursors WHERE signer_address=$1 FOR UPDATE",
+          [candidate.signer],
+        );
+        if (!cursor.rows[0])
+          throw new FinancialOperationRejected("Relayer nonce cursor is unavailable");
+        if (candidate.budgetWei !== null) {
+          const committed = await client.query<{ committed: string | null }>(
+            `SELECT SUM(gas_limit * max_fee_per_gas)::text AS committed FROM financial_operations
+             WHERE signer_address=$1 AND state IN ('SIGNED','SUBMITTED')`,
+            [candidate.signer],
+          );
+          const inflight = BigInt(committed.rows[0]?.committed ?? "0");
+          if (inflight + commitmentWei > candidate.budgetWei) continue;
+        }
+        const storedNonce = BigInt(cursor.rows[0].next_nonce);
+        const reservedNonce =
+          storedNonce > candidate.pendingNonce ? storedNonce : candidate.pendingNonce;
+        await client.query(
+          `INSERT INTO relayer_nonce_reservations (operation_id,signer_address,transaction_nonce)
+           VALUES ($1,$2,$3)`,
+          [operationId, candidate.signer, reservedNonce.toString()],
+        );
+        await client.query(
+          `UPDATE relayer_nonce_cursors
+           SET next_nonce=$2,updated_at=clock_timestamp() WHERE signer_address=$1`,
+          [candidate.signer, (reservedNonce + 1n).toString()],
+        );
+        await client.query("COMMIT");
+        return {
+          signerAddress: getAddress(candidate.signerAddress),
+          nonce: reservedNonce,
+        };
+      }
+      throw new FinancialReserveBudgetExhausted(
+        "Every signing key has committed its inflight gas budget",
       );
-      const cursor = await client.query<{ next_nonce: string }>(
-        "SELECT next_nonce FROM relayer_nonce_cursors WHERE signer_address=$1 FOR UPDATE",
-        [signer],
-      );
-      if (!cursor.rows[0])
-        throw new FinancialOperationRejected("Relayer nonce cursor is unavailable");
-      const storedNonce = BigInt(cursor.rows[0].next_nonce);
-      const reservedNonce = storedNonce > pendingNonce ? storedNonce : pendingNonce;
-      await client.query(
-        `INSERT INTO relayer_nonce_reservations (operation_id,signer_address,transaction_nonce)
-         VALUES ($1,$2,$3)`,
-        [operationId, signer, reservedNonce.toString()],
-      );
-      await client.query(
-        `UPDATE relayer_nonce_cursors
-         SET next_nonce=$2,updated_at=clock_timestamp() WHERE signer_address=$1`,
-        [signer, (reservedNonce + 1n).toString()],
-      );
-      await client.query("COMMIT");
-      return reservedNonce;
     } catch (error) {
       await client.query("ROLLBACK");
       throw error;

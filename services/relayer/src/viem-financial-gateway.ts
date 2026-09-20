@@ -17,41 +17,96 @@ import {
 
 export class ViemFinancialTransactionGateway implements FinancialTransactionGateway {
   readonly chainId: number;
-  readonly signerAddress: Address;
-  readonly #account: PrivateKeyAccount;
+  readonly signerAddresses: readonly Address[];
+  readonly #accounts: ReadonlyMap<string, PrivateKeyAccount>;
   readonly #publicClient;
+  readonly #gasLimitMarginBps: bigint;
+  readonly #reserveBalanceWei: bigint;
+  readonly #finalityTag: "finalized" | "safe" | "latest";
 
-  constructor(input: { rpcUrl: string; chain: Chain; account: PrivateKeyAccount }) {
+  constructor(input: {
+    rpcUrl: string;
+    chain: Chain;
+    accounts: readonly PrivateKeyAccount[];
+    gasLimitMarginBps: number;
+    reserveBalanceWei: bigint;
+    finalityTag: "finalized" | "safe" | "latest";
+  }) {
     if (!URL.canParse(input.rpcUrl)) throw new Error("Invalid financial transaction RPC URL");
+    if (input.accounts.length === 0) throw new Error("No financial signing keys configured");
+    if (
+      !Number.isSafeInteger(input.gasLimitMarginBps) ||
+      input.gasLimitMarginBps < 0 ||
+      input.gasLimitMarginBps > 5_000
+    )
+      throw new Error("Invalid financial gas limit margin");
+    if (input.reserveBalanceWei < 0n) throw new Error("Invalid financial reserve balance");
+    const accounts = new Map(
+      input.accounts.map((account) => [getAddress(account.address).toLowerCase(), account]),
+    );
+    if (accounts.size !== input.accounts.length)
+      throw new Error("Duplicate financial signing key configured");
     this.chainId = input.chain.id;
-    this.signerAddress = getAddress(input.account.address);
-    this.#account = input.account;
+    this.signerAddresses = input.accounts.map((account) => getAddress(account.address));
+    this.#accounts = accounts;
+    this.#gasLimitMarginBps = BigInt(input.gasLimitMarginBps);
+    this.#reserveBalanceWei = input.reserveBalanceWei;
+    this.#finalityTag = input.finalityTag;
     this.#publicClient = createPublicClient({
       chain: input.chain,
       transport: http(input.rpcUrl, { retryCount: 2, timeout: 10_000 }),
     });
   }
 
-  async pendingNonce(): Promise<bigint> {
+  #account(signerAddress: Address): PrivateKeyAccount {
+    const account = this.#accounts.get(getAddress(signerAddress).toLowerCase());
+    if (!account) throw new TransientFinancialOperationFailure("unknown_signing_key");
+    return account;
+  }
+
+  async pendingNonce(signerAddress: Address): Promise<bigint> {
     return BigInt(
       await this.#publicClient.getTransactionCount({
-        address: this.signerAddress,
+        address: getAddress(signerAddress),
         blockTag: "pending",
       }),
     );
   }
 
+  /**
+   * The chain caps the summed gas spend of one account's inflight transactions at the lower of a
+   * fixed per-account reserve and the account's own balance, judged against a lagged execution
+   * state. The balance is therefore read at the configured finality tag rather than at `latest`, so
+   * the figure cannot be more current than the state consensus actually decides against.
+   */
+  async inflightGasBudget(signerAddress: Address): Promise<bigint | null> {
+    if (this.#reserveBalanceWei === 0n) return null;
+    try {
+      const balance = await this.#publicClient.getBalance({
+        address: getAddress(signerAddress),
+        blockTag: this.#finalityTag,
+      });
+      return balance < this.#reserveBalanceWei ? balance : this.#reserveBalanceWei;
+    } catch {
+      throw new TransientFinancialOperationFailure("signer_balance_unavailable");
+    }
+  }
+
   async simulate(operation: FinancialOperation): Promise<FinancialCommandProposal> {
+    // Simulated from the first key purely to obtain a gas estimate; the estimate does not depend on
+    // which pool key eventually signs, and the key is only chosen later under the budget lock.
+    const estimator = this.signerAddresses[0];
+    if (!estimator) throw new TransientFinancialOperationFailure("unknown_signing_key");
     try {
       await this.#publicClient.call({
-        account: this.signerAddress,
+        account: estimator,
         to: operation.targetAddress,
         data: operation.calldata,
         value: 0n,
       });
       const [estimatedGas, fees] = await Promise.all([
         this.#publicClient.estimateGas({
-          account: this.signerAddress,
+          account: estimator,
           to: operation.targetAddress,
           data: operation.calldata,
           value: 0n,
@@ -63,8 +118,13 @@ export class ViemFinancialTransactionGateway implements FinancialTransactionGate
           "eip1559_fees_unavailable",
           "Network did not return EIP-1559 fee data",
         );
+      // Gas is charged on the declared limit with no refund, so this margin is spent whether or not
+      // it is used, and it also occupies inflight budget that would otherwise admit another
+      // transaction. It stays small for that reason and is calibrated, not a fixed safety buffer.
+      const denominator = 10_000n;
       return {
-        gasLimit: (estimatedGas * 120n + 99n) / 100n,
+        gasLimit:
+          (estimatedGas * (denominator + this.#gasLimitMarginBps) + denominator - 1n) / denominator,
         maxFeePerGas: fees.maxFeePerGas,
         maxPriorityFeePerGas: fees.maxPriorityFeePerGas,
       };
@@ -78,10 +138,12 @@ export class ViemFinancialTransactionGateway implements FinancialTransactionGate
     operation: FinancialOperation;
     nonce: bigint;
     proposal: FinancialCommandProposal;
+    signerAddress: Address;
   }): Promise<SignedTransaction> {
     if (input.nonce > BigInt(Number.MAX_SAFE_INTEGER))
       throw new TransientFinancialOperationFailure("nonce_out_of_range");
-    const rawTransaction = await this.#account.signTransaction({
+    const account = this.#account(input.signerAddress);
+    const rawTransaction = await account.signTransaction({
       chainId: this.chainId,
       type: "eip1559",
       to: input.operation.targetAddress,
@@ -93,7 +155,7 @@ export class ViemFinancialTransactionGateway implements FinancialTransactionGate
       maxPriorityFeePerGas: input.proposal.maxPriorityFeePerGas,
     });
     return {
-      signerAddress: this.signerAddress,
+      signerAddress: getAddress(account.address),
       nonce: input.nonce,
       hash: keccak256(rawTransaction),
       rawTransaction,
