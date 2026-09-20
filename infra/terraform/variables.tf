@@ -10,10 +10,6 @@ variable "environment" {
     error_message = "Environment must be testnet or production."
   }
 }
-variable "database_tier" {
-  type    = string
-  default = "db-custom-2-7680"
-}
 variable "api_image" { type = string }
 variable "relayer_image" { type = string }
 variable "web_image" { type = string }

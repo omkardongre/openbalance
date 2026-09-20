@@ -6,15 +6,56 @@ locals {
     web         = { image = var.web_image, port = 3000, account = "web" }
     venue-relay = { image = var.venue_relay_image, port = 3003, account = "venue-relay" }
   }
-  service_accounts = toset([
-    "api", "relayer", "web", "indexer", "integrations", "financial-worker", "evidence",
-    "venue-relay", "venue-relay-settlement",
-  ])
+  # Service account IDs are capped at 30 characters, which is shorter than several process names once
+  # prefixed with the environment. Truncating is not a safe way to fit: `financial-worker` truncates
+  # to a trailing hyphen, which is rejected outright, and `venue-relay-settlement` truncates to the
+  # same ID as `venue-relay`, which would silently hand two processes one identity and defeat the
+  # per-secret split below. Each ID is therefore declared explicitly.
+  service_accounts = {
+    api                    = "api"
+    relayer                = "relayer"
+    web                    = "web"
+    indexer                = "indexer"
+    integrations           = "integrations"
+    financial-worker       = "fin-worker"
+    evidence               = "evidence"
+    venue-relay            = "relay"
+    venue-relay-settlement = "relay-settle"
+  }
   workers = toset(["indexer", "integrations", "financial-worker", "venue-relay-settlement"])
+
+  # Secret material (manifests, signing keys) is consumed as mounted files rather than environment
+  # values, because the services already take file paths and because an environment value is visible
+  # to anything that can read the process table or a crash dump. `database-url` is the exception: it
+  # is a connection string the runtime reads from the environment, so it is bound to an explicit
+  # version rather than a floating one, since environment values resolve once at instance start.
+  secrets = toset([
+    "database-url", "account-manifest", "event-manifest", "checkout-capability",
+    "integration-mapping", "relayer-signer", "venue-relay-key",
+    "venue-relay-settlement-signer", "terminal-snapshot",
+  ])
+
+  # Which identity may read which secret. Declared per process rather than per service, so a worker
+  # that shares a package with a request service does not inherit that service's credentials.
+  secret_requirements = {
+    api                    = ["database-url", "account-manifest", "checkout-capability"]
+    relayer                = ["database-url", "event-manifest", "relayer-signer"]
+    web                    = []
+    venue-relay            = ["venue-relay-key", "terminal-snapshot"]
+    indexer                = ["database-url", "event-manifest"]
+    integrations           = ["database-url", "integration-mapping"]
+    financial-worker       = ["database-url", "event-manifest", "relayer-signer"]
+    venue-relay-settlement = ["event-manifest", "venue-relay-settlement-signer"]
+  }
+
+  secret_grants = merge([
+    for identity, required in local.secret_requirements : {
+      for secret in required : "${identity}:${secret}" => { identity = identity, secret = secret }
+    }
+  ]...)
   apis = toset([
     "artifactregistry.googleapis.com", "compute.googleapis.com", "iam.googleapis.com",
-    "run.googleapis.com", "secretmanager.googleapis.com", "servicenetworking.googleapis.com",
-    "sqladmin.googleapis.com", "storage.googleapis.com"
+    "run.googleapis.com", "secretmanager.googleapis.com", "storage.googleapis.com"
   ])
 }
 
@@ -26,9 +67,18 @@ resource "google_project_service" "required" {
 
 resource "google_service_account" "runtime" {
   for_each     = local.service_accounts
-  account_id   = substr("${local.prefix}-${each.value}", 0, 30)
-  display_name = "${local.prefix} ${each.value}"
+  account_id   = "ob-${var.environment}-${each.value}"
+  display_name = "${local.prefix} ${each.key}"
   depends_on   = [google_project_service.required]
+
+  # Fail at plan time rather than partway through an apply if a future environment name pushes an ID
+  # past the limit, since a rejected identity leaves whatever depends on it half-created.
+  lifecycle {
+    precondition {
+      condition     = length("ob-${var.environment}-${each.value}") <= 30
+      error_message = "Service account ID 'ob-${var.environment}-${each.value}' exceeds 30 characters."
+    }
+  }
 }
 
 resource "google_compute_network" "application" {
@@ -42,56 +92,34 @@ resource "google_compute_subnetwork" "application" {
   ip_cidr_range = "10.42.0.0/20"
 }
 
-resource "google_compute_global_address" "private_services" {
-  name          = "${local.prefix}-private-services"
-  purpose       = "VPC_PEERING"
-  address_type  = "INTERNAL"
-  prefix_length = 16
-  network       = google_compute_network.application.id
-}
-
-resource "google_service_networking_connection" "private_services" {
-  network                 = google_compute_network.application.id
-  service                 = "servicenetworking.googleapis.com"
-  reserved_peering_ranges = [google_compute_global_address.private_services.name]
-  depends_on              = [google_project_service.required]
-}
-
-resource "google_sql_database_instance" "postgres" {
-  name                = "${local.prefix}-postgres"
-  database_version    = "POSTGRES_16"
-  deletion_protection = true
-  settings {
-    tier              = var.database_tier
-    availability_type = var.environment == "production" ? "REGIONAL" : "ZONAL"
-    backup_configuration {
-      enabled                        = true
-      point_in_time_recovery_enabled = true
-      transaction_log_retention_days = 7
-    }
-    ip_configuration {
-      ipv4_enabled                                  = false
-      private_network                               = google_compute_network.application.id
-      enable_private_path_for_google_cloud_services = true
-    }
-    database_flags {
-      name  = "cloudsql.iam_authentication"
-      value = "on"
-    }
-  }
-  depends_on = [google_service_networking_connection.private_services]
-}
-
-resource "google_sql_database" "application" {
-  name     = "openbalance"
-  instance = google_sql_database_instance.postgres.name
-}
-
 resource "google_artifact_registry_repository" "images" {
   location      = var.region
   repository_id = local.prefix
   format        = "DOCKER"
-  depends_on    = [google_project_service.required]
+  description   = "Release images. Services are deployed by digest; tags are convenience only."
+
+  # A deployed digest must keep resolving to the bytes that were reviewed, so a tag that has been
+  # released can never be moved onto different content.
+  docker_config { immutable_tags = true }
+
+  # Untagged versions accumulate on every rebuild of the same tag and are unreachable, but retention
+  # is ordered keep-before-delete so a recent release is never collected while a rollback may still
+  # need it.
+  cleanup_policies {
+    id     = "keep-recent-releases"
+    action = "KEEP"
+    most_recent_versions { keep_count = 10 }
+  }
+  cleanup_policies {
+    id     = "delete-stale-untagged"
+    action = "DELETE"
+    condition {
+      tag_state  = "UNTAGGED"
+      older_than = "604800s"
+    }
+  }
+
+  depends_on = [google_project_service.required]
 }
 
 resource "google_storage_bucket" "evidence" {
@@ -107,15 +135,22 @@ resource "google_storage_bucket" "evidence" {
 }
 
 resource "google_secret_manager_secret" "runtime" {
-  for_each = toset([
-    "account-manifest", "event-manifest", "checkout-capability", "integration-mapping",
-    "relayer-signer", "venue-relay-key", "venue-relay-settlement-signer", "terminal-snapshot",
-  ])
+  for_each  = local.secrets
   secret_id = "${local.prefix}-${each.value}"
   replication {
     auto {}
   }
   depends_on = [google_project_service.required]
+}
+
+# Least privilege is per secret, not per project: an identity that can read every runtime secret
+# makes one compromised service equivalent to compromising the signing keys of all of them. Each
+# grant below is one (identity, secret) pair drawn from the declared requirements.
+resource "google_secret_manager_secret_iam_member" "runtime" {
+  for_each  = local.secret_grants
+  secret_id = google_secret_manager_secret.runtime[each.value.secret].secret_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.runtime[each.value.identity].email}"
 }
 
 resource "google_cloud_run_v2_service" "request" {
