@@ -1,3 +1,4 @@
+import { configurationView } from "@openbalance/observability";
 import { getAddress } from "viem";
 import { z } from "zod";
 
@@ -13,8 +14,17 @@ const schema = z
   })
   .strict();
 
+const CONFIGURATION_PREFIXES = ["VENUE_RELAY_", "TERMINAL_"];
+
 export function loadVenueRelayEnvironment(environment: NodeJS.ProcessEnv) {
-  return schema.parse(environment);
+  return schema.parse(
+    configurationView(
+      environment,
+      Object.keys(schema.shape),
+      CONFIGURATION_PREFIXES,
+      "venue relay",
+    ),
+  );
 }
 
 const settlementSchema = z

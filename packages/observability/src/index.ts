@@ -110,3 +110,5 @@ export function writeLog(
     `${JSON.stringify({ timestamp: new Date().toISOString(), level, service, message, ...safe })}\n`,
   );
 }
+
+export { configurationView } from "./configuration-view.js";
