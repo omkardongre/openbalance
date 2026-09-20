@@ -10,8 +10,9 @@
   "scripts": {
     "android:build": "./apps/terminal-android/gradlew -p apps/terminal-android :app:testDebugUnitTest :app:assembleDebug",
     "api:generate": "node scripts/generate-api-types.mjs",
-    "coverage:contracts": "forge coverage --root contracts --ir-minimum --report summary",
+    "coverage:contracts": "node scripts/foundry.mjs forge coverage --root contracts --ir-minimum --report summary",
     "evidence:local": "node scripts/local-evidence.mjs",
+    "images:publish": "node scripts/publish-images.mjs",
     "evidence:package": "node scripts/package-evidence.mjs",
     "sbom": "node scripts/generate-sbom.mjs evidence/sbom.cdx.json",
     "verify:faucet": "node scripts/verify-faucet-scenario.mjs",
@@ -29,11 +30,11 @@
     "test:tooling": "node --test scripts/*.test.mjs",
     "workload": "node scripts/run-payment-workload.mjs",
     "workload:slo": "node scripts/slo-workload.mjs",
-    "build": "turbo run build && forge build --root contracts",
-    "check": "biome check . && turbo run check && forge fmt --root contracts --check",
+    "build": "turbo run build && node scripts/foundry.mjs forge build --root contracts",
+    "check": "biome check . && turbo run check && node scripts/foundry.mjs forge fmt --root contracts --check",
     "dev": "turbo run dev",
     "prepare": "husky || true",
-    "test": "node --test scripts/*.test.mjs && turbo run test && forge test --root contracts",
+    "test": "node --test scripts/*.test.mjs && turbo run test && node scripts/foundry.mjs forge test --root contracts",
     "verify:release": "pnpm check && pnpm test && pnpm build && pnpm coverage:contracts && pnpm run sbom"
   },
   "lint-staged": {

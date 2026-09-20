@@ -12,6 +12,8 @@
       "!!**/dist",
       "!!contracts/out",
       "!!contracts/cache",
+      "!!out",
+      "!!cache",
       "!!**/node_modules"
     ]
   },
