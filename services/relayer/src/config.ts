@@ -10,6 +10,7 @@ const workerSchema = z
     FINANCIAL_CHAIN_NAME: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}$/),
     FINANCIAL_SIGNER_PRIVATE_KEY_PATH: z.string().min(1),
     FINANCIAL_WORKER_ID: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:@/-]{2,127}$/),
+    FINANCIAL_FINALITY_TAG: z.enum(["finalized", "safe", "latest"]).default("finalized"),
     FINANCIAL_MAX_GAS: positiveInteger,
     FINANCIAL_MAX_FEE_PER_GAS_WEI: positiveInteger,
     FINANCIAL_MAX_COST_WEI: positiveInteger,

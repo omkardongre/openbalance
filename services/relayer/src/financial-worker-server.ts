@@ -29,7 +29,10 @@ async function main() {
     unit: "{operation}",
   });
   const manifest = await loadFinancialEventManifest(config.FINANCIAL_EVENT_MANIFEST_PATH);
-  await new ViemFinancialManifestVerifier(config.FINANCIAL_RPC_URL).assert(manifest);
+  await new ViemFinancialManifestVerifier(
+    config.FINANCIAL_RPC_URL,
+    config.FINANCIAL_FINALITY_TAG,
+  ).assert(manifest);
   const chain = defineChain({
     id: manifest.chainId,
     name: config.FINANCIAL_CHAIN_NAME,

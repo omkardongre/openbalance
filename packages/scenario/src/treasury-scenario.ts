@@ -82,6 +82,31 @@ async function post(url: string, path: string, body: unknown, headers: Record<st
 }
 
 /**
+ * Retries an idempotent post while the relayer still reports the finalized projection as missing.
+ * The indexer projects channel state asynchronously, so a command issued immediately after mining
+ * can legitimately observe a not-yet-projected channel. This waits for projection convergence
+ * rather than treating the race as a failure; any other rejection is raised immediately.
+ */
+async function postAwaitingProjection(
+  url: string,
+  path: string,
+  body: unknown,
+  headers: Record<string, string>,
+  timeoutMs = 60_000,
+) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      return await post(url, path, body, headers);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!message.includes("channel_not_found") || Date.now() >= deadline) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+    }
+  }
+}
+
+/**
  * Drives the vendor and attendee money operations through the running relayer: opens a reserve
  * channel from the enrolled account, settles a voucher to create vendor credit, then exercises
  * permissionless reclaim, a fixed-destination withdrawal and a vendor-signed refund.
@@ -317,7 +342,7 @@ export async function runTreasuryScenario(
     return body.sessionToken;
   });
 
-  const reclaim = await post(
+  const reclaim = await postAwaitingProjection(
     options.relayerUrl,
     `/v1/reserve-channels/${channelId}/reclaims`,
     { eventId },
@@ -347,7 +372,9 @@ export async function runTreasuryScenario(
     refundUnits: grossUnits,
     cumulativeRefundUnits: grossUnits,
     vendorCreditUnits: grossUnits,
-    fundingSource: deployer.address,
+    // The relayer binds the funding source to the vendor treasury authority, so a refund can only
+    // be funded by the credential holder that signed it.
+    fundingSource: vendorAuthority.address,
     validAfter: Number((await publicClient.getBlock()).timestamp),
     expiresAt: Number((await publicClient.getBlock()).timestamp) + 3_600,
   };

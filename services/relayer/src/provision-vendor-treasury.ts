@@ -31,7 +31,7 @@ try {
       createHash("sha256").update(token).digest("hex"),
       environment.VENDOR_TREASURY_EVENT_ID.toLowerCase(),
       environment.VENDOR_TREASURY_VENDOR_ID.toLowerCase(),
-      getAddress(environment.VENDOR_TREASURY_AUTHORITY),
+      getAddress(environment.VENDOR_TREASURY_AUTHORITY).toLowerCase(),
       environment.VENDOR_TREASURY_VALID_HOURS,
     ],
   );

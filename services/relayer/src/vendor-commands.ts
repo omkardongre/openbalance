@@ -55,11 +55,20 @@ export class VendorFinancialCommandService {
   readonly #maximumLifetimeSeconds: bigint;
   readonly #now: () => Date;
 
+  readonly #chainSeconds: (() => Promise<bigint>) | undefined;
+
   constructor(input: {
     journal: JournalPort;
     manifest: FinancialEventManifest;
     maximumLifetimeSeconds?: bigint;
     now?: () => Date;
+    /**
+     * Reads the settlement chain's current block timestamp. An intent's `validAfter`/`expiresAt` are
+     * evaluated by the contract against `block.timestamp`, so the sponsorship window must be
+     * measured in the same time domain rather than against this service's wall clock. Falls back to
+     * the local clock only when no chain reader is configured.
+     */
+    chainSeconds?: () => Promise<bigint>;
   }) {
     if (
       (input.maximumLifetimeSeconds ?? 3_600n) < 30n ||
@@ -70,6 +79,7 @@ export class VendorFinancialCommandService {
     this.#manifest = input.manifest;
     this.#maximumLifetimeSeconds = input.maximumLifetimeSeconds ?? 3_600n;
     this.#now = input.now ?? (() => new Date());
+    this.#chainSeconds = input.chainSeconds;
   }
 
   async acceptRefund(input: {
@@ -115,7 +125,7 @@ export class VendorFinancialCommandService {
     }
     if (getAddress(recovered) !== getAddress(input.identity.authorityAddress))
       throw new VendorCommandRejected("Refund signature is outside the vendor treasury scope");
-    const expiresAt = this.#expiry(BigInt(intent.expiresAt));
+    const expiresAt = await this.#expiry(BigInt(intent.expiresAt));
     const accepted = await this.#journal.accept({
       actorId: actorFor(input.identity),
       kind: "REFUND",
@@ -175,9 +185,10 @@ export class VendorFinancialCommandService {
     return event;
   }
 
-  #expiry(seconds: bigint): Date {
-    const now = this.#now();
-    const nowSeconds = BigInt(Math.floor(now.getTime() / 1_000));
+  async #expiry(seconds: bigint): Promise<Date> {
+    const nowSeconds = this.#chainSeconds
+      ? await this.#chainSeconds()
+      : BigInt(Math.floor(this.#now().getTime() / 1_000));
     if (seconds <= nowSeconds || seconds - nowSeconds > this.#maximumLifetimeSeconds)
       throw new VendorCommandRejected("Refund expiry is outside the sponsorship window");
     return new Date(Number(seconds) * 1_000);

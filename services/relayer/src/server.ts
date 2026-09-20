@@ -5,6 +5,7 @@ import { DeploymentService } from "@openbalance/api/deployments";
 import { DeploymentSponsorshipService, loadSponsorAccount } from "@openbalance/api/sponsorship";
 import { startTelemetry } from "@openbalance/observability";
 import { Pool } from "pg";
+import { createPublicClient, http } from "viem";
 import { buildRelayerApp } from "./app.js";
 import { AttendeeFinancialCommandService } from "./attendee-commands.js";
 import { AttendeeReclaimService } from "./attendee-reclaims.js";
@@ -58,9 +59,23 @@ let financial:
       treasuryCommands: VendorFinancialCommandService;
     }
   | undefined;
+/**
+ * Chain-domain clock for gates the contracts evaluate against `block.timestamp`. Reserve reclaim
+ * eligibility and intent sponsorship windows are contract rules, so they must not be decided by this
+ * process's wall clock, which can drift from the chain.
+ */
+const settlementChainClient = createPublicClient({
+  transport: http(environment.ACCOUNT_RPC_URL, { retryCount: 2, timeout: 10_000 }),
+});
+const settlementChainSeconds = async () =>
+  (await settlementChainClient.getBlock({ blockTag: environment.ACCOUNT_FINALITY_TAG })).timestamp;
+
 if (environment.FINANCIAL_EVENT_MANIFEST_PATH) {
   const manifest = await loadFinancialEventManifest(environment.FINANCIAL_EVENT_MANIFEST_PATH);
-  await new ViemFinancialManifestVerifier(environment.ACCOUNT_RPC_URL).assert(manifest);
+  await new ViemFinancialManifestVerifier(
+    environment.ACCOUNT_RPC_URL,
+    environment.ACCOUNT_FINALITY_TAG,
+  ).assert(manifest);
   const journal = new FinancialOperationJournal(pool);
   await journal.assertReady();
   const treasuryAccess = new VendorTreasuryAccessService(pool);
@@ -73,12 +88,18 @@ if (environment.FINANCIAL_EVENT_MANIFEST_PATH) {
       events: manifest.events,
       maximumLifetimeSeconds: BigInt(environment.FINANCIAL_COMMAND_MAX_LIFETIME_SECONDS),
     }),
-    reclaims: new AttendeeReclaimService({ pool, journal, manifest }),
+    reclaims: new AttendeeReclaimService({
+      pool,
+      journal,
+      manifest,
+      chainSeconds: settlementChainSeconds,
+    }),
     treasuryAccess,
     treasuryCommands: new VendorFinancialCommandService({
       journal,
       manifest,
       maximumLifetimeSeconds: BigInt(environment.FINANCIAL_COMMAND_MAX_LIFETIME_SECONDS),
+      chainSeconds: settlementChainSeconds,
     }),
   };
 }

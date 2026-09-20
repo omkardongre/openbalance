@@ -24,17 +24,26 @@ export class AttendeeReclaimService {
   readonly #journal: JournalPort;
   readonly #events: FinancialEventManifest["events"];
   readonly #now: () => Date;
+  readonly #chainSeconds: (() => Promise<bigint>) | undefined;
 
   constructor(input: {
     pool: Pool;
     journal: JournalPort;
     manifest: FinancialEventManifest;
     now?: () => Date;
+    /**
+     * Reads the settlement chain's current block timestamp. Reclaim eligibility is a contract rule
+     * evaluated against `block.timestamp`, so the gate must not be decided by this service's wall
+     * clock, which can drift from or lag the chain. Falls back to the local clock only when no
+     * chain reader is configured.
+     */
+    chainSeconds?: () => Promise<bigint>;
   }) {
     this.#pool = input.pool;
     this.#journal = input.journal;
     this.#events = input.manifest.events;
     this.#now = input.now ?? (() => new Date());
+    this.#chainSeconds = input.chainSeconds;
   }
 
   async accept(input: {
@@ -63,7 +72,10 @@ export class AttendeeReclaimService {
     if (!row) throw new AttendeeReclaimRejected("channel_not_found");
     if (row.reclaimed) throw new AttendeeReclaimRejected("channel_already_reclaimed");
     const now = this.#now();
-    if (BigInt(row.submit_until) > BigInt(Math.floor(now.getTime() / 1_000)))
+    const nowSeconds = this.#chainSeconds
+      ? await this.#chainSeconds()
+      : BigInt(Math.floor(now.getTime() / 1_000));
+    if (BigInt(row.submit_until) > nowSeconds)
       throw new AttendeeReclaimRejected("reclaim_not_yet_eligible");
     const calldata = encodeFunctionData({
       abi: resilienceVaultAbi,

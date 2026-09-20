@@ -485,8 +485,9 @@ try {
     throw new Error("Restart changed the account for the enrolled credential");
   if (funded.fundedUnits !== "5000000") throw new Error("Faucet did not grant the expected amount");
 
-  const vendorAuthority = (await run("cast", ["wallet", "new", "--json"])).data?.[0] ?? {};
-  const terminalKey = (await run("cast", ["wallet", "new", "--json"])).data?.[0] ?? {};
+  const vendorAuthority =
+    JSON.parse(await run("cast", ["wallet", "new", "--json"])).data?.[0] ?? {};
+  const terminalKey = JSON.parse(await run("cast", ["wallet", "new", "--json"])).data?.[0] ?? {};
   const vendorId = await run("cast", ["keccak", "vendor:treasury"]);
   const provisioned = JSON.parse(
     await run("pnpm", ["--filter", "@openbalance/relayer", "provision:vendor-treasury"], {
