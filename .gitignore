@@ -32,6 +32,9 @@ deployments/local/
 .env
 .env.*
 !.env.example
+# Per-environment templates carry placeholders only and are meant to be committed; the broad
+# .env.* rule above would otherwise swallow them.
+!.env.*.example
 *.key
 *.pem
 *.p12
