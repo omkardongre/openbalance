@@ -30,15 +30,15 @@ locals {
   # is a connection string the runtime reads from the environment, so it is bound to an explicit
   # version rather than a floating one, since environment values resolve once at instance start.
   secrets = toset([
-    "database-url", "account-manifest", "event-manifest", "checkout-capability",
-    "integration-mapping", "relayer-signer", "venue-relay-key",
+    "database-url", "account-manifest", "event-manifest", "checkout-manifest",
+    "checkout-capability", "integration-mapping", "relayer-signer", "venue-relay-key",
     "venue-relay-settlement-signer", "terminal-snapshot",
   ])
 
   # Which identity may read which secret. Declared per process rather than per service, so a worker
   # that shares a package with a request service does not inherit that service's credentials.
   secret_requirements = {
-    api                    = ["database-url", "account-manifest", "checkout-capability"]
+    api                    = ["database-url", "account-manifest", "checkout-manifest", "checkout-capability"]
     relayer                = ["database-url", "event-manifest", "relayer-signer"]
     web                    = []
     venue-relay            = ["venue-relay-key", "terminal-snapshot"]

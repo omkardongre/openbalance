@@ -207,6 +207,12 @@ export async function runApiFunding(
   requestOrigin = origin;
   const state = JSON.parse(await readFile(options.statePath, "utf8")) as JourneyState;
   const authenticator = VirtualAuthenticator.restore(state.authenticator);
+  const persist = () =>
+    writeFile(
+      options.statePath,
+      JSON.stringify({ ...state, authenticator: authenticator.toJSON() }),
+      "utf8",
+    );
 
   const challenge = await call<{ challengeToken: string; options: { challenge: string } }>(
     options.apiUrl,
@@ -227,6 +233,12 @@ export async function runApiFunding(
   if (session.account.toLowerCase() !== state.account.toLowerCase())
     throw new Error("Session was issued for another account");
 
+  // Persist the advanced counter as soon as the assertion is accepted, not at the end of the run.
+  // The service has already recorded it by this point, so a later failure would otherwise leave the
+  // state file describing a counter the service has consumed, and every subsequent restore would be
+  // refused as a replay with no way back.
+  await persist();
+
   const fundAmount = options.fundAmount ?? 5_000_000n;
   const grant = await call<{ amount: string; transactionHash: Hex }>(
     options.apiUrl,
@@ -243,15 +255,6 @@ export async function runApiFunding(
     options.apiUrl,
     "/v1/accounts/me/activity?limit=25",
     { method: "GET", headers: { authorization: `Bearer ${session.sessionToken}` } },
-  );
-
-  // Persist the advanced signature counter. Asserting consumes a counter value the service records,
-  // so a later step or a repeat run that restored the pre-assertion state would present a counter
-  // the service has already seen and be refused as a replay.
-  await writeFile(
-    options.statePath,
-    JSON.stringify({ ...state, authenticator: authenticator.toJSON() }),
-    "utf8",
   );
 
   return {

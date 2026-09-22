@@ -22,6 +22,11 @@ export {
   type WebAuthnRegistration,
 } from "./authenticator.js";
 export {
+  type CheckoutScenarioOptions,
+  type CheckoutScenarioResult,
+  runCheckoutScenario,
+} from "./checkout-scenario.js";
+export {
   type OfflineReserveContext,
   type OfflineReserveOptions,
   type OfflineReserveResult,
