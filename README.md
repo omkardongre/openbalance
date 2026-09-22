@@ -110,6 +110,45 @@ keys that later steps sign with directly, so they are written to the gitignored 
 0600; the organizer key is not one of them and stays encrypted. Public identifiers land in
 `deployments/testnet/event-provisioning.json`.
 
+### Checkout enablement
+
+```bash
+pnpm testnet:provision-checkout   # deployed checkout manifest and the order-capability key
+```
+
+The API only constructs its checkout service when `CHECKOUT_MANIFEST_PATH` and
+`CHECKOUT_CAPABILITY_KEY_PATH` are both set. Without them every checkout route is absent and an
+authenticated vendor resolves no policy, so a cashier terminal reports its credential as unauthorized
+even though the credential is valid.
+
+The manifest is built by reading the event config, the vendor, its payout destination, the terminal
+record and the asset's own symbol and decimals back off the chain, after re-verifying that all four
+contract addresses still run the bytecode `verifier-manifest.json` bound them to. Nothing is copied
+from the local provisioning record beyond the identifiers used to look those records up: the manifest
+is what the API trusts when it accepts an order, so a value that had only ever been asserted locally
+could widen policy from a stale file. The reserve ceilings it writes are the tighter operational
+limits; the acceptance and submission windows come from the event config, because those are the bounds
+the contract will actually enforce.
+
+The capability key is a MAC key rather than an identity — rotating it invalidates outstanding order
+capabilities and nothing else — so it is created once, written to the gitignored `secrets/` tree as raw
+bytes at mode 0600, and left alone on a re-run. The manifest lands in
+`deployments/testnet/checkout-manifest.json`, which carries no secrets and is committed.
+
+Operator credentials are separate from both, and are bearer tokens rather than passkeys:
+
+```bash
+OPERATIONS_ROLE=VENDOR OPERATIONS_VENDOR_ID=0x... \
+  pnpm --filter @openbalance/api provision:operations-access
+```
+
+`stream_id` must match the live indexer stream exactly or every scoped read returns empty, and a
+VENDOR credential's `vendor_id` must also appear in the deployed manifest or it will authenticate
+while resolving no checkout policy. The CLI prints the token once and stores only its hash. Confirm a
+credential against the deployed API with `GET /v1/operations/me`, which returns the resolved
+`checkoutPolicy` or `organizerPolicy`. Note that every mutating API request is origin-checked against
+the configured web origin, so a request made outside the browser must send that `Origin` header.
+
 ### Driving the journey against deployed services
 
 The scenario package doubles as the driver for a deployed environment. `SCENARIO_KIND=api-enroll`
@@ -124,6 +163,33 @@ the journey survives a restart between steps. Two settings only matter against a
   `block.timestamp`, and a public network offers no `evm_increaseTime`, so deadlines are waited out in
   real time. Set `SCENARIO_WINDOWS` as short as the registered `maximumAcceptanceDuration` and
   `maximumSubmissionDelay` permit, since the wait is the real thing.
+
+`SCENARIO_KIND=checkout` drives the online tap: the cashier issues an order under
+`SCENARIO_OPERATIONS_TOKEN`, the attendee binds their own account, `SCENARIO_TERMINAL_KEY` approves
+the bound intent, and the attendee authorizes `pay` with a passkey assertion the account contract
+verifies. It needs `SCENARIO_API_URL`, `SCENARIO_RELAYER_URL`, `SCENARIO_STATE_PATH`,
+`SCENARIO_OPERATIONS_TOKEN` and `SCENARIO_TERMINAL_KEY`, with `SCENARIO_GROSS_UNITS` and
+`SCENARIO_ORDER_REFERENCE` optional. `SCENARIO_ORIGIN` must equal the origin the account was enrolled
+against, because the account pins it and both services reject a mutating request that carries any
+other. The account must already hold at least the gross, and the harness refuses to start otherwise
+rather than failing on chain after spending gas. This is the counterpart to `treasury`: both settle
+through the same router, but only this one exercises `ExactPayRouter.pay` and the account's `PAY`
+authorization, which is what an online payment actually uses.
+
+Every assertion is written back to the state file the moment the service accepts it, not at the end of
+the run. The service records the signature counter immediately, so a run that failed later while
+holding the advanced counter in memory would leave the file describing a counter already consumed, and
+every subsequent restore would be refused as a replay.
+
+Run the harness on the Node version in `.nvmrc`, and on a high-latency link raise the connection
+attempt budget with `node --network-family-autoselection-attempt-timeout=5000`. Cloud Run resolves to
+eight IPv4 and eight IPv6 addresses, and Node's family autoselection gives each attempt 250 ms by
+default, which a distant or lossy link exceeds on every address; the request then fails as
+`fetch failed` with an `AggregateError` of `ETIMEDOUT` per IPv4 address and `ENETUNREACH` per IPv6 one
+where the host has no IPv6 route. The failure looks like an unreachable service but is neither a
+service nor a configuration fault: `curl` to the same host succeeds, and a pooled connection keeps
+working once established, so only calls that open a fresh connection fail. Diagnosing it requires the
+error's `cause`, which the scenario CLI does not print.
 
 `SCENARIO_PROVISIONED` supplies the registry records from the provisioning step instead of registering
 new ones, which also keeps the harness from holding the organizer's key. Money operations are polled to

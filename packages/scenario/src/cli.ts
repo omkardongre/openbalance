@@ -1,6 +1,7 @@
 import type { Hex } from "viem";
 import { runAccountScenario } from "./account-scenario.js";
 import { runApiEnrollment, runApiFunding, runApiScenario } from "./api-scenario.js";
+import { runCheckoutScenario } from "./checkout-scenario.js";
 import { runOfflineReserveScenario } from "./event-scenario.js";
 import { runFaucetScenario } from "./faucet-scenario.js";
 import { runRelayProcessScenario } from "./relay-scenario.js";
@@ -22,6 +23,7 @@ const kinds = [
   "api-enroll",
   "api-fund",
   "treasury",
+  "checkout",
 ];
 const labels: Record<string, string> = {
   account: "account-ownership",
@@ -32,7 +34,32 @@ const labels: Record<string, string> = {
   "api-enroll": "api-enrollment",
   "api-fund": "api-funding",
   treasury: "treasury",
+  checkout: "checkout-online-payment",
 };
+/**
+ * Renders a failure with its `cause` chain and any `AggregateError` members. A bare message is not
+ * enough to act on: `fetch` reports every transport failure as `fetch failed` and puts the actual
+ * reason — a refused or timed-out connection, an unreachable address family — only in `cause`, so
+ * reporting the message alone makes a network fault indistinguishable from a service fault.
+ */
+function describeFailure(error: unknown, depth = 0): string {
+  const indent = "  ".repeat(depth);
+  if (!(error instanceof Error)) return `${indent}Scenario failed`;
+  const lines = [`${indent}${error.name}: ${error.message || "(no message)"}`];
+  const code = (error as { code?: unknown }).code;
+  if (code !== undefined) lines.push(`${indent}  code: ${String(code)}`);
+  // Depth is bounded because a malformed or circular chain must not turn a failure into a hang.
+  if (depth < 4) {
+    if (error.cause !== undefined && error.cause !== null) {
+      lines.push(`${indent}  caused by:`);
+      lines.push(describeFailure(error.cause, depth + 2));
+    }
+    for (const member of error instanceof AggregateError ? error.errors : []) {
+      lines.push(describeFailure(member, depth + 2));
+    }
+  }
+  return lines.join("\n");
+}
 
 if (!rpcUrl || !deployerPrivateKey || !/^0x[0-9a-fA-F]{64}$/.test(deployerPrivateKey)) {
   process.stderr.write(
@@ -63,6 +90,18 @@ if (!rpcUrl || !deployerPrivateKey || !/^0x[0-9a-fA-F]{64}$/.test(deployerPrivat
 ) {
   process.stderr.write(
     "The treasury scenario requires the API, relayer, state and event settings\n",
+  );
+  process.exitCode = 64;
+} else if (
+  kind === "checkout" &&
+  (!apiUrl ||
+    !statePath ||
+    !process.env.SCENARIO_RELAYER_URL ||
+    !process.env.SCENARIO_OPERATIONS_TOKEN ||
+    !process.env.SCENARIO_TERMINAL_KEY)
+) {
+  process.stderr.write(
+    "The checkout scenario requires the API, relayer, state, operations token and terminal key\n",
   );
   process.exitCode = 64;
 } else {
@@ -145,20 +184,32 @@ if (!rpcUrl || !deployerPrivateKey || !/^0x[0-9a-fA-F]{64}$/.test(deployerPrivat
                           }
                         : {}),
                     })
-                : kind === "offline"
-                  ? () => runOfflineReserveScenario(options)
-                  : () => runAccountScenario(options);
+                : kind === "checkout"
+                  ? () =>
+                      runCheckoutScenario({
+                        ...options,
+                        apiUrl: apiUrl as string,
+                        relayerUrl: process.env.SCENARIO_RELAYER_URL as string,
+                        statePath: statePath as string,
+                        operationsToken: process.env.SCENARIO_OPERATIONS_TOKEN as string,
+                        terminalPrivateKey: process.env.SCENARIO_TERMINAL_KEY as Hex,
+                        ...(process.env.SCENARIO_GROSS_UNITS
+                          ? { grossUnits: BigInt(process.env.SCENARIO_GROSS_UNITS) }
+                          : {}),
+                        ...(process.env.SCENARIO_ORDER_REFERENCE
+                          ? { orderReference: process.env.SCENARIO_ORDER_REFERENCE }
+                          : {}),
+                      })
+                  : kind === "offline"
+                    ? () => runOfflineReserveScenario(options)
+                    : () => runAccountScenario(options);
   run().then(
     (result) =>
       process.stdout.write(
         `${JSON.stringify({ schemaVersion: 1, environment: "local", kind: labels[kind], ...result })}\n`,
       ),
     (error: unknown) => {
-      const detail =
-        error instanceof Error
-          ? `${error.name}: ${error.message || "(no message)"}`
-          : "Scenario failed";
-      process.stderr.write(`${detail}\n`);
+      process.stderr.write(`${describeFailure(error)}\n`);
       process.exitCode = 1;
     },
   );
