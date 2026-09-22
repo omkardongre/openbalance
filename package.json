@@ -27,6 +27,7 @@
     "testnet:deploy": "node scripts/deploy-testnet.mjs deploy",
     "testnet:manifest": "node scripts/deploy-testnet.mjs manifest",
     "testnet:verify": "node scripts/deploy-testnet.mjs verify",
+    "testnet:provision-event": "node scripts/provision-testnet-event.mjs",
     "test:tooling": "node --test scripts/*.test.mjs",
     "workload": "node scripts/run-payment-workload.mjs",
     "workload:slo": "node scripts/slo-workload.mjs",

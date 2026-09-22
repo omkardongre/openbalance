@@ -99,7 +99,7 @@ async function build(name, tag) {
   if (!target) throw new Error(`Unknown image: ${name}. Known: ${Object.keys(TARGETS).join(", ")}`);
   const image = `${PREFIX}/${name}`;
 
-  const args = ["build", "--pull", "-t", `${image}:${tag}`, "-t", `${image}:latest`];
+  const args = ["build", "--pull", "-t", `${image}:${tag}`];
   if (target.dockerfile) {
     args.push("-f", target.dockerfile);
     for (const variable of [
@@ -127,7 +127,11 @@ async function build(name, tag) {
   args.push(".");
 
   await run("docker", args);
-  await run("docker", ["push", "--all-tags", image]);
+  // Only the unique tag is pushed. The registry's immutable-tags policy rejects any second push to
+  // `latest` once it has been pushed once, which would fail every rebuild after the first — and a
+  // moving `latest` is exactly what immutability exists to prevent, so it is not pushed at all rather
+  // than worked around.
+  await run("docker", ["push", `${image}:${tag}`]);
   const digest = await publishedDigest(image, tag);
   return `${image}@${digest}`;
 }

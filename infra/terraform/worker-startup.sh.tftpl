@@ -1,0 +1,106 @@
+#!/bin/bash
+# Brings up one OpenBalance worker container on Container-Optimized OS.
+#
+# Rendered by Terraform. Everything interpolated here is public configuration; secret values are read
+# at boot from Secret Manager using the instance's own identity, so no secret reaches Terraform state
+# or instance metadata.
+set -euo pipefail
+
+readonly SDK_IMAGE="gcr.io/google.com/cloudsdktool/google-cloud-cli:stable"
+readonly STATE_DIR="/var/lib/openbalance"
+readonly HOST_SECRET_DIR="$STATE_DIR/secrets"
+readonly DATA_DIR="$STATE_DIR/data"
+readonly ENV_FILE="$STATE_DIR/worker.env"
+readonly CONTAINER_NAME="openbalance-worker"
+
+# Container-Optimized OS mounts the root filesystem, and with it /root, read-only. Both the Docker CLI
+# and the credential helper resolve their configuration directory from the environment, so pointing
+# HOME and DOCKER_CONFIG at the same writable location means either resolution path lands on a
+# directory that can actually be written. Left unset, registry login fails and no container starts.
+readonly TOOL_HOME="$STATE_DIR/home"
+export HOME="$TOOL_HOME"
+export DOCKER_CONFIG="$TOOL_HOME/.docker"
+
+# The service image runs as an unprivileged user rather than root, so mounted files have to be owned
+# by that user to be readable at all.
+readonly CONTAINER_USER=1000
+
+log() { echo "openbalance-startup: $*"; }
+
+# The script re-runs on every boot, so each step has to tolerate the previous run's leftovers.
+umask 077
+install -d -m 0700 "$STATE_DIR"
+rm -rf "$HOST_SECRET_DIR"
+install -d -m 0700 "$HOST_SECRET_DIR"
+install -d -m 0700 "$DATA_DIR"
+chown "$CONTAINER_USER:$CONTAINER_USER" "$DATA_DIR"
+install -d -m 0700 "$TOOL_HOME" "$DOCKER_CONFIG"
+
+log "configuring registry credentials"
+docker-credential-gcr configure-docker --registries="${registry}"
+
+# COS ships Docker but not gcloud, and has no native Secret Manager integration, so the Cloud SDK
+# image is used as the client. It authenticates through the metadata server as this instance's
+# service account, which is granted access to exactly the secrets this worker needs and no others.
+read_secret() {
+  docker run --rm "$SDK_IMAGE" \
+    gcloud secrets versions access latest --project="${project_id}" --secret="$1"
+}
+
+%{ if length(secret_files) > 0 ~}
+log "fetching key material and manifests"
+# Each secret is written under a subdirectory named after it, at `<secret name>/<secret name>`, to
+# match the path Cloud Run's secret volumes produce for the same secret. One path convention shared
+# by both runtimes means the container's own code, which is identical on both, can use one path.
+%{ for short_name, secret_name in secret_files ~}
+install -d -m 0700 "$HOST_SECRET_DIR/${short_name}"
+read_secret "${secret_name}" > "$HOST_SECRET_DIR/${short_name}/${short_name}"
+%{ endfor ~}
+
+# The signing-key loader refuses any key file carrying group or other permission bits, so these are
+# reduced to owner-read only. The directories stay traversable for that same owner.
+chown -R "$CONTAINER_USER:$CONTAINER_USER" "$HOST_SECRET_DIR"
+find "$HOST_SECRET_DIR" -mindepth 2 -type f -exec chmod 0400 {} +
+find "$HOST_SECRET_DIR" -mindepth 1 -type d -exec chmod 0500 {} +
+%{ endif ~}
+chown "$CONTAINER_USER:$CONTAINER_USER" "$HOST_SECRET_DIR"
+chmod 0500 "$HOST_SECRET_DIR"
+
+
+# Written with an unexpanded heredoc: the values below were already substituted by Terraform, so the
+# shell must not reinterpret them. Docker reads each line verbatim to its end, so values containing
+# spaces need no quoting and must not be quoted.
+log "writing configuration"
+cat > "$ENV_FILE" <<'OPENBALANCE_STATIC_ENV'
+%{ for key, value in environment ~}
+${key}=${value}
+%{ endfor ~}
+OPENBALANCE_STATIC_ENV
+
+%{ for variable_name, secret_name in secret_names ~}
+printf '%s=%s\n' '${variable_name}' "$(read_secret '${secret_name}')" >> "$ENV_FILE"
+%{ endfor ~}
+chmod 0400 "$ENV_FILE"
+
+log "starting ${container_label}"
+docker rm --force "$CONTAINER_NAME" >/dev/null 2>&1 || true
+docker pull "${image}"
+
+# The image already bakes which process it runs, so the process is deliberately not set here: passing
+# a worker's own name would not match any supported entrypoint and the container would exit at once.
+#
+# Logs are capped so a long-running worker cannot fill the boot disk, and are collected by the COS
+# logging agent from the json-file driver.
+docker run \
+  --detach \
+  --name "$CONTAINER_NAME" \
+  --restart=always \
+  --env-file "$ENV_FILE" \
+  --volume "$HOST_SECRET_DIR:${secret_directory}:ro" \
+  --volume "$DATA_DIR:$STATE_DIR" \
+  --log-driver=json-file \
+  --log-opt max-size=32m \
+  --log-opt max-file=3 \
+  "${image}"
+
+log "started"

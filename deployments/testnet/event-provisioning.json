@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "chainId": 10143,
+  "eventId": "0x8b1e063dcbd16a795ae9978f60d5f8e92dee63e5762ea2fb9c6170f4f8b9936a",
+  "registry": "0xcfC1f72a27c09FBE72F7f23428E85DB7D1Ab5eae",
+  "organizer": "0xA9d0D013f0d541d2FF96ab254Bef318787f80F83",
+  "configVersion": 1,
+  "organizerFeeBps": 200,
+  "platformFeeBps": 100,
+  "maximumAcceptanceDuration": 3600,
+  "maximumSubmissionDelay": 3600,
+  "vendorId": "0x170d0b0b3a9ee82d32ee5e10ad5b684602e70cc699617c1c06231691ae5b0364",
+  "vendorAuthority": "0xBAB81720e540cc8A0e0826882A2620f953ea74F1",
+  "destinationVersion": 1,
+  "destination": "0xBAB81720e540cc8A0e0826882A2620f953ea74F1",
+  "terminalId": "0x0834b67e6d0fcb902e77b38877b645c34d5b88b9a15d3e644176ec65ff786fca",
+  "terminalVersion": 1,
+  "terminalSigner": "0x0916b755b49608f4B2418559ee52F02a6EEaA3af"
+}
