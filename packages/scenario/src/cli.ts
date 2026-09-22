@@ -66,11 +66,17 @@ if (!rpcUrl || !deployerPrivateKey || !/^0x[0-9a-fA-F]{64}$/.test(deployerPrivat
   );
   process.exitCode = 64;
 } else {
+  const credentialId = process.env.SCENARIO_CREDENTIAL_ID;
+  if (credentialId && !/^0x[0-9a-fA-F]{64}$/.test(credentialId)) {
+    process.stderr.write("SCENARIO_CREDENTIAL_ID must be 32 hex bytes\n");
+    process.exitCode = 64;
+  }
   const options = {
     rpcUrl,
     deployerPrivateKey: deployerPrivateKey as Hex,
     ...(process.env.SCENARIO_RP_ID ? { rpId: process.env.SCENARIO_RP_ID } : {}),
     ...(process.env.SCENARIO_ORIGIN ? { origin: process.env.SCENARIO_ORIGIN } : {}),
+    ...(credentialId ? { credentialId: credentialId as Hex } : {}),
   };
   const run =
     kind === "relay"
@@ -91,6 +97,9 @@ if (!rpcUrl || !deployerPrivateKey || !/^0x[0-9a-fA-F]{64}$/.test(deployerPrivat
                   apiUrl: apiUrl as string,
                   sponsorPrivateKey: deployerPrivateKey as Hex,
                   statePath: statePath as string,
+                  ...(process.env.SCENARIO_RELAYER_URL
+                    ? { relayerUrl: process.env.SCENARIO_RELAYER_URL }
+                    : {}),
                 })
             : kind === "api-fund"
               ? () =>
@@ -111,6 +120,30 @@ if (!rpcUrl || !deployerPrivateKey || !/^0x[0-9a-fA-F]{64}$/.test(deployerPrivat
                       vendorAuthorityPrivateKey: process.env.SCENARIO_VENDOR_AUTHORITY_KEY as Hex,
                       terminalPrivateKey: process.env.SCENARIO_TERMINAL_KEY as Hex,
                       event: JSON.parse(process.env.SCENARIO_EVENT as string),
+                      ...(process.env.SCENARIO_RUN_ID
+                        ? { runId: process.env.SCENARIO_RUN_ID }
+                        : {}),
+                      ...(process.env.SCENARIO_TIME_CONTROL === "chain"
+                        ? { timeControl: "chain" as const }
+                        : {}),
+                      ...(process.env.SCENARIO_WINDOWS
+                        ? { windows: JSON.parse(process.env.SCENARIO_WINDOWS) }
+                        : {}),
+                      ...(process.env.SCENARIO_PROVISIONED
+                        ? {
+                            provisioned: (() => {
+                              const raw = JSON.parse(process.env.SCENARIO_PROVISIONED as string);
+                              return {
+                                vendorId: raw.vendorId as Hex,
+                                terminalId: raw.terminalId as Hex,
+                                configVersion: BigInt(raw.configVersion),
+                                destinationVersion: BigInt(raw.destinationVersion),
+                                organizerFeeBps: Number(raw.organizerFeeBps),
+                                platformFeeBps: Number(raw.platformFeeBps),
+                              };
+                            })(),
+                          }
+                        : {}),
                     })
                 : kind === "offline"
                   ? () => runOfflineReserveScenario(options)

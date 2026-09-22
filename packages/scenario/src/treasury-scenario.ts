@@ -20,7 +20,7 @@ import {
   stringToHex,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { chainFor } from "./account-scenario.js";
+import { resolveChainFor } from "./account-scenario.js";
 import { loadArtifact } from "./artifacts.js";
 import { VirtualAuthenticator, type VirtualAuthenticatorState } from "./authenticator.js";
 
@@ -51,6 +51,41 @@ export type TreasuryScenarioOptions = {
     ledger: Address;
     token: Address;
   };
+  /** Origin the services validate WebAuthn assertions against. */
+  origin?: string;
+  /**
+   * Distinguishes one run's channel, payment, refund and order identifiers from another's. A local
+   * run gets a fresh database and chain each time, so fixed labels are reproducible there; a public
+   * chain keeps every channel ever opened, and reusing an identifier would collide with that history
+   * rather than test anything.
+   */
+  runId?: string;
+  /**
+   * How to reach a deadline. `evm` tells a development chain to jump, which keeps the local suite
+   * fast. `chain` waits for real elapsed time, which is the only option on a public network: these
+   * deadlines are evaluated against `block.timestamp`, so passing one cannot be simulated.
+   */
+  timeControl?: "evm" | "chain";
+  /**
+   * Seconds from now for the channel's acceptance start, acceptance end and submission end. Defaults
+   * suit a development chain that can jump. On a public network these become real waiting, so they
+   * are set as short as the event's registered bounds permit.
+   */
+  windows?: { acceptFromSeconds: number; acceptUntilSeconds: number; submitUntilSeconds: number };
+  /**
+   * Registry records to use instead of registering new ones. Config, vendor, destination and terminal
+   * registration are `onlyOrganizer` calls, so a deployed event is provisioned by the organizer out of
+   * band and this scenario is not the organizer. Supplying them also keeps the harness from holding
+   * the organizer's key.
+   */
+  provisioned?: {
+    vendorId: Hex;
+    terminalId: Hex;
+    configVersion: bigint;
+    destinationVersion: bigint;
+    organizerFeeBps: number;
+    platformFeeBps: number;
+  };
 };
 
 export type TreasuryScenarioResult = {
@@ -68,10 +103,16 @@ type JourneyState = {
   authenticator: VirtualAuthenticatorState;
 };
 
-async function post(url: string, path: string, body: unknown, headers: Record<string, string>) {
+async function post(
+  url: string,
+  path: string,
+  body: unknown,
+  headers: Record<string, string>,
+  origin: string,
+) {
   const response = await fetch(`${url}${path}`, {
     method: "POST",
-    headers: { "content-type": "application/json", origin: "http://localhost:3000", ...headers },
+    headers: { "content-type": "application/json", origin, ...headers },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(30_000),
   });
@@ -79,6 +120,38 @@ async function post(url: string, path: string, body: unknown, headers: Record<st
   if (response.status !== 202)
     throw new Error(`${path} failed with ${response.status}: ${JSON.stringify(payload)}`);
   return payload as { operationId?: string; state?: string };
+}
+
+/**
+ * Advances until the chain's own clock has reached `target`.
+ *
+ * On a development chain the clock is told to jump, so the local suite stays fast. On a public chain
+ * there is no such control and no substitute for waiting: eligibility is a contract rule evaluated
+ * against `block.timestamp`, so a deadline is reached when it is actually reached. Polling reads the
+ * chain rather than the local clock because the two drift, and it is the chain's view that decides.
+ */
+async function advanceToChainTime(
+  publicClient: { getBlock: () => Promise<{ timestamp: bigint }>; request: unknown },
+  target: number,
+  mode: "evm" | "chain",
+) {
+  const chainSeconds = async () => Number((await publicClient.getBlock()).timestamp);
+  if (mode === "evm") {
+    const current = await chainSeconds();
+    const request = publicClient.request as (args: unknown) => Promise<unknown>;
+    if (target > current)
+      await request({ method: "evm_increaseTime", params: [target - current + 1] });
+    await request({ method: "evm_mine", params: [] });
+    return;
+  }
+  for (;;) {
+    const current = await chainSeconds();
+    if (current >= target) return;
+    // Sleep no longer than the remaining gap, so the wait ends promptly once the deadline passes.
+    await new Promise((resolve) =>
+      setTimeout(resolve, Math.min(5_000, (target - current) * 1_000)),
+    );
+  }
 }
 
 /**
@@ -92,17 +165,51 @@ async function postAwaitingProjection(
   path: string,
   body: unknown,
   headers: Record<string, string>,
+  origin: string,
   timeoutMs = 60_000,
 ) {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     try {
-      return await post(url, path, body, headers);
+      return await post(url, path, body, headers, origin);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (!message.includes("channel_not_found") || Date.now() >= deadline) throw error;
       await new Promise((resolve) => setTimeout(resolve, 1_000));
     }
+  }
+}
+
+/**
+ * Polls a vendor treasury operation until the relayer reports it finalized.
+ *
+ * Acceptance is not execution: the relayer queues the operation and a later step may depend on the
+ * balance this one moves, so ordering them requires waiting for the finalized state rather than for
+ * the 202.
+ */
+async function awaitOperation(
+  relayerUrl: string,
+  collection: "financial-operations" | "vendor-financial-operations",
+  operationId: string,
+  token: string,
+  origin: string,
+  timeoutMs = 180_000,
+) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const response = await fetch(`${relayerUrl}/v1/${collection}/${operationId}`, {
+      headers: { authorization: `Bearer ${token}`, origin },
+      signal: AbortSignal.timeout(30_000),
+    });
+    const body = (await response.json().catch(() => ({}))) as { state?: string };
+    if (!response.ok)
+      throw new Error(`operation ${operationId} read failed with ${response.status}`);
+    if (body.state === "FINALIZED") return body.state;
+    if (body.state === "FAILED" || body.state === "EXPIRED")
+      throw new Error(`operation ${operationId} ended in ${body.state}`);
+    if (Date.now() >= deadline)
+      throw new Error(`operation ${operationId} still ${body.state} after ${timeoutMs}ms`);
+    await new Promise((resolve) => setTimeout(resolve, 3_000));
   }
 }
 
@@ -116,11 +223,16 @@ export async function runTreasuryScenario(
 ): Promise<TreasuryScenarioResult> {
   const state = JSON.parse(await readFile(options.statePath, "utf8")) as JourneyState;
   const authenticator = VirtualAuthenticator.restore(state.authenticator);
-  const chain = chainFor(options.rpcUrl);
+  const chain = await resolveChainFor(options.rpcUrl);
+  const origin = options.origin ?? "http://localhost:3000";
+  const runId = options.runId ?? "treasury";
+  const timeControl = options.timeControl ?? "evm";
   const deployer = privateKeyToAccount(options.deployerPrivateKey);
   const vendorAuthority = privateKeyToAccount(options.vendorAuthorityPrivateKey);
   const terminalSigner = privateKeyToAccount(options.terminalPrivateKey);
-  const channelSigner = privateKeyToAccount(keccak256(stringToHex("treasury:channel")));
+  // Scoped to the run, because the channel signer is bound into the channel's immutable terms: a
+  // shared signer across runs would let one run's authorization satisfy another run's channel.
+  const channelSigner = privateKeyToAccount(keccak256(stringToHex(`channel-signer:${runId}`)));
   const publicClient = createPublicClient({ chain, transport: http(options.rpcUrl) });
   const wallet = createWalletClient({ chain, transport: http(options.rpcUrl), account: deployer });
   const { registry, vault, router, token, eventId } = options.event;
@@ -146,85 +258,95 @@ export async function runTreasuryScenario(
   };
 
   const now = Number((await publicClient.getBlock()).timestamp);
-  const vendorId = b32("vendor:treasury");
-  const terminalId = b32("terminal:treasury");
-  await send({
-    address: registry,
-    abi: registryArtifact.abi,
-    functionName: "registerConfig",
-    args: [
-      1n,
-      {
-        validAfter: now,
-        validUntil: now + 86_400,
-        organizerFeeBps: 200,
-        platformFeeBps: 100,
-        maximumAcceptanceDuration: 3_600,
-        maximumSubmissionDelay: 3_600,
-        organizerDestination: deployer.address,
-        platformDestination: deployer.address,
-        termsHash: b32("terms:treasury"),
-        enabled: true,
-      },
-    ],
-  });
-  await send({
-    address: registry,
-    abi: registryArtifact.abi,
-    functionName: "registerVendor",
-    args: [vendorId, vendorAuthority.address],
-  });
-  const destinationDeadline = BigInt(now + 3_600);
-  const destinationDigest = (await publicClient.readContract({
-    address: registry,
-    abi: registryReads,
-    functionName: "destinationDigest",
-    args: [vendorId, 1n, deployer.address, destinationDeadline],
-  })) as Hex;
-  await send({
-    address: registry,
-    abi: registryArtifact.abi,
-    functionName: "registerDestination",
-    args: [
-      vendorId,
-      1n,
-      deployer.address,
-      destinationDeadline,
-      await vendorAuthority.sign({ hash: destinationDigest }),
-    ],
-  });
-  await send({
-    address: registry,
-    abi: registryArtifact.abi,
-    functionName: "registerTerminal",
-    args: [terminalId, 1n, vendorId, terminalSigner.address, now, now + 86_400],
-  });
+  const vendorId = options.provisioned?.vendorId ?? b32("vendor:treasury");
+  const terminalId = options.provisioned?.terminalId ?? b32("terminal:treasury");
+  const configVersion = options.provisioned?.configVersion ?? 1n;
+  const destinationVersion = options.provisioned?.destinationVersion ?? 1n;
+  const organizerFeeBps = options.provisioned?.organizerFeeBps ?? 200;
+  const platformFeeBps = options.provisioned?.platformFeeBps ?? 100;
+  if (!options.provisioned) {
+    await provisionRegistry();
+  }
+
+  async function provisionRegistry() {
+    await send({
+      address: registry,
+      abi: registryArtifact.abi,
+      functionName: "registerConfig",
+      args: [
+        1n,
+        {
+          validAfter: now,
+          validUntil: now + 86_400,
+          organizerFeeBps: 200,
+          platformFeeBps: 100,
+          maximumAcceptanceDuration: 3_600,
+          maximumSubmissionDelay: 3_600,
+          organizerDestination: deployer.address,
+          platformDestination: deployer.address,
+          termsHash: b32("terms:treasury"),
+          enabled: true,
+        },
+      ],
+    });
+    await send({
+      address: registry,
+      abi: registryArtifact.abi,
+      functionName: "registerVendor",
+      args: [vendorId, vendorAuthority.address],
+    });
+    const destinationDeadline = BigInt(now + 3_600);
+    const destinationDigest = (await publicClient.readContract({
+      address: registry,
+      abi: registryReads,
+      functionName: "destinationDigest",
+      args: [vendorId, 1n, deployer.address, destinationDeadline],
+    })) as Hex;
+    await send({
+      address: registry,
+      abi: registryArtifact.abi,
+      functionName: "registerDestination",
+      args: [
+        vendorId,
+        1n,
+        deployer.address,
+        destinationDeadline,
+        await vendorAuthority.sign({ hash: destinationDigest }),
+      ],
+    });
+    await send({
+      address: registry,
+      abi: registryArtifact.abi,
+      functionName: "registerTerminal",
+      args: [terminalId, 1n, vendorId, terminalSigner.address, now, now + 86_400],
+    });
+  }
 
   const reserveUnits = 2_000_000n;
   const grossUnits = 1_000_000n;
-  const channelId = b32("channel:treasury");
-  const acceptFrom = now + 60;
-  const acceptUntil = now + 3_600;
-  const submitUntil = now + 7_200;
+  const channelId = b32(`channel:${runId}`);
+  const acceptFrom = now + (options.windows?.acceptFromSeconds ?? 60);
+  const acceptUntil = now + (options.windows?.acceptUntilSeconds ?? 3_600);
+  const submitUntil = now + (options.windows?.submitUntilSeconds ?? 7_200);
   const channelConfig = {
     channelId,
     eventId,
     asset: token,
     reserveUnits,
     vendorId,
-    vendorDestinationVersion: 1n,
+    vendorDestinationVersion: destinationVersion,
     terminalInstanceId: terminalId,
     terminalKeyVersion: 1n,
     attendeeChannelSigner: channelSigner.address,
-    configVersion: 1n,
-    organizerFeeBps: 200,
-    platformFeeBps: 100,
+    configVersion,
+    organizerFeeBps,
+    platformFeeBps,
     maxPerVoucher: 1_000_000n,
     maxVoucherCount: 10,
     acceptFrom,
     acceptUntil,
     submitUntil,
-    genesisDigest: b32("genesis:treasury"),
+    genesisDigest: b32(`genesis:${runId}`),
   };
   const termsHash = (await publicClient.readContract({
     address: vault,
@@ -273,10 +395,10 @@ export async function runTreasuryScenario(
     ],
   });
 
-  await publicClient.request({ method: "evm_increaseTime", params: [90] } as never);
-  await publicClient.request({ method: "evm_mine", params: [] } as never);
+  // A voucher is only acceptable once the channel's acceptance window has opened.
+  await advanceToChainTime(publicClient, acceptFrom + 1, timeControl);
 
-  const paymentId = b32("payment:treasury:1");
+  const paymentId = b32(`payment:${runId}:1`);
   const voucher = {
     protocolVersion: 1,
     chainId: BigInt(chain.id),
@@ -285,14 +407,14 @@ export async function runTreasuryScenario(
     sequence: 1,
     previousVoucherDigest: channelConfig.genesisDigest,
     paymentId,
-    orderRefHash: b32("order:treasury:1"),
+    orderRefHash: b32(`order:${runId}:1`),
     grossUnits,
     cumulativeGrossUnits: grossUnits,
-    receiptCommitment: b32("receipt:treasury:1"),
+    receiptCommitment: b32(`receipt:${runId}:1`),
     acceptedAt: acceptFrom,
     acceptUntil,
     submitUntil,
-    configVersion: 1n,
+    configVersion,
   };
   const voucherDigest = (await publicClient.readContract({
     address: vault,
@@ -311,15 +433,13 @@ export async function runTreasuryScenario(
     ],
   });
 
-  await publicClient.request({
-    method: "evm_increaseTime",
-    params: [submitUntil - Number((await publicClient.getBlock()).timestamp) + 10],
-  } as never);
-  await publicClient.request({ method: "evm_mine", params: [] } as never);
+  // Reclaim is only eligible once the merchant submission window has closed (§10.8), so this waits
+  // past `submitUntil` rather than asking the service to relax the rule.
+  await advanceToChainTime(publicClient, submitUntil + 1, timeControl);
 
   const session = await fetch(`${options.apiUrl}/v1/accounts/authentication-challenges`, {
     method: "POST",
-    headers: { "content-type": "application/json", origin: "http://localhost:3000" },
+    headers: { "content-type": "application/json", origin },
     body: JSON.stringify({ account: state.account }),
     signal: AbortSignal.timeout(30_000),
   }).then(async (response) => {
@@ -330,7 +450,7 @@ export async function runTreasuryScenario(
     if (!response.ok) throw new Error(`authentication challenge failed: ${response.status}`);
     const verified = await fetch(`${options.apiUrl}/v1/accounts/authentications`, {
       method: "POST",
-      headers: { "content-type": "application/json", origin: "http://localhost:3000" },
+      headers: { "content-type": "application/json", origin },
       body: JSON.stringify({
         challengeToken: challenge.challengeToken,
         response: authenticator.authenticationBase64Url(challenge.options.challenge),
@@ -347,31 +467,33 @@ export async function runTreasuryScenario(
     `/v1/reserve-channels/${channelId}/reclaims`,
     { eventId },
     { authorization: `Bearer ${session}`, "idempotency-key": `reclaim:${channelId}` },
+    origin,
   );
 
-  const withdrawal = await post(
-    options.relayerUrl,
-    `/v1/vendors/${vendorId}/withdrawals`,
-    { destinationVersion: "1" },
-    {
-      authorization: `Bearer ${options.vendorTreasuryToken}`,
-      "idempotency-key": `withdraw:${vendorId}`,
-    },
-  );
+  // A settled voucher credits the vendor with the gross less the organizer and platform fees, so the
+  // vendor's own credit — the only balance a credit-backed refund may draw on — is the net, not the
+  // gross. Refunding part of it leaves the rest for the withdrawal to pay out, so one run exercises
+  // both claims on the same credit.
+  const vendorCreditUnits =
+    grossUnits -
+    (grossUnits * BigInt(organizerFeeBps)) / 10_000n -
+    (grossUnits * BigInt(platformFeeBps)) / 10_000n;
+  const refundUnits = vendorCreditUnits / 2n;
 
   const refundIntent: RefundIntent = {
     schemaVersion: 1,
     chainId: BigInt(chain.id),
     router,
     eventId,
-    refundId: b32("refund:treasury:1"),
+    refundId: b32(`refund:${runId}:1`),
     paymentId,
     payerAccount: state.account,
     vendorId,
     asset: token,
-    refundUnits: grossUnits,
-    cumulativeRefundUnits: grossUnits,
-    vendorCreditUnits: grossUnits,
+    refundUnits,
+    cumulativeRefundUnits: refundUnits,
+    // Funded entirely from the vendor's settled credit, so the refund needs no external transfer.
+    vendorCreditUnits: refundUnits,
     // The relayer binds the funding source to the vendor treasury authority, so a refund can only
     // be funded by the credential holder that signed it.
     fundingSource: vendorAuthority.address,
@@ -391,14 +513,53 @@ export async function runTreasuryScenario(
       authorization: `Bearer ${options.vendorTreasuryToken}`,
       "idempotency-key": `refund:${paymentId}`,
     },
+    origin,
+  );
+  const refundState = refund.operationId
+    ? await awaitOperation(
+        options.relayerUrl,
+        "vendor-financial-operations",
+        refund.operationId,
+        options.vendorTreasuryToken,
+        origin,
+      )
+    : (refund.state ?? "ACCEPTED");
+
+  // Last, because a withdrawal pays out the vendor's whole remaining credit: running it first would
+  // leave nothing for a credit-backed refund to draw on.
+  const withdrawal = await post(
+    options.relayerUrl,
+    `/v1/vendors/${vendorId}/withdrawals`,
+    { destinationVersion: destinationVersion.toString() },
+    {
+      authorization: `Bearer ${options.vendorTreasuryToken}`,
+      "idempotency-key": `withdraw:${vendorId}:${runId}`,
+    },
+    origin,
   );
 
   return {
     kind: "treasury",
     channelId,
     paymentId,
-    reclaimState: reclaim.state ?? "ACCEPTED",
-    withdrawalState: withdrawal.state ?? "ACCEPTED",
-    refundState: refund.state ?? "ACCEPTED",
+    reclaimState: reclaim.operationId
+      ? await awaitOperation(
+          options.relayerUrl,
+          "financial-operations",
+          reclaim.operationId,
+          session,
+          origin,
+        )
+      : (reclaim.state ?? "ACCEPTED"),
+    withdrawalState: withdrawal.operationId
+      ? await awaitOperation(
+          options.relayerUrl,
+          "vendor-financial-operations",
+          withdrawal.operationId,
+          options.vendorTreasuryToken,
+          origin,
+        )
+      : (withdrawal.state ?? "ACCEPTED"),
+    refundState,
   };
 }

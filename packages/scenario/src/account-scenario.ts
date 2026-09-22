@@ -46,13 +46,26 @@ export type AccountScenarioResult = {
 };
 
 /** Builds the local Anvil chain definition bound to the scenario's RPC endpoint. */
-export function chainFor(rpcUrl: string) {
+export function chainFor(rpcUrl: string, chainId = 31_337) {
   return defineChain({
-    id: 31_337,
-    name: "Local Anvil",
+    id: chainId,
+    name: chainId === 31_337 ? "Local Anvil" : `Chain ${chainId}`,
     nativeCurrency: { name: "Native token", symbol: "NATIVE", decimals: 18 },
     rpcUrls: { default: { http: [rpcUrl] } },
   });
+}
+
+/**
+ * Resolves the chain definition by asking the endpoint which chain it serves.
+ *
+ * The identifier is not cosmetic. It is signed into voucher and refund-intent digests and into the
+ * transaction's own replay protection, so assuming the local development chain produces signatures
+ * that a public chain's contracts reject as invalid — correctly, since they authorize an action on a
+ * different chain. Reading it is the only way to be right against both.
+ */
+export async function resolveChainFor(rpcUrl: string) {
+  const chainId = await createPublicClient({ transport: http(rpcUrl) }).getChainId();
+  return chainFor(rpcUrl, chainId);
 }
 
 /**
