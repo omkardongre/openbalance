@@ -8,9 +8,12 @@ import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
 import { EventRegistry } from "./EventRegistry.sol";
 import { SettlementLedger } from "./SettlementLedger.sol";
 import { PaymentTypes } from "./PaymentTypes.sol";
+import {
+    ReentrancyGuardTransient
+} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
 
 /// @notice Commits payer-bound terminal intents and exact event settlement atomically.
-contract ExactPayRouter {
+contract ExactPayRouter is ReentrancyGuardTransient {
     using SafeERC20 for IERC20;
 
     bytes32 private constant DOMAIN_TYPE = keccak256(
@@ -36,13 +39,11 @@ contract ExactPayRouter {
     SettlementLedger public immutable ledger;
     IERC20 public immutable asset;
     mapping(bytes32 paymentId => PaymentState) public paymentStates;
-    bool private entered;
 
     error InvalidIntent();
     error InvalidTerminalSignature();
     error InvalidRefundAuthorization();
     error PaymentResolved();
-    error Reentrant();
     event PaymentCommitted(
         bytes32 indexed paymentId,
         address indexed payer,
@@ -72,13 +73,6 @@ contract ExactPayRouter {
         asset = IERC20(registry.asset());
     }
 
-    modifier locked() {
-        if (entered) revert Reentrant();
-        entered = true;
-        _;
-        entered = false;
-    }
-
     function eventId() external view returns (bytes32) {
         return registry.eventId();
     }
@@ -92,7 +86,10 @@ contract ExactPayRouter {
         return (intentDigest(intent), intent.asset, intent.grossUnits, intent.payerAccount);
     }
 
-    function pay(bytes calldata encodedIntent, bytes calldata terminalSignature) external locked {
+    function pay(bytes calldata encodedIntent, bytes calldata terminalSignature)
+        external
+        nonReentrant
+    {
         PaymentTypes.Intent memory intent = abi.decode(encodedIntent, (PaymentTypes.Intent));
         _validateBase(intent);
         if (intent.payerAccount != msg.sender) revert InvalidIntent();
@@ -159,7 +156,7 @@ contract ExactPayRouter {
 
     function cancel(bytes calldata encodedIntent, bytes calldata terminalSignature)
         external
-        locked
+        nonReentrant
     {
         PaymentTypes.Intent memory intent = abi.decode(encodedIntent, (PaymentTypes.Intent));
         _validateDomain(intent);
@@ -175,7 +172,7 @@ contract ExactPayRouter {
 
     function refund(PaymentTypes.RefundIntent calldata intent, bytes calldata vendorSignature)
         external
-        locked
+        nonReentrant
     {
         _validateRefundDomain(intent);
         address vendorAuthority = _validateRefundPayment(intent);

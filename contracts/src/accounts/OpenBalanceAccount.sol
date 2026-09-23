@@ -9,6 +9,9 @@ import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.s
 import { IERC1271 } from "@openzeppelin/contracts/interfaces/IERC1271.sol";
 import { StrictWebAuthn } from "../StrictWebAuthn.sol";
 import { ResilienceVault } from "../payments/ResilienceVault.sol";
+import {
+    ReentrancyGuardTransient
+} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
 
 interface IExactPayRouter {
     function eventId() external view returns (bytes32);
@@ -22,7 +25,7 @@ interface IExactPayRouter {
 }
 
 /// @notice Immutable account ownership core. Any caller may relay an authorized command.
-contract OpenBalanceAccount is IERC1271 {
+contract OpenBalanceAccount is IERC1271, ReentrancyGuardTransient {
     using SafeERC20 for IERC20;
 
     struct Key {
@@ -85,7 +88,6 @@ contract OpenBalanceAccount is IERC1271 {
     bytes4 private constant INVALID_SIGNATURE = 0xffffffff;
     address public immutable factory;
     bool private initialized;
-    bool private entered;
     Ownership public ownership;
     bytes32 public rpIdHash;
     string public origin;
@@ -99,7 +101,6 @@ contract OpenBalanceAccount is IERC1271 {
     error InvalidPolicy();
     error Unauthorized();
     error Expired();
-    error Reentrant();
     event OwnershipChanged(uint256 indexed epoch, bytes32 ownershipHash);
     event CommandExecuted(bytes32 indexed digest, bytes32 indexed action);
     event Withdrawn(address indexed asset, address indexed recipient, uint256 amount);
@@ -132,13 +133,6 @@ contract OpenBalanceAccount is IERC1271 {
     constructor() {
         factory = msg.sender;
         initialized = true;
-    }
-
-    modifier locked() {
-        if (entered) revert Reentrant();
-        entered = true;
-        _;
-        entered = false;
     }
 
     function initialize(Ownership calldata owners, bytes32 rp, string calldata site) external {
@@ -183,7 +177,7 @@ contract OpenBalanceAccount is IERC1271 {
         uint256 deadline,
         bool backup,
         WebAuthn.WebAuthnAuth calldata auth
-    ) external locked {
+    ) external nonReentrant {
         if (
             recipient == address(0) || recipient == address(this) || amount == 0
                 || asset.code.length == 0
@@ -201,7 +195,7 @@ contract OpenBalanceAccount is IERC1271 {
         uint256 deadline,
         bool backup,
         WebAuthn.WebAuthnAuth calldata auth
-    ) external locked {
+    ) external nonReentrant {
         _validate(owners);
         _authorize(ROTATE, keccak256(abi.encode(owners)), deadline, backup, auth);
         _replace(owners);
@@ -214,7 +208,7 @@ contract OpenBalanceAccount is IERC1271 {
         uint256 deadline,
         bool backup,
         WebAuthn.WebAuthnAuth calldata auth
-    ) external locked {
+    ) external nonReentrant {
         if (
             validator == address(0) || validator == address(this)
                 || (enabled && validator.code.length == 0)
@@ -232,7 +226,7 @@ contract OpenBalanceAccount is IERC1271 {
         uint256 deadline,
         bool backup,
         WebAuthn.WebAuthnAuth calldata auth
-    ) external locked {
+    ) external nonReentrant {
         if (router.code.length == 0) revert InvalidPolicy();
         (bytes32 intentDigest, address token, uint256 gross, address payer) =
             IExactPayRouter(router).quote(intent);
@@ -252,7 +246,7 @@ contract OpenBalanceAccount is IERC1271 {
         uint256 deadline,
         bool backup,
         WebAuthn.WebAuthnAuth calldata auth
-    ) external locked {
+    ) external nonReentrant {
         if (router.code.length == 0) revert InvalidPolicy();
         (bytes32 intentDigest,,, address payer) = IExactPayRouter(router).quote(intent);
         if (payer != address(this)) revert InvalidPolicy();
@@ -268,7 +262,7 @@ contract OpenBalanceAccount is IERC1271 {
         uint256 deadline,
         bool backup,
         WebAuthn.WebAuthnAuth calldata auth
-    ) external locked {
+    ) external nonReentrant {
         if (vault.code.length == 0) revert InvalidPolicy();
         (bytes32 termsHash, address token, uint256 reserveUnits, address originalAccount) =
             ResilienceVault(vault).quoteChannel(config);
@@ -298,7 +292,7 @@ contract OpenBalanceAccount is IERC1271 {
         uint256 deadline,
         bool backup,
         WebAuthn.WebAuthnAuth calldata auth
-    ) external locked {
+    ) external nonReentrant {
         if (
             config.sessionId == 0 || !P256.isValidPublicKey(config.signer.x, config.signer.y)
                 || config.eventId == 0 || config.router.code.length == 0
@@ -343,7 +337,7 @@ contract OpenBalanceAccount is IERC1271 {
         uint256 deadline,
         bool backup,
         WebAuthn.WebAuthnAuth calldata auth
-    ) external locked {
+    ) external nonReentrant {
         OnlineSession storage session = onlineSessions[sessionId];
         if (!session.active || session.revision != expectedRevision) revert InvalidPolicy();
         _authorize(
@@ -365,7 +359,7 @@ contract OpenBalanceAccount is IERC1271 {
         bytes calldata terminalSignature,
         bytes32 r,
         bytes32 s
-    ) external locked {
+    ) external nonReentrant {
         OnlineSession storage session = onlineSessions[sessionId];
         if (
             !session.active || session.accountEpoch != epoch || block.timestamp < session.validAfter
@@ -462,7 +456,7 @@ contract OpenBalanceAccount is IERC1271 {
     /// @notice EIP-712 recovery can be submitted without the passkey origin or platform relayer.
     function recover(Ownership calldata owners, uint256 deadline, bytes calldata signature)
         external
-        locked
+        nonReentrant
     {
         _validate(owners);
         if (block.timestamp >= deadline) revert Expired();

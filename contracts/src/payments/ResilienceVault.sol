@@ -6,9 +6,12 @@ import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.s
 import { ECDSA } from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import { EventRegistry } from "./EventRegistry.sol";
 import { SettlementLedger } from "./SettlementLedger.sol";
+import {
+    ReentrancyGuardTransient
+} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
 
 /// @notice Fully collateralized terminal-scoped reserves with permissionless expiry return.
-contract ResilienceVault {
+contract ResilienceVault is ReentrancyGuardTransient {
     using SafeERC20 for IERC20;
 
     struct ChannelConfig {
@@ -75,7 +78,6 @@ contract ResilienceVault {
     SettlementLedger public immutable ledger;
     IERC20 public immutable asset;
     uint256 public totalReserved;
-    bool private entered;
     mapping(bytes32 channelId => ChannelConfig config) private channelConfigs;
     mapping(bytes32 channelId => Channel channel) private channels;
     mapping(address originalAccount => uint256 amount) public reservedFor;
@@ -85,7 +87,6 @@ contract ResilienceVault {
     error InvalidAttendeeSignature();
     error InvalidTerminalSignature();
     error AlreadyExists();
-    error Reentrant();
     event ChannelOpened(
         bytes32 indexed channelId,
         address indexed originalAccount,
@@ -117,13 +118,6 @@ contract ResilienceVault {
         asset = IERC20(registry.asset());
     }
 
-    modifier locked() {
-        if (entered) revert Reentrant();
-        entered = true;
-        _;
-        entered = false;
-    }
-
     function eventId() external view returns (bytes32) {
         return registry.eventId();
     }
@@ -139,7 +133,7 @@ contract ResilienceVault {
             (channelTermsHash(config, msg.sender), address(asset), config.reserveUnits, msg.sender);
     }
 
-    function openChannel(ChannelConfig calldata config) external locked {
+    function openChannel(ChannelConfig calldata config) external nonReentrant {
         _validateConfig(config);
         if (channelConfigs[config.channelId].channelId != 0) revert AlreadyExists();
         (
@@ -181,7 +175,7 @@ contract ResilienceVault {
         Voucher calldata voucher,
         bytes calldata attendeeSignature,
         bytes calldata terminalSignature
-    ) external locked {
+    ) external nonReentrant {
         ChannelConfig storage config = channelConfigs[voucher.channelId];
         Channel storage channel = channels[voucher.channelId];
         bytes32 digest = voucherDigest(voucher);
@@ -227,7 +221,7 @@ contract ResilienceVault {
         );
     }
 
-    function reclaim(bytes32 channelId) external locked returns (uint256 returnedUnits) {
+    function reclaim(bytes32 channelId) external nonReentrant returns (uint256 returnedUnits) {
         ChannelConfig storage config = channelConfigs[channelId];
         Channel storage channel = channels[channelId];
         if (config.channelId == 0 || channel.reclaimed || block.timestamp < config.submitUntil) {

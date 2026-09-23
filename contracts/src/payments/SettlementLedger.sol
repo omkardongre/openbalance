@@ -4,9 +4,16 @@ pragma solidity 0.8.37;
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
+import {
+    ReentrancyGuardTransient
+} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
 
 /// @notice Custody-backed, fixed-destination beneficiary credits for one event asset.
-contract SettlementLedger {
+/// @dev The reentrancy guard uses EIP-1153 transient storage so the lock never occupies a
+/// persistent slot. A persistent lock slot is written by every call and therefore appears as a
+/// write-write conflict to Monad's optimistic parallel executor, serialising otherwise
+/// independent payments.
+contract SettlementLedger is ReentrancyGuardTransient {
     using SafeERC20 for IERC20;
 
     struct PaymentRecord {
@@ -27,7 +34,6 @@ contract SettlementLedger {
     address public router;
     address public vault;
     uint256 public totalLiability;
-    bool private entered;
     mapping(bytes32 beneficiaryId => address destination) public beneficiaryDestinations;
     mapping(bytes32 beneficiaryId => uint256 amount) public credits;
     mapping(bytes32 paymentId => PaymentRecord) public payments;
@@ -38,7 +44,6 @@ contract SettlementLedger {
     error AlreadyExists();
     error Insolvent();
     error NothingToWithdraw();
-    error Reentrant();
     event RouterBound(address indexed router);
     event VaultBound(address indexed vault);
     event PaymentCredited(bytes32 indexed paymentId, address indexed payer, uint256 gross);
@@ -56,13 +61,6 @@ contract SettlementLedger {
         registry = registry_;
         asset = IERC20(asset_);
         binder = msg.sender;
-    }
-
-    modifier locked() {
-        if (entered) revert Reentrant();
-        entered = true;
-        _;
-        entered = false;
     }
 
     function bindRouter(address router_) external {
@@ -160,7 +158,7 @@ contract SettlementLedger {
         uint256 refundUnits,
         uint256 cumulativeRefundUnits,
         uint256 vendorCreditUnits
-    ) external locked {
+    ) external nonReentrant {
         if (msg.sender != router) revert Unauthorized();
         PaymentRecord storage payment = payments[paymentId];
         bytes32 vendorBeneficiaryId = payment.vendorBeneficiaryId;
@@ -218,7 +216,12 @@ contract SettlementLedger {
             ) revert InvalidPolicy();
             address current = beneficiaryDestinations[beneficiaryIds[i]];
             if (current != address(0) && current != destinations[i]) revert InvalidPolicy();
-            beneficiaryDestinations[beneficiaryIds[i]] = destinations[i];
+            // Only write on first binding. Destinations are immutable once set, so rewriting the
+            // same value is a no-op that still registers as a storage write and would make every
+            // payment for this beneficiary conflict under optimistic parallel execution.
+            if (current == address(0)) {
+                beneficiaryDestinations[beneficiaryIds[i]] = destinations[i];
+            }
             credits[beneficiaryIds[i]] += amounts[i];
         }
         totalLiability += gross;
@@ -236,7 +239,7 @@ contract SettlementLedger {
         emit PaymentCredited(paymentId, payer, gross);
     }
 
-    function withdrawFor(bytes32 beneficiaryId) external locked returns (uint256 amount) {
+    function withdrawFor(bytes32 beneficiaryId) external nonReentrant returns (uint256 amount) {
         address destination = beneficiaryDestinations[beneficiaryId];
         amount = credits[beneficiaryId];
         if (destination == address(0) || amount == 0) revert NothingToWithdraw();
