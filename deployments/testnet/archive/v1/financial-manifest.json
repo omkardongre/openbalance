@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "chainId": 10143,
+  "events": [
+    {
+      "eventId": "0x8b1e063dcbd16a795ae9978f60d5f8e92dee63e5762ea2fb9c6170f4f8b9936a",
+      "router": "0xE2d9e858d9CDa2e137BaC8ab7D6878e4B3a9cd48",
+      "vault": "0xB407dA9e84B1DA9091837AEDdCB84d91Bb96eF43",
+      "ledger": "0xE4bdB9b42688e6C80D6EAC722c293DaEf58C97D8",
+      "asset": "0x534b2f3A21130d7a60830c2Df862319e593943A3",
+      "deploymentBlock": "64214896"
+    }
+  ]
+}

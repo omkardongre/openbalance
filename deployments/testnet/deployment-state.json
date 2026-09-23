@@ -2,20 +2,20 @@
   "chainId": 10143,
   "deployer": "0xA9d0D013f0d541d2FF96ab254Bef318787f80F83",
   "asset": "0x534b2f3A21130d7a60830c2Df862319e593943A3",
-  "eventLabel": "openbalance:testnet:event:1",
+  "eventLabel": "openbalance:testnet:event:2",
   "riskOperator": "0xA9d0D013f0d541d2FF96ab254Bef318787f80F83",
   "maximumFeeBps": 500,
   "accountFactory": {
-    "address": "0x6003785770b668B742e37cD5c519ef7Ef3554BbC",
-    "transactionHash": "0xe2a4b03907990101e21fc53d066c689637f0d5fd4851cefc8bf53e6c83a3f4e6"
+    "address": "0x26F40f1Bf42fAe9bE48A8b3102bc28649004714e",
+    "transactionHash": "0xc261b35bd1adbffc60f035a5639ffdeffeda9b17168dea39044093255cfc89ef"
   },
   "eventFactory": {
-    "address": "0xf45FE7551250400AD41f666d3bb42482642bd470",
-    "transactionHash": "0x127cd33b228f3e08ea3f57843df2d0e19ef8a58548effd2e5532199d4529f654"
+    "address": "0xb052f9D827777B5C912a55954e7a58B3EAB3c281",
+    "transactionHash": "0x628ef093f6e4e90ac414618f72b0f2cd474b16fcf27eae6dc7a63b84cc8c6e17"
   },
   "event": {
-    "eventId": "0x8b1e063dcbd16a795ae9978f60d5f8e92dee63e5762ea2fb9c6170f4f8b9936a",
-    "transactionHash": "0xf0c8bd3dc9944885c27b888807f32e02e7386d7a2ba8273a874c83b02f2c1b20",
-    "blockNumber": "64214896"
+    "eventId": "0x6d4906e4269fcb569b16c397879fa0e5e0a0e18db1607af48287005d6ee8acc3",
+    "transactionHash": "0x8eb9c5584e09a326d89a98bc192264fc720b86ea53b037371bdafe4c7bf5641a",
+    "blockNumber": "65010301"
   }
 }

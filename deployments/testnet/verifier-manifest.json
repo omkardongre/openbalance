@@ -1,21 +1,21 @@
 {
   "chainId": 10143,
-  "eventId": "0x8b1e063dcbd16a795ae9978f60d5f8e92dee63e5762ea2fb9c6170f4f8b9936a",
+  "eventId": "0x6d4906e4269fcb569b16c397879fa0e5e0a0e18db1607af48287005d6ee8acc3",
   "asset": "0x534b2f3A21130d7a60830c2Df862319e593943A3",
   "registry": {
-    "address": "0xcfC1f72a27c09FBE72F7f23428E85DB7D1Ab5eae",
-    "runtimeCodeHash": "0xed88e4741a8a577b38bba60c5de1707d79a5989faabfdf2c222e9fb85379f68d"
+    "address": "0x4bD8E4386e6a3DB1c63b145D812CD7eFE0bd9485",
+    "runtimeCodeHash": "0x4015ddd86774ed37cde48a663f99c698345dc36070d7d56423bd77c18283e25f"
   },
   "ledger": {
-    "address": "0xE4bdB9b42688e6C80D6EAC722c293DaEf58C97D8",
-    "runtimeCodeHash": "0x8f59ad72f2fdc1c4d9df6f18f3f7eb7923bc0f694bfdabbc85645050698f8795"
+    "address": "0xecCc97B6fcaAbbC5071d2BaE80bc47F12A469FA8",
+    "runtimeCodeHash": "0x0831bd615bc8f28ef2feb65d58aefe88a01cc2cc6af16e500ace361c46fa42ef"
   },
   "router": {
-    "address": "0xE2d9e858d9CDa2e137BaC8ab7D6878e4B3a9cd48",
-    "runtimeCodeHash": "0x1775dac6ed5b2cfed65969906c71525bfc78c2402b4b40c938653fa7b1f9a029"
+    "address": "0x6e83eecB0DA3b6366e8F4ee8E1Fa8FB39f4e31D2",
+    "runtimeCodeHash": "0x80c4db515c9a9f7fff395f94e68c6aaa166987ca453ea973768b9e4388088d48"
   },
   "vault": {
-    "address": "0xB407dA9e84B1DA9091837AEDdCB84d91Bb96eF43",
-    "runtimeCodeHash": "0x67174a73d5847ed1a4ec6972127264cfa5fec0895b9feaff06a19e3d79ca6b35"
+    "address": "0x1537AdeD24e15fddC773172C263335B456Ae2E5A",
+    "runtimeCodeHash": "0x7f39c89259151c1167048c8ec213ebf18dffc5c2d2c9ffc7239a1d0d6d090cf1"
   }
 }

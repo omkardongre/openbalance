@@ -1,8 +1,8 @@
 {
   "version": 1,
   "chainId": 10143,
-  "factory": "0x6003785770b668B742e37cD5c519ef7Ef3554BbC",
-  "factoryCodeHash": "0xdc37425b7e4488cb0045e0c8da1fbb1a9e5c6206fc54f6aab4940135499d6e83",
-  "implementation": "0xA7106336231D83147BB7C9Ab1bc271cB06fE5266",
-  "implementationCodeHash": "0xf97943564fbdbdf318a307ff7ec1d3db555b76251327478ccb53e623145685fe"
+  "factory": "0x26F40f1Bf42fAe9bE48A8b3102bc28649004714e",
+  "factoryCodeHash": "0xbc5fe4c4f79dec3820224a8ebf880974c65b0b45baf2cf6fce867d71615a305a",
+  "implementation": "0xAd5A30F795F9D2B92d7Ed49fdf7F63EAD34d5481",
+  "implementationCodeHash": "0xf9cb31e402c57093e2e1b97a8d11b5b98b8829ad9acb6814fb40d378a8b5bd7e"
 }

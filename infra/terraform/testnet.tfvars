@@ -18,16 +18,23 @@ environment    = "testnet"
 enabled_processes = ["api", "relayer", "web", "indexer", "financial-worker"]
 
 # Public chain facts, re-verified against deployed bytecode at process startup.
+#
+# This is the v2 generation. v1 was superseded by the payment-path contention change (ARCHITECTURE
+# §8.4): new child bytecode required new factories, which required a new event, so the addresses
+# rotated rather than being patched. The v1 addresses remain recorded in
+# `deployments/testnet/archive/v1/`. Values here must match
+# `deployments/testnet/financial-manifest.json`; the services re-derive code hashes at startup and
+# refuse to serve on drift, so a stale value fails closed rather than serving the wrong ledger.
 chain = {
   id               = 10143
   name             = "Monad Testnet"
-  event_id         = "0x8b1e063dcbd16a795ae9978f60d5f8e92dee63e5762ea2fb9c6170f4f8b9936a"
-  router           = "0xE2d9e858d9CDa2e137BaC8ab7D6878e4B3a9cd48"
-  ledger           = "0xE4bdB9b42688e6C80D6EAC722c293DaEf58C97D8"
-  vault            = "0xB407dA9e84B1DA9091837AEDdCB84d91Bb96eF43"
+  event_id         = "0x6d4906e4269fcb569b16c397879fa0e5e0a0e18db1607af48287005d6ee8acc3"
+  router           = "0x6e83eecB0DA3b6366e8F4ee8E1Fa8FB39f4e31D2"
+  ledger           = "0xecCc97B6fcaAbbC5071d2BaE80bc47F12A469FA8"
+  vault            = "0x1537AdeD24e15fddC773172C263335B456Ae2E5A"
   asset            = "0x534b2f3A21130d7a60830c2Df862319e593943A3"
   asset_decimals   = 6
-  deployment_block = "64214896"
+  deployment_block = "65010301"
 }
 
 api_image         = "us-central1-docker.pkg.dev/openbalance-hackathon/openbalance-testnet/api@sha256:97ef35e049792b9ba5504dac7191342cfeecbd3069f840bd1029459f8810e93b"

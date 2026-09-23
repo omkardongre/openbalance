@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
   "chainId": 10143,
-  "eventId": "0x8b1e063dcbd16a795ae9978f60d5f8e92dee63e5762ea2fb9c6170f4f8b9936a",
-  "registry": "0xcfC1f72a27c09FBE72F7f23428E85DB7D1Ab5eae",
+  "eventId": "0x6d4906e4269fcb569b16c397879fa0e5e0a0e18db1607af48287005d6ee8acc3",
+  "registry": "0x4bD8E4386e6a3DB1c63b145D812CD7eFE0bd9485",
   "organizer": "0xA9d0D013f0d541d2FF96ab254Bef318787f80F83",
   "configVersion": 1,
   "organizerFeeBps": 200,
