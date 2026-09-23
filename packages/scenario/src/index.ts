@@ -27,6 +27,24 @@ export {
   runCheckoutScenario,
 } from "./checkout-scenario.js";
 export {
+  type ContentionGraphOptions,
+  type ContentionGraphResult,
+  type PaymentAccessSet,
+  runContentionGraphScenario,
+} from "./contention-graph-scenario.js";
+export {
+  type ContentionEventContext,
+  type ContentionObservation,
+  type ContentionScenarioOptions,
+  type ContentionScenarioResult,
+  type ContentionTier,
+  type PaymentPreparation,
+  type PreparedPayment,
+  prepareContentionPayments,
+  runContentionScenario,
+  setupContentionEvent,
+} from "./contention-scenario.js";
+export {
   type OfflineReserveContext,
   type OfflineReserveOptions,
   type OfflineReserveResult,

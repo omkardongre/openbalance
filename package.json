@@ -30,6 +30,8 @@
     "testnet:provision-event": "node scripts/provision-testnet-event.mjs",
     "testnet:provision-checkout": "node scripts/provision-testnet-checkout.mjs",
     "test:tooling": "node --test scripts/*.test.mjs",
+    "measure:contention": "node scripts/measure-contention.mjs",
+    "measure:conflict-graph": "node scripts/measure-conflict-graph.mjs",
     "workload": "node scripts/run-payment-workload.mjs",
     "workload:slo": "node scripts/slo-workload.mjs",
     "build": "turbo run build && node scripts/foundry.mjs forge build --root contracts",

@@ -2,6 +2,8 @@ import type { Hex } from "viem";
 import { runAccountScenario } from "./account-scenario.js";
 import { runApiEnrollment, runApiFunding, runApiScenario } from "./api-scenario.js";
 import { runCheckoutScenario } from "./checkout-scenario.js";
+import { runContentionGraphScenario } from "./contention-graph-scenario.js";
+import { runContentionScenario } from "./contention-scenario.js";
 import { runOfflineReserveScenario } from "./event-scenario.js";
 import { runFaucetScenario } from "./faucet-scenario.js";
 import { runRelayProcessScenario } from "./relay-scenario.js";
@@ -24,6 +26,8 @@ const kinds = [
   "api-fund",
   "treasury",
   "checkout",
+  "contention",
+  "contention-graph",
 ];
 const labels: Record<string, string> = {
   account: "account-ownership",
@@ -35,6 +39,8 @@ const labels: Record<string, string> = {
   "api-fund": "api-funding",
   treasury: "treasury",
   checkout: "checkout-online-payment",
+  contention: "payment-contention",
+  "contention-graph": "payment-conflict-graph",
 };
 /**
  * Renders a failure with its `cause` chain and any `AggregateError` members. A bare message is not
@@ -200,9 +206,29 @@ if (!rpcUrl || !deployerPrivateKey || !/^0x[0-9a-fA-F]{64}$/.test(deployerPrivat
                           ? { orderReference: process.env.SCENARIO_ORDER_REFERENCE }
                           : {}),
                       })
-                  : kind === "offline"
-                    ? () => runOfflineReserveScenario(options)
-                    : () => runAccountScenario(options);
+                  : kind === "contention"
+                    ? () =>
+                        runContentionScenario({
+                          ...options,
+                          payerCounts: (process.env.SCENARIO_PAYER_COUNTS ?? "10")
+                            .split(",")
+                            .map((value) => Number(value.trim())),
+                          ...(process.env.SCENARIO_GROSS_UNITS
+                            ? { grossUnits: BigInt(process.env.SCENARIO_GROSS_UNITS) }
+                            : {}),
+                        })
+                    : kind === "contention-graph"
+                      ? () =>
+                          runContentionGraphScenario({
+                            ...options,
+                            payerCount: Number(process.env.SCENARIO_PAYER_COUNTS ?? "16"),
+                            ...(process.env.SCENARIO_GROSS_UNITS
+                              ? { grossUnits: BigInt(process.env.SCENARIO_GROSS_UNITS) }
+                              : {}),
+                          })
+                      : kind === "offline"
+                        ? () => runOfflineReserveScenario(options)
+                        : () => runAccountScenario(options);
   run().then(
     (result) =>
       process.stdout.write(
