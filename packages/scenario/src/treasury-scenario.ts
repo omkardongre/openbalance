@@ -1,6 +1,7 @@
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import {
   accountAbi,
+  encodeOfflineVoucher,
   exactPayRouterAbi,
   type RefundIntent,
   refundIntentDigest,
@@ -103,6 +104,23 @@ type JourneyState = {
   authenticator: VirtualAuthenticatorState;
 };
 
+/**
+ * `fetch` that waits out the services' per-client rate limit and cold starts. The limiter rejects a request before
+ * any handler runs, so a 429 means nothing was executed and repeating it is safe for any method.
+ * A journey against a public chain waits minutes for finality and polls throughout, which is enough
+ * to exhaust a per-minute budget without anything being wrong.
+ */
+async function pacedFetch(input: string, init: RequestInit, attempt = 0): Promise<Response> {
+  const response = await fetch(input, { ...init, signal: AbortSignal.timeout(30_000) });
+  // A 503 is the platform refusing a request an instance was not ready for (a scale-from-zero cold
+  // start); like a 429 it never reached a handler. Every write here also carries an idempotency key.
+  if ((response.status !== 429 && response.status !== 503) || attempt >= 5) return response;
+  const seconds = Number(response.headers.get("retry-after"));
+  const wait = Number.isFinite(seconds) && seconds > 0 ? Math.min(seconds, 60) : 10;
+  await new Promise((resolve) => setTimeout(resolve, wait * 1_000));
+  return pacedFetch(input, init, attempt + 1);
+}
+
 async function post(
   url: string,
   path: string,
@@ -110,11 +128,10 @@ async function post(
   headers: Record<string, string>,
   origin: string,
 ) {
-  const response = await fetch(`${url}${path}`, {
+  const response = await pacedFetch(`${url}${path}`, {
     method: "POST",
     headers: { "content-type": "application/json", origin, ...headers },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(30_000),
   });
   const payload = await response.json().catch(() => ({}));
   if (response.status !== 202)
@@ -197,32 +214,40 @@ async function awaitOperation(
 ) {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
-    const response = await fetch(`${relayerUrl}/v1/${collection}/${operationId}`, {
+    const response = await pacedFetch(`${relayerUrl}/v1/${collection}/${operationId}`, {
       headers: { authorization: `Bearer ${token}`, origin },
-      signal: AbortSignal.timeout(30_000),
     });
     const body = (await response.json().catch(() => ({}))) as { state?: string };
     if (!response.ok)
       throw new Error(`operation ${operationId} read failed with ${response.status}`);
     if (body.state === "FINALIZED") return body.state;
-    if (body.state === "FAILED" || body.state === "EXPIRED")
+    if (body.state === "FAILED" || body.state === "EXPIRED" || body.state === "QUARANTINED")
       throw new Error(`operation ${operationId} ended in ${body.state}`);
     if (Date.now() >= deadline)
       throw new Error(`operation ${operationId} still ${body.state} after ${timeoutMs}ms`);
-    await new Promise((resolve) => setTimeout(resolve, 3_000));
+    await new Promise((resolve) => setTimeout(resolve, 6_000));
   }
 }
 
 /**
- * Drives the vendor and attendee money operations through the running relayer: opens a reserve
- * channel from the enrolled account, settles a voucher to create vendor credit, then exercises
- * permissionless reclaim, a fixed-destination withdrawal and a vendor-signed refund.
+ * Drives the vendor and attendee money operations through the running relayer, every one of them
+ * sponsored: opens a reserve channel from the enrolled account, settles a dual-signed voucher to
+ * create vendor credit, then exercises reclaim, a vendor-signed refund and a fixed-destination
+ * withdrawal. The deployer wallet only provisions registry terms when none are supplied.
  */
 export async function runTreasuryScenario(
   options: TreasuryScenarioOptions,
 ): Promise<TreasuryScenarioResult> {
   const state = JSON.parse(await readFile(options.statePath, "utf8")) as JourneyState;
   const authenticator = VirtualAuthenticator.restore(state.authenticator);
+  // Each assertion advances the signature counter the service records, so the state file is written
+  // after every one; a run that failed later would otherwise leave every restore refused as a replay.
+  const persist = () =>
+    writeFile(
+      options.statePath,
+      JSON.stringify({ ...state, authenticator: authenticator.toJSON() }),
+      "utf8",
+    );
   const chain = await resolveChainFor(options.rpcUrl);
   const origin = options.origin ?? "http://localhost:3000";
   const runId = options.runId ?? "treasury";
@@ -238,7 +263,6 @@ export async function runTreasuryScenario(
   const { registry, vault, router, token, eventId } = options.event;
 
   const registryArtifact = loadArtifact("EventRegistry.sol", "EventRegistry");
-  const vaultArtifact = loadArtifact("ResilienceVault.sol", "ResilienceVault");
   const send = async (call: {
     address: Address;
     abi: readonly unknown[];
@@ -374,8 +398,34 @@ export async function runTreasuryScenario(
     args: [OPEN_CHANNEL, openTerms, openDeadline],
   })) as Hex;
   const assertion = authenticator.assert(openDigest);
-  await send({
-    address: state.account,
+  await persist();
+  const session = await pacedFetch(`${options.apiUrl}/v1/accounts/authentication-challenges`, {
+    method: "POST",
+    headers: { "content-type": "application/json", origin },
+    body: JSON.stringify({ account: state.account }),
+  }).then(async (response) => {
+    const challenge = (await response.json()) as {
+      challengeToken: string;
+      options: { challenge: string };
+    };
+    if (!response.ok) throw new Error(`authentication challenge failed: ${response.status}`);
+    const verified = await pacedFetch(`${options.apiUrl}/v1/accounts/authentications`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin },
+      body: JSON.stringify({
+        challengeToken: challenge.challengeToken,
+        response: authenticator.authenticationBase64Url(challenge.options.challenge),
+      }),
+    });
+    await persist();
+    const body = (await verified.json()) as { sessionToken: string };
+    if (!verified.ok) throw new Error(`authentication failed: ${verified.status}`);
+    return body.sessionToken;
+  });
+
+  // Opened through the sponsored account-command route, so the attendee account holds no gas and
+  // the relayer's policy, simulation and finality checks apply exactly as they do for the web app.
+  const reserveCalldata = encodeFunctionData({
     abi: accountAbi,
     functionName: "openReserveChannel",
     args: [
@@ -394,6 +444,24 @@ export async function runTreasuryScenario(
       },
     ],
   });
+  const reserve = await post(
+    options.relayerUrl,
+    "/v1/accounts/commands",
+    { kind: "RESERVE_OPEN", calldata: reserveCalldata },
+    {
+      authorization: `Bearer ${session}`,
+      "idempotency-key": `financial:RESERVE_OPEN:${channelId}`,
+    },
+    origin,
+  );
+  if (!reserve.operationId) throw new Error("reserve open was not journaled");
+  await awaitOperation(
+    options.relayerUrl,
+    "financial-operations",
+    reserve.operationId,
+    session,
+    origin,
+  );
 
   // A voucher is only acceptable once the channel's acceptance window has opened.
   await advanceToChainTime(publicClient, acceptFrom + 1, timeControl);
@@ -422,45 +490,34 @@ export async function runTreasuryScenario(
     functionName: "voucherDigest",
     args: [voucher],
   })) as Hex;
-  await send({
-    address: vault,
-    abi: vaultArtifact.abi,
-    functionName: "settleVoucher",
-    args: [
-      voucher,
-      await channelSigner.sign({ hash: voucherDigest }),
-      await terminalSigner.sign({ hash: voucherDigest }),
-    ],
-  });
+  // Submitted through the vendor treasury's sponsored route. The vault checks both signatures, so
+  // the relayer only pays gas; it waits out the indexer's projection of the freshly opened channel.
+  const settlement = await postAwaitingProjection(
+    options.relayerUrl,
+    `/v1/reserve-channels/${channelId}/vouchers`,
+    {
+      voucher: encodeOfflineVoucher(voucher),
+      attendeeSignature: await channelSigner.sign({ hash: voucherDigest }),
+      terminalSignature: await terminalSigner.sign({ hash: voucherDigest }),
+    },
+    {
+      authorization: `Bearer ${options.vendorTreasuryToken}`,
+      "idempotency-key": `voucher:${paymentId}`,
+    },
+    origin,
+  );
+  if (!settlement.operationId) throw new Error("voucher settlement was not journaled");
+  await awaitOperation(
+    options.relayerUrl,
+    "vendor-financial-operations",
+    settlement.operationId,
+    options.vendorTreasuryToken,
+    origin,
+  );
 
   // Reclaim is only eligible once the merchant submission window has closed (§10.8), so this waits
   // past `submitUntil` rather than asking the service to relax the rule.
   await advanceToChainTime(publicClient, submitUntil + 1, timeControl);
-
-  const session = await fetch(`${options.apiUrl}/v1/accounts/authentication-challenges`, {
-    method: "POST",
-    headers: { "content-type": "application/json", origin },
-    body: JSON.stringify({ account: state.account }),
-    signal: AbortSignal.timeout(30_000),
-  }).then(async (response) => {
-    const challenge = (await response.json()) as {
-      challengeToken: string;
-      options: { challenge: string };
-    };
-    if (!response.ok) throw new Error(`authentication challenge failed: ${response.status}`);
-    const verified = await fetch(`${options.apiUrl}/v1/accounts/authentications`, {
-      method: "POST",
-      headers: { "content-type": "application/json", origin },
-      body: JSON.stringify({
-        challengeToken: challenge.challengeToken,
-        response: authenticator.authenticationBase64Url(challenge.options.challenge),
-      }),
-      signal: AbortSignal.timeout(30_000),
-    });
-    const body = (await verified.json()) as { sessionToken: string };
-    if (!verified.ok) throw new Error(`authentication failed: ${verified.status}`);
-    return body.sessionToken;
-  });
 
   const reclaim = await postAwaitingProjection(
     options.relayerUrl,

@@ -107,7 +107,7 @@ export async function runCheckoutScenario(
   const orderReference = options.orderReference ?? `ONLINE-${Date.now()}`;
   const description = options.description ?? "Flat white";
 
-  async function call<T>(base: string, path: string, init: RequestInit): Promise<T> {
+  async function call<T>(base: string, path: string, init: RequestInit, attempt = 0): Promise<T> {
     const response = await fetch(`${base}${path}`, {
       ...init,
       headers: {
@@ -119,6 +119,14 @@ export async function runCheckoutScenario(
       },
       signal: AbortSignal.timeout(30_000),
     });
+    // Status polling can outrun the per-client read limit while a payment waits for finality. A read
+    // is safe to repeat, so it waits out the advertised window; a write never is, so it still fails.
+    if (response.status === 429 && (init.method ?? "GET") === "GET" && attempt < 5) {
+      const seconds = Number(response.headers.get("retry-after"));
+      const wait = Number.isFinite(seconds) && seconds > 0 ? Math.min(seconds, 60) : 10;
+      await new Promise((resolve) => setTimeout(resolve, wait * 1_000));
+      return call<T>(base, path, init, attempt + 1);
+    }
     const body = await response.json().catch(() => ({}));
     if (!response.ok)
       throw new Error(`${path} failed with ${response.status}: ${JSON.stringify(body)}`);
@@ -284,7 +292,7 @@ export async function runCheckoutScenario(
   // Acceptance is a queued operation, not a settled payment. Only FINALIZED means the chain has it,
   // so the counter is persisted and the balance re-read after that and not before.
   const finalized = await (async () => {
-    const limit = Date.now() + 180_000;
+    const limit = Date.now() + 300_000;
     for (;;) {
       const current = await call<FinancialOperation>(
         options.relayerUrl,
@@ -292,11 +300,13 @@ export async function runCheckoutScenario(
         { method: "GET", headers: { authorization: `Bearer ${session.sessionToken}` } },
       );
       if (current.state === "FINALIZED") return current;
-      if (current.state === "FAILED" || current.failureCode)
+      // A failure code alone is not terminal: a RETRY operation carries the code of the attempt that
+      // lost its lease (for example `lease_expired` after a slow RPC read) and is picked up again.
+      if (current.state === "FAILED" || current.state === "QUARANTINED")
         throw new Error(`Payment failed: ${current.failureCode ?? current.state}`);
       if (Date.now() >= limit)
         throw new Error(`Payment was not finalized (last state: ${current.state})`);
-      await new Promise((resolve) => setTimeout(resolve, 3_000));
+      await new Promise((resolve) => setTimeout(resolve, 6_000));
     }
   })();
   if (!finalized.transactionHash || !finalized.finalizedBlockNumber)

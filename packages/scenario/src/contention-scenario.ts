@@ -756,9 +756,7 @@ async function sweepSponsors(input: {
           ...fees,
         });
         const receipt = await publicClient.waitForTransactionReceipt({ hash, timeout: 240_000 });
-        return receipt.status === "success"
-          ? { swept: value, ok: true }
-          : { swept: 0n, ok: false };
+        return receipt.status === "success" ? { swept: value, ok: true } : { swept: 0n, ok: false };
       } catch {
         return { swept: 0n, ok: false };
       }

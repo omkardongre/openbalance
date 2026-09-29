@@ -15,6 +15,29 @@ deployment, sign-in, test funding, reserve channel, voucher settlement, reclaim,
 withdrawal — is proven against those deployed services on chain. The venue relay and the integration
 worker are not deployed; see the root checklist for why each is withheld rather than pending.
 
+## Try it on Monad testnet (about 5 minutes)
+
+Everything below runs against the deployed services at `https://openbalance.countersign.site`.
+No wallet, seed phrase, or gas is needed; every transaction is sponsored and uses test USDC only.
+Use a browser with a platform passkey (Chrome, Safari, or Edge on a phone or laptop).
+
+1. **Create an account** — open `/enroll`, choose *Create passkey* and confirm it twice, then
+   *Deploy account*. Sponsorship pays the deployment; *Check account* shows the address once the
+   contract is on chain.
+2. **Get test money** — open `/account`, *Continue with passkey*, then *Fund test balance*
+   (5 USDC per request). Each account may draw at most 10 USDC in total and the faucet has a shared
+   daily budget; the page says which limit refused a request.
+3. **See it on chain** — *Refresh finalized activity* lists only finalized transitions, each with
+   its transaction hash for the Monad testnet explorer.
+4. **Check it without us** — open `/verify`, keep the public RPC or paste your own, paste
+   `deployments/testnet/verifier-manifest.json`, then *Verify deployment* and the custody check.
+   The page reads the chain directly and never calls our API.
+
+Paying at a stall and opening an outage reserve need a registered vendor terminal, which signs each
+intent with its own key; that step is shown in the demo video. Demo reserves use short windows:
+offline acceptance for 10 minutes, then 5 minutes to upload, so an unspent reserve becomes
+returnable 15 minutes after it is opened, and anyone can trigger the return from `/account`.
+
 ## Layout
 
 ```text
@@ -68,7 +91,7 @@ pnpm verify:postgres     # disposable PostgreSQL 16, migrations and focused inte
 pnpm verify:scenario     # account ownership + offline reserve scenario against live Anvil
 pnpm verify:relay        # venue relay + settlement worker process-level scenario
 pnpm verify:faucet       # test-funding faucet scenario against a live chain and PostgreSQL
-pnpm verify:system       # full concurrent harness: PostgreSQL, Anvil, API, relayer, indexer, venue relay
+pnpm verify:system       # full concurrent harness: PostgreSQL, Anvil, API, relayer, financial worker, indexer, venue relay
 pnpm workload:slo        # SLO-thresholded smoke/load/stress workload runner
 pnpm evidence:local      # checksummed local evidence bundle over the above
 ```
@@ -130,10 +153,18 @@ could widen policy from a stale file. The reserve ceilings it writes are the tig
 limits; the acceptance and submission windows come from the event config, because those are the bounds
 the contract will actually enforce.
 
+Reserve windows default to the event config's on-chain ceilings. A demo event can offer shorter
+ones with `CHECKOUT_RESERVE_ACCEPTANCE_SECONDS` and `CHECKOUT_RESERVE_SUBMISSION_SECONDS`; the
+script refuses anything under 60 seconds or above the ceiling, since the contract would reject it.
+The testnet manifest uses 600 and 300.
+
 The capability key is a MAC key rather than an identity — rotating it invalidates outstanding order
 capabilities and nothing else — so it is created once, written to the gitignored `secrets/` tree as raw
 bytes at mode 0600, and left alone on a re-run. The manifest lands in
 `deployments/testnet/checkout-manifest.json`, which carries no secrets and is committed.
+
+Terraform mounts both into the API. The manifest is published by `scripts/populate-secrets.mjs`;
+the capability key is uploaded once as raw bytes and never regenerated.
 
 Operator credentials are separate from both, and are bearer tokens rather than passkeys:
 
@@ -149,7 +180,52 @@ credential against the deployed API with `GET /v1/operations/me`, which returns 
 `checkoutPolicy` or `organizerPolicy`. Note that every mutating API request is origin-checked against
 the configured web origin, so a request made outside the browser must send that `Origin` header.
 
+### Rolling a new contract generation out to the services
+
+```bash
+GOOGLE_CLOUD_ACCOUNT=<owner account> node scripts/populate-secrets.mjs          # dry run
+GOOGLE_CLOUD_ACCOUNT=<owner account> node scripts/populate-secrets.mjs --apply  # publish manifests
+cd infra/terraform && terraform plan -var-file=testnet.tfvars -out=rollout.tfplan
+terraform apply rollout.tfplan
+```
+
+Every process reads its manifest once at startup, so publishing a new secret version changes nothing
+that is already running. Terraform stamps a digest of the committed `account-manifest.json`,
+`financial-manifest.json` and `checkout-manifest.json` on every Cloud Run revision and worker
+template, so a manifest change rolls every request service and replaces both worker VMs in the same
+apply. Publish the secrets first: a revision started before the new version exists reads the old one.
+The indexer's chain facts come from the `chain` block in `testnet.tfvars`, which must match
+`financial-manifest.json`. A new event is a new indexer stream that backfills from its deployment
+block, so finalized reads for the new event lag until it catches up.
+
+`GOOGLE_CLOUD_ACCOUNT` is required and passed to every `gcloud` call, because the ambient active
+account on a shared machine can change underneath a run. For Terraform, pin the identity the same way
+with `GOOGLE_OAUTH_ACCESS_TOKEN=$(gcloud auth print-access-token --account=<owner account>)` rather
+than relying on application-default credentials.
+
 ### Driving the journey against deployed services
+
+```bash
+node scripts/run-deployed-journey.mjs api-enroll secrets/testnet/<journey>.json
+node scripts/run-deployed-journey.mjs api-fund   secrets/testnet/<journey>.json
+node scripts/run-deployed-journey.mjs checkout   secrets/testnet/<journey>.json
+node scripts/run-deployed-journey.mjs treasury   secrets/testnet/<journey>.json
+```
+
+The runner assembles every `SCENARIO_*` input below from the committed manifests and the gitignored
+`secrets/testnet/` tree, hands keys and tokens to the scenario only through its environment, and
+redacts the RPC URL from anything the scenario prints. It generates a fresh credential identifier for
+each enrollment and a fresh run identifier for each treasury run, since a public chain and a persistent
+database remember every earlier one. The operations token must be minted for the current event's
+stream (see *Checkout enablement*); a token from an earlier generation authenticates but resolves no
+policy. `treasury` also needs a relayer vendor-treasury credential for the same event
+(`pnpm --filter @openbalance/relayer provision:vendor-treasury`, output kept under `secrets/testnet/`),
+which is a separate credential from the API operations token. Both money steps wait out a 429 or a
+cold-start 503 instead of failing, since neither reaches a handler.
+
+An account's open channels share one `maximumTotalReserve`, so a treasury run that stopped after
+opening its channel blocks the next one until that channel is reclaimed. Reclaim it permissionlessly
+once its submission window closes (`apps/web/scripts/reclaim-reserve.mjs`).
 
 The scenario package doubles as the driver for a deployed environment. `SCENARIO_KIND=api-enroll`
 enrolls a passkey and deploys the account, `api-fund` signs in and takes a faucet grant in a separate
@@ -192,7 +268,13 @@ working once established, so only calls that open a fresh connection fail. Diagn
 error's `cause`, which the scenario CLI does not print.
 
 `SCENARIO_PROVISIONED` supplies the registry records from the provisioning step instead of registering
-new ones, which also keeps the harness from holding the organizer's key. Money operations are polled to
+new ones, which also keeps the harness from holding the organizer's key. Every money operation in the
+`treasury` scenario is sponsored: the reserve is opened through `POST /v1/accounts/commands`
+(`RESERVE_OPEN`) under the attendee's passkey session, and the dual-signed voucher through
+`POST /v1/reserve-channels/:id/vouchers` under a vendor-treasury credential (`VOUCHER_SETTLE`). The
+deployer wallet only registers event terms when none are supplied, so no attendee or vendor wallet needs
+gas. Voucher submission is scoped to the vendor owning that channel's terminal in the finalized
+projection, which is also why the scenario retries while the indexer catches up. Money operations are polled to
 `FINALIZED` rather than trusted at the relayer's `202`: acceptance is a queued operation, and the
 withdrawal pays out the vendor's whole remaining credit, so a refund drawing on that credit has to have
 executed first.
@@ -215,12 +297,21 @@ policy so a released tag cannot be repointed and a digest a rollback still needs
 build time and are the deployed API/relayer URLs, so the script refuses to build it without them
 rather than producing an image that looks releasable and cannot work.
 
-Use the *deterministic* hostname, `<service>-<project number>.<region>.run.app`, not the URI the
-service resource reports. Cloud Run serves both that form and a hashed one, but only one of them can
-be the WebAuthn origin, and the API and relayer are told that origin before the web service exists —
-so a bundle built against the hashed hostname yields passkey failures that read as code defects.
-`terraform output configured_web_origin` is the authoritative value; confirm it serves before
-building, because the build bakes it in irreversibly.
+For the API and relayer URLs use the *deterministic* hostname, `<service>-<project number>.<region>.run.app`,
+not the hashed URI the service resource reports.
+
+The web app is served at `https://openbalance.countersign.site` through a global external Application
+Load Balancer (`infra/terraform/lb.tf`) with a Certificate Manager certificate issued by DNS
+authorization. Cloud Run's own domain mapping is a preview feature and is not used. Once the origin
+moves there, the web service accepts traffic only from the load balancer, so its run.app host returns
+404 rather than serving a second origin whose passkeys cannot work. Build the web image with
+`NEXT_PUBLIC_WEBAUTHN_RP_ID=openbalance.countersign.site`; `terraform output configured_web_origin`
+is the authoritative origin and the build bakes it in irreversibly.
+
+Moving to a new domain is two applies: set `web_domain`, publish the A and `_acme-challenge` CNAME
+records from `terraform output web_domain_dns_records`, wait for the certificate to be `ACTIVE`, then
+set `web_public_url` to the same origin and rebuild the web image. Changing the origin invalidates
+every passkey enrolled on the old one.
 
 `NEXT_PUBLIC_FINANCIAL_RPC_URL` must be a public RPC. Everything `NEXT_PUBLIC_*` ships to the browser,
 so passing the operational provider's authenticated endpoint would publish its key to every visitor.
@@ -268,5 +359,6 @@ throwaway probe contract whose `verifyNative` reverts if the precompile is absen
 - `FINANCIAL_GAS_LIMIT_MARGIN_BPS` stays small (default 10%) because gas is charged on the declared
   limit with no refund, so margin is both permanent overspend and inflight budget that admits no
   other transaction.
-- `pnpm verify:system` covers financial *intake* only; it does not start the financial worker, so the
-  signing and broadcast path has no process-level coverage in that harness.
+- `pnpm verify:system` starts the financial worker, so intake, signing, broadcast and finality are all
+  covered. It runs against a local chain with `FINANCIAL_FINALITY_TAG=latest`, which has no `finalized`
+  block; a public chain keeps the default.
