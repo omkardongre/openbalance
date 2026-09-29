@@ -26,7 +26,7 @@ export class VendorCommandNotFound extends Error {}
 const signature = /^0x[0-9a-fA-F]{130}$/;
 const vendorRole = keccak256(stringToHex("VENDOR"));
 
-function actorFor(identity: VendorTreasuryIdentity): string {
+export function actorFor(identity: VendorTreasuryIdentity): string {
   return `vendor-treasury:${keccak256(
     encodeAbiParameters(
       [{ type: "bytes32" }, { type: "bytes32" }, { type: "address" }],

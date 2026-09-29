@@ -28,6 +28,7 @@ import {
   VendorTreasuryAccessRejected,
   type VendorTreasuryAccessService,
 } from "./vendor-treasury-access.js";
+import { type VendorVoucherSettlementService, VoucherChannelNotFound } from "./vendor-vouchers.js";
 
 export async function buildRelayerApp(
   sponsorship: DeploymentSponsorshipService,
@@ -38,6 +39,7 @@ export async function buildRelayerApp(
     reclaims?: AttendeeReclaimService;
     treasuryAccess?: VendorTreasuryAccessService;
     treasuryCommands?: VendorFinancialCommandService;
+    voucherSettlements?: VendorVoucherSettlementService;
   },
   readiness: ReadinessCheck[] = [],
 ) {
@@ -249,6 +251,51 @@ export async function buildRelayerApp(
           return vendorCommandError(reply, error);
         }
       });
+
+      const voucherSettlements = financial.voucherSettlements;
+      if (voucherSettlements) {
+        app.post("/v1/reserve-channels/:id/vouchers", async (request, reply) => {
+          const params = z
+            .object({ id: z.string().regex(/^0x[0-9a-fA-F]{64}$/) })
+            .strict()
+            .safeParse(request.params);
+          const body = z
+            .object({
+              voucher: z
+                .string()
+                .regex(/^0x(?:[0-9a-fA-F]{2})+$/)
+                .max(4_098),
+              attendeeSignature: z.string().regex(/^0x[0-9a-fA-F]{130}$/),
+              terminalSignature: z.string().regex(/^0x[0-9a-fA-F]{130}$/),
+            })
+            .strict()
+            .safeParse(request.body);
+          const idempotencyKey = request.headers["idempotency-key"];
+          if (!params.success || !body.success || typeof idempotencyKey !== "string")
+            return reply.code(400).send({ error: "invalid_voucher_request", retryable: false });
+          try {
+            const identity = await treasuryAccess.authenticate(request.headers.authorization);
+            return reply.code(202).send(
+              await voucherSettlements.accept({
+                identity,
+                channelId: params.data.id as `0x${string}`,
+                voucher: body.data.voucher as `0x${string}`,
+                attendeeSignature: body.data.attendeeSignature as `0x${string}`,
+                terminalSignature: body.data.terminalSignature as `0x${string}`,
+                idempotencyKey,
+              }),
+            );
+          } catch (error) {
+            if (error instanceof VoucherChannelNotFound)
+              return reply.code(404).send({
+                error: "channel_not_found",
+                action: "Retry once the channel opening has finalized.",
+                retryable: true,
+              });
+            return vendorCommandError(reply, error);
+          }
+        });
+      }
 
       app.get("/v1/vendor-financial-operations/:id", async (request, reply) => {
         reply.header("Cache-Control", "private, no-store");

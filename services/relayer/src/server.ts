@@ -15,6 +15,7 @@ import { ViemFinancialManifestVerifier } from "./financial-manifest-chain.js";
 import { FinancialOperationJournal } from "./financial-operations.js";
 import { VendorFinancialCommandService } from "./vendor-commands.js";
 import { VendorTreasuryAccessService } from "./vendor-treasury-access.js";
+import { finalizedChannelReader, VendorVoucherSettlementService } from "./vendor-vouchers.js";
 
 const environment = loadRelayerEnvironment(process.env);
 const telemetry = await startTelemetry({
@@ -57,6 +58,7 @@ let financial:
       reclaims: AttendeeReclaimService;
       treasuryAccess: VendorTreasuryAccessService;
       treasuryCommands: VendorFinancialCommandService;
+      voucherSettlements: VendorVoucherSettlementService;
     }
   | undefined;
 /**
@@ -98,6 +100,13 @@ if (environment.FINANCIAL_EVENT_MANIFEST_PATH) {
     treasuryCommands: new VendorFinancialCommandService({
       journal,
       manifest,
+      maximumLifetimeSeconds: BigInt(environment.FINANCIAL_COMMAND_MAX_LIFETIME_SECONDS),
+      chainSeconds: settlementChainSeconds,
+    }),
+    voucherSettlements: new VendorVoucherSettlementService({
+      journal,
+      manifest,
+      channel: finalizedChannelReader(pool),
       maximumLifetimeSeconds: BigInt(environment.FINANCIAL_COMMAND_MAX_LIFETIME_SECONDS),
       chainSeconds: settlementChainSeconds,
     }),

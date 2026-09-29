@@ -182,6 +182,30 @@ export function expectedFinancialEvent(operation: FinancialOperation): ExpectedE
       matches: (args) => equalHex(args.channelId, operation.aggregateId),
     };
   }
+  if (operation.kind === "VOUCHER_SETTLE") {
+    let decoded: ReturnType<typeof decodeFunctionData<typeof resilienceVaultAbi>>;
+    try {
+      decoded = decodeFunctionData({ abi: resilienceVaultAbi, data: operation.calldata });
+    } catch {
+      throw new FinancialOperationIntegrityFailure("invalid_voucher_command");
+    }
+    if (decoded.functionName !== "settleVoucher")
+      throw new FinancialOperationIntegrityFailure("unexpected_voucher_command");
+    const [voucher] = decoded.args;
+    if (!equalHex(voucher.paymentId, operation.aggregateId))
+      throw new FinancialOperationIntegrityFailure("aggregate_mismatch");
+    return {
+      address: getAddress(operation.targetAddress),
+      abi: resilienceVaultAbi,
+      name: "VoucherSettled",
+      matches: (args) =>
+        equalHex(args.channelId, voucher.channelId) &&
+        equalHex(args.paymentId, voucher.paymentId) &&
+        Number(args.sequence) === voucher.sequence &&
+        args.grossUnits === voucher.grossUnits &&
+        args.cumulativeGrossUnits === voucher.cumulativeGrossUnits,
+    };
+  }
   let decoded: ReturnType<typeof decodeFunctionData<typeof settlementLedgerAbi>>;
   try {
     decoded = decodeFunctionData({ abi: settlementLedgerAbi, data: operation.calldata });
@@ -201,8 +225,18 @@ export function expectedFinancialEvent(operation: FinancialOperation): ExpectedE
 export class ViemFinancialFinalityVerifier implements FinancialFinalityVerifier {
   readonly #client;
 
-  constructor(input: { rpcUrl: string; chain: Chain }) {
+  // The commitment level an operation must reach before it is reported FINALIZED. It must be the
+  // same tag the worker's balance and manifest checks use, or a local chain with no finalized block
+  // would leave every operation SUBMITTED forever while a public chain silently used a weaker tag.
+  readonly #finalityTag: "finalized" | "safe" | "latest";
+
+  constructor(input: {
+    rpcUrl: string;
+    chain: Chain;
+    finalityTag?: "finalized" | "safe" | "latest";
+  }) {
     if (!URL.canParse(input.rpcUrl)) throw new Error("Invalid financial finality RPC URL");
+    this.#finalityTag = input.finalityTag ?? "finalized";
     this.#client = createPublicClient({
       chain: input.chain,
       transport: http(input.rpcUrl, { retryCount: 2, timeout: 10_000 }),
@@ -216,7 +250,7 @@ export class ViemFinancialFinalityVerifier implements FinancialFinalityVerifier 
     try {
       const [receipt, finalized] = await Promise.all([
         this.#client.getTransactionReceipt({ hash: operation.transaction.hash }),
-        this.#client.getBlock({ blockTag: "finalized" }),
+        this.#client.getBlock({ blockTag: this.#finalityTag }),
       ]);
       if (receipt.blockNumber > finalized.number) return { status: "PENDING" };
       const canonical = await this.#client.getBlock({ blockNumber: receipt.blockNumber });

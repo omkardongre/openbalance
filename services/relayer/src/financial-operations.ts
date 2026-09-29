@@ -9,6 +9,7 @@ export const financialOperationKinds = [
   "RESERVE_OPEN",
   "RESERVE_RECLAIM",
   "WITHDRAWAL",
+  "VOUCHER_SETTLE",
 ] as const;
 
 export type FinancialOperationKind = (typeof financialOperationKinds)[number];

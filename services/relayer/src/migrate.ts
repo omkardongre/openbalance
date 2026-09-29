@@ -3,7 +3,11 @@ import { readFile } from "node:fs/promises";
 import { Pool } from "pg";
 import { loadRelayerDatabaseConfig } from "./config.js";
 
-const migrationNames = ["001_financial_operations", "002_vendor_treasury_credentials"] as const;
+const migrationNames = [
+  "001_financial_operations",
+  "002_vendor_treasury_credentials",
+  "003_voucher_settlement",
+] as const;
 
 async function migrate() {
   const config = loadRelayerDatabaseConfig(process.env);

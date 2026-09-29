@@ -51,6 +51,7 @@ export class DatabaseFinancialCommandPolicy implements FinancialCommandPolicy {
         `REFUND:${event.router}:${selector(exactPayRouterAbi, "refund")}`,
         `RESERVE_RECLAIM:${event.vault}:${selector(resilienceVaultAbi, "reclaim")}`,
         `WITHDRAWAL:${event.ledger}:${selector(settlementLedgerAbi, "withdrawFor")}`,
+        `VOUCHER_SETTLE:${event.vault}:${selector(resilienceVaultAbi, "settleVoucher")}`,
       ]),
     );
     this.#budget = new BoundedFinancialCommandPolicy({
@@ -70,6 +71,11 @@ export class DatabaseFinancialCommandPolicy implements FinancialCommandPolicy {
           kind: "WITHDRAWAL" as const,
           targetAddress: event.ledger,
           selector: selector(settlementLedgerAbi, "withdrawFor"),
+        },
+        {
+          kind: "VOUCHER_SETTLE" as const,
+          targetAddress: event.vault,
+          selector: selector(resilienceVaultAbi, "settleVoucher"),
         },
       ]),
       maxGasLimit: input.maxGasLimit,

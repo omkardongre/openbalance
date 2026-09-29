@@ -77,7 +77,11 @@ async function main() {
       maxFeePerGas: BigInt(config.FINANCIAL_MAX_FEE_PER_GAS_WEI),
       maxCost: BigInt(config.FINANCIAL_MAX_COST_WEI),
     }),
-    finality: new ViemFinancialFinalityVerifier({ rpcUrl: config.FINANCIAL_RPC_URL, chain }),
+    finality: new ViemFinancialFinalityVerifier({
+      rpcUrl: config.FINANCIAL_RPC_URL,
+      chain,
+      finalityTag: config.FINANCIAL_FINALITY_TAG,
+    }),
     owner: config.FINANCIAL_WORKER_ID,
     batchSize: config.FINANCIAL_BATCH_SIZE,
     leaseMilliseconds: config.FINANCIAL_LEASE_MS,
