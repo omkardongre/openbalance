@@ -226,16 +226,25 @@ try {
     async () => (await run("cast", ["chain-id", "--rpc-url", rpcUrl])) === "31337",
   );
 
-  await run("cast", [
-    "send",
-    "--rpc-url",
-    rpcUrl,
-    "--private-key",
-    deployer.private_key,
-    faucet.address,
-    "--value",
-    "10ether",
-  ]);
+  // The financial worker signs with its own key: sharing one with the sponsor or the deployer would
+  // let two processes reserve nonces for the same address independently.
+  const financialWallet = JSON.parse(await run("cast", ["wallet", "new", "--json"]));
+  const financialSigner = Array.isArray(financialWallet.data)
+    ? financialWallet.data[0]
+    : financialWallet.data;
+  if (!financialSigner?.private_key || !financialSigner?.address)
+    throw new Error("Ephemeral financial signer generation failed");
+  for (const recipient of [faucet.address, financialSigner.address])
+    await run("cast", [
+      "send",
+      "--rpc-url",
+      rpcUrl,
+      "--private-key",
+      deployer.private_key,
+      recipient,
+      "--value",
+      "10ether",
+    ]);
   const create = async (contract, args = []) => {
     const result = JSON.parse(
       await run(
@@ -340,6 +349,9 @@ try {
   );
   await writeFile(faucetKeyPath, faucet.private_key);
   await chmod(faucetKeyPath, 0o600);
+  const financialKeyPath = join(directory, "financial.key");
+  await writeFile(financialKeyPath, financialSigner.private_key);
+  await chmod(financialKeyPath, 0o600);
   const financialManifestPath = join(directory, "financial-manifest.json");
   await writeFile(
     financialManifestPath,
@@ -374,6 +386,7 @@ try {
     FAUCET_PRIVATE_KEY_PATH: faucetKeyPath,
     FAUCET_MAX_AMOUNT: "5000000",
     FAUCET_DAILY_LIMIT: "50000000",
+    FAUCET_ACCOUNT_LIMIT: "10000000",
     METRICS_PORT: String(await availablePort()),
   };
   let api = start("api", "services/api/dist/server.js", apiEnvironment);
@@ -392,6 +405,23 @@ try {
     SPONSOR_MAX_FEE_PER_GAS_WEI: "1000000000",
     SPONSOR_MAX_COST_WEI: "1000000000000000",
     FINANCIAL_EVENT_MANIFEST_PATH: financialManifestPath,
+  });
+  // Sponsored money operations are only accepted by the relayer; this process signs, broadcasts and
+  // finalizes them, so the treasury journey below exercises the whole sponsored path.
+  start("financial-worker", "services/relayer/dist/financial-worker-server.js", {
+    DATABASE_URL: databaseUrl,
+    FINANCIAL_EVENT_MANIFEST_PATH: financialManifestPath,
+    FINANCIAL_RPC_URL: rpcUrl,
+    FINANCIAL_CHAIN_NAME: "Local Anvil",
+    FINANCIAL_SIGNER_PRIVATE_KEY_PATH: financialKeyPath,
+    FINANCIAL_WORKER_ID: "financial-worker:system",
+    FINANCIAL_FINALITY_TAG: "latest",
+    FINANCIAL_MAX_GAS: "1500000",
+    FINANCIAL_MAX_FEE_PER_GAS_WEI: "10000000000",
+    FINANCIAL_MAX_COST_WEI: "15000000000000000",
+    FINANCIAL_RETRY_MS: "1000",
+    FINANCIAL_POLL_MS: "500",
+    METRICS_PORT: String(await availablePort()),
   });
   start("indexer", "services/indexer/dist/server.js", {
     INDEXER_DATABASE_URL: databaseUrl,
@@ -517,7 +547,7 @@ try {
   process.stdout.write(
     `${JSON.stringify({
       passed: true,
-      processes: ["postgres", "api", "relayer", "indexer", "venue-relay"],
+      processes: ["postgres", "api", "relayer", "financial-worker", "indexer", "venue-relay"],
       restarted: ["api"],
       enrollment: enrolled,
       funding: funded,

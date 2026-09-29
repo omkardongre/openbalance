@@ -22,17 +22,32 @@ export class FaucetRejected extends Error {
 export class FaucetExhausted extends Error {
   override readonly name = "FaucetExhausted";
 }
+/** The account already holds its lifetime share, so one enrolled identity cannot drain the pool. */
+export class FaucetAccountLimit extends Error {
+  override readonly name = "FaucetAccountLimit";
+}
+/** The faucet wallet itself cannot cover the grant; detected before any transaction is sent. */
+export class FaucetDepleted extends Error {
+  override readonly name = "FaucetDepleted";
+}
 
 /** Minimal chain boundary so the faucet cap logic is testable without a live node. */
 export interface FaucetChain {
   balanceOf(account: Address): Promise<bigint>;
+  /** Settlement-asset balance of the faucet's own signing wallet. */
+  reserveBalance(): Promise<bigint>;
   transfer(account: Address, amount: bigint): Promise<Hex>;
   awaitSuccess(hash: Hex): Promise<void>;
 }
 
 /** Durable budget boundary; reservations count against the cap before any transfer is sent. */
 export interface FaucetLedger {
-  reserve(chainId: number, account: Address, amount: bigint, dailyLimit: bigint): Promise<string>;
+  reserve(
+    chainId: number,
+    account: Address,
+    amount: bigint,
+    limits: { daily: bigint; perAccount: bigint },
+  ): Promise<string>;
   complete(id: string, transactionHash: Hex): Promise<void>;
   fail(id: string, reason: string): Promise<void>;
 }
@@ -42,6 +57,8 @@ export type FaucetOptions = {
   token: Address;
   maxAmount: bigint;
   dailyLimit: bigint;
+  /** Lifetime total one account may receive across all grants. */
+  accountLimit: bigint;
 };
 
 /**
@@ -55,7 +72,11 @@ export class FaucetService {
   readonly #options: FaucetOptions;
 
   constructor(ledger: FaucetLedger, chain: FaucetChain, options: FaucetOptions) {
-    if (options.maxAmount <= 0n || options.dailyLimit < options.maxAmount)
+    if (
+      options.maxAmount <= 0n ||
+      options.dailyLimit < options.maxAmount ||
+      options.accountLimit < options.maxAmount
+    )
       throw new Error("Invalid faucet limits");
     this.#ledger = ledger;
     this.#chain = chain;
@@ -67,12 +88,13 @@ export class FaucetService {
     amount: bigint,
   ): Promise<{ transactionHash: Hex; amount: string; account: Address }> {
     if (amount <= 0n || amount > this.#options.maxAmount) throw new FaucetRejected();
-    const reservation = await this.#ledger.reserve(
-      this.#options.chainId,
-      account,
-      amount,
-      this.#options.dailyLimit,
-    );
+    // Checked before reserving budget or paying gas: a transfer from an empty wallet would only
+    // revert on chain and surface to the attendee as an unexplained failure.
+    if ((await this.#chain.reserveBalance()) < amount) throw new FaucetDepleted();
+    const reservation = await this.#ledger.reserve(this.#options.chainId, account, amount, {
+      daily: this.#options.dailyLimit,
+      perAccount: this.#options.accountLimit,
+    });
     const before = await this.#chain.balanceOf(account);
     try {
       const transactionHash = await this.#chain.transfer(account, amount);
@@ -128,6 +150,10 @@ export class ViemFaucetChain implements FaucetChain {
     }) as Promise<bigint>;
   }
 
+  reserveBalance(): Promise<bigint> {
+    return this.balanceOf(this.#account.address);
+  }
+
   async transfer(account: Address, amount: bigint): Promise<Hex> {
     return this.#wallet.writeContract({
       address: this.#token,
@@ -168,20 +194,24 @@ export class PostgresFaucetLedger implements FaucetLedger {
     chainId: number,
     account: Address,
     amount: bigint,
-    dailyLimit: bigint,
+    limits: { daily: bigint; perAccount: bigint },
   ): Promise<string> {
     const client = await this.#pool.connect();
     try {
       await client.query("BEGIN");
-      // Serialize concurrent grants so the daily cap cannot be exceeded by a race.
+      // Serialize concurrent grants so neither cap can be exceeded by a race.
       await client.query("SELECT pg_advisory_xact_lock(hashtext('openbalance-faucet'))");
-      const total = await client.query<{ total: string }>(
-        `SELECT COALESCE(SUM(amount::numeric), 0)::text AS total
+      const totals = await client.query<{ daily: string; account: string }>(
+        `SELECT
+           COALESCE(SUM(amount::numeric) FILTER (WHERE created_at >= date_trunc('day', now())), 0)::text AS daily,
+           COALESCE(SUM(amount::numeric) FILTER (WHERE account = $2), 0)::text AS account
            FROM faucet_grants
-          WHERE chain_id = $1 AND status <> 'FAILED' AND created_at >= date_trunc('day', now())`,
-        [chainId],
+          WHERE chain_id = $1 AND status <> 'FAILED'`,
+        [chainId, account.toLowerCase()],
       );
-      if (BigInt(total.rows[0]?.total ?? "0") + amount > dailyLimit) throw new FaucetExhausted();
+      const row = totals.rows[0];
+      if (BigInt(row?.account ?? "0") + amount > limits.perAccount) throw new FaucetAccountLimit();
+      if (BigInt(row?.daily ?? "0") + amount > limits.daily) throw new FaucetExhausted();
       const inserted = await client.query<{ id: string }>(
         `INSERT INTO faucet_grants (chain_id, account, amount, status)
          VALUES ($1, $2, $3, 'PENDING') RETURNING id`,

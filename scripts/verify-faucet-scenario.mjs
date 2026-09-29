@@ -160,7 +160,11 @@ try {
   if (result.kind !== "faucet") throw new Error("Unexpected faucet scenario result");
   if (result.attendeeBalance !== result.fundedUnits)
     throw new Error("Faucet did not credit the exact amount");
-  if (result.overMaxRejected !== true || result.dailyCapEnforced !== true)
+  if (
+    result.overMaxRejected !== true ||
+    result.accountCapEnforced !== true ||
+    result.dailyCapEnforced !== true
+  )
     throw new Error("Faucet limits were not enforced on chain and in the ledger");
   process.stdout.write(`${JSON.stringify({ passed: true, ...result })}\n`);
 } finally {

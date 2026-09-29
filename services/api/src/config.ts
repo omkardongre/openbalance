@@ -35,6 +35,10 @@ const environmentSchema = z.object({
     .string()
     .regex(/^[1-9][0-9]*$/)
     .optional(),
+  FAUCET_ACCOUNT_LIMIT: z
+    .string()
+    .regex(/^[1-9][0-9]*$/)
+    .optional(),
 });
 
 export function loadEnvironment(environment: NodeJS.ProcessEnv) {
@@ -70,6 +74,7 @@ export function loadEnvironment(environment: NodeJS.ProcessEnv) {
     parsed.FAUCET_PRIVATE_KEY_PATH,
     parsed.FAUCET_MAX_AMOUNT,
     parsed.FAUCET_DAILY_LIMIT,
+    parsed.FAUCET_ACCOUNT_LIMIT,
   ];
   if (faucet.some(Boolean) && (faucet.some((value) => !value) || !parsed.DATABASE_URL))
     throw new Error("Faucet configuration must be complete and include the database");

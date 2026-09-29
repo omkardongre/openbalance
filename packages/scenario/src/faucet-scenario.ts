@@ -1,4 +1,5 @@
 import {
+  FaucetAccountLimit,
   FaucetExhausted,
   FaucetRejected,
   FaucetService,
@@ -33,6 +34,7 @@ export type FaucetScenarioOptions = {
   databaseUrl: string;
   maxAmount?: bigint;
   dailyLimit?: bigint;
+  accountLimit?: bigint;
 };
 
 export type FaucetScenarioResult = {
@@ -43,18 +45,20 @@ export type FaucetScenarioResult = {
   fundedUnits: string;
   attendeeBalance: string;
   overMaxRejected: boolean;
+  accountCapEnforced: boolean;
   dailyCapEnforced: boolean;
 };
 
 /**
  * Proves the faucet against a live chain and a real PostgreSQL grant ledger: an exact grant to an
- * attendee account, rejection above the per-request maximum, and enforcement of the daily cap.
+ * attendee account, rejection above the per-request maximum, and enforcement of the per-account and daily caps.
  */
 export async function runFaucetScenario(
   options: FaucetScenarioOptions,
 ): Promise<FaucetScenarioResult> {
   const maxAmount = options.maxAmount ?? 5_000_000n;
-  const dailyLimit = options.dailyLimit ?? 6_000_000n;
+  const accountLimit = options.accountLimit ?? 6_000_000n;
+  const dailyLimit = options.dailyLimit ?? 8_000_000n;
   const chain = chainFor(options.rpcUrl);
   const deployer = privateKeyToAccount(options.deployerPrivateKey);
   const publicClient = createPublicClient({ chain, transport: http(options.rpcUrl) });
@@ -62,6 +66,7 @@ export async function runFaucetScenario(
   const faucetKey = keccak256(stringToHex("faucet:signer"));
   const faucetAccount = privateKeyToAccount(faucetKey);
   const attendee = privateKeyToAccount(keccak256(stringToHex("faucet:attendee"))).address;
+  const secondAttendee = privateKeyToAccount(keccak256(stringToHex("faucet:attendee:2"))).address;
 
   const tokenArtifact = loadArtifact("LocalTestToken.sol", "LocalTestToken");
   const token = await deploy(publicClient, wallet, tokenArtifact, [
@@ -90,7 +95,7 @@ export async function runFaucetScenario(
     const faucet = new FaucetService(
       ledger,
       new ViemFaucetChain({ rpcUrl: options.rpcUrl, chain, account: faucetAccount, token }),
-      { chainId: chain.id, token, maxAmount, dailyLimit },
+      { chainId: chain.id, token, maxAmount, dailyLimit, accountLimit },
     );
 
     let step = "grant";
@@ -106,13 +111,22 @@ export async function runFaucetScenario(
         throw new Error("Faucet grant did not credit the attendee");
 
       step = "over-max";
-      const overMaxRejected = await rejects(() => faucet.fund(attendee, maxAmount + 1n));
+      const overMaxRejected = await rejects(
+        () => faucet.fund(attendee, maxAmount + 1n),
+        FaucetRejected,
+      );
+      step = "account-cap";
+      // Within the per-request maximum and the daily budget, but beyond this account's lifetime share.
+      const accountCapEnforced = await rejects(
+        () => faucet.fund(attendee, accountLimit - maxAmount + 1n),
+        FaucetAccountLimit,
+      );
       step = "daily-cap";
-      const dailyCapEnforced = await rejects(async () => {
-        // The remaining daily budget is smaller than the per-request maximum, so this must fail.
-        await faucet.fund(attendee, dailyLimit - maxAmount + 1n);
-        return true;
-      });
+      // A different account with its own share untouched, so only the shared daily budget can refuse.
+      const dailyCapEnforced = await rejects(
+        () => faucet.fund(secondAttendee, dailyLimit - maxAmount + 1n),
+        FaucetExhausted,
+      );
 
       step = "ledger-readback";
       const rows = await pool.query<{ status: string }>(
@@ -120,7 +134,8 @@ export async function runFaucetScenario(
       );
       if (!rows.rows.some((row) => row.status === "GRANTED"))
         throw new Error("Faucet grant was not recorded as granted");
-      if (!overMaxRejected || !dailyCapEnforced) throw new Error("Faucet limits were not enforced");
+      if (!overMaxRejected || !accountCapEnforced || !dailyCapEnforced)
+        throw new Error("Faucet limits were not enforced");
 
       return {
         kind: "faucet",
@@ -130,6 +145,7 @@ export async function runFaucetScenario(
         fundedUnits: grant.amount,
         attendeeBalance: attendeeBalance.toString(),
         overMaxRejected,
+        accountCapEnforced,
         dailyCapEnforced,
       };
     } catch (error) {
@@ -187,12 +203,16 @@ async function send(
   if (receipt.status !== "success") throw new Error(`${call.functionName} reverted`);
 }
 
-async function rejects(operation: () => Promise<unknown>): Promise<boolean> {
+/** True only when the operation fails with exactly the expected rejection. */
+async function rejects(
+  operation: () => Promise<unknown>,
+  expected: new (...args: never[]) => Error,
+): Promise<boolean> {
   try {
     await operation();
     return false;
   } catch (error) {
-    if (error instanceof FaucetExhausted || error instanceof FaucetRejected) return true;
+    if (error instanceof expected) return true;
     throw error;
   }
 }
