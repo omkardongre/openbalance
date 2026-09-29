@@ -16,6 +16,10 @@ environment    = "testnet"
 # service and its settlement worker share one writable journal, which a managed request runtime and a
 # separate instance cannot both hold. Both paths are proven locally; neither is proven deployed.
 enabled_processes = ["api", "relayer", "web", "indexer", "financial-worker"]
+# Served by the load balancer in lb.tf. `web_public_url` moves the passkey origin onto it and is set
+# only once the certificate is ACTIVE; changing it invalidates every passkey enrolled on the old origin.
+web_domain     = "openbalance.countersign.site"
+web_public_url = "https://openbalance.countersign.site"
 
 # Public chain facts, re-verified against deployed bytecode at process startup.
 #
@@ -37,14 +41,14 @@ chain = {
   deployment_block = "65010301"
 }
 
-api_image         = "us-central1-docker.pkg.dev/openbalance-hackathon/openbalance-testnet/api@sha256:97ef35e049792b9ba5504dac7191342cfeecbd3069f840bd1029459f8810e93b"
-relayer_image     = "us-central1-docker.pkg.dev/openbalance-hackathon/openbalance-testnet/relayer@sha256:9e7f3684f7c7f8c2962ceca28e69f0ae6abb25dc0d417e1e473f467f43c953d5"
-web_image         = "us-central1-docker.pkg.dev/openbalance-hackathon/openbalance-testnet/web@sha256:6499ffc9ad7215d6916c3e8ac03abf7400f60c5071f223b15f66031b2d3129b7"
+api_image         = "us-central1-docker.pkg.dev/openbalance-hackathon/openbalance-testnet/api@sha256:4cf71587f94c4f2d4446c26b8859e40e018a497dcf62b373d6780f85e3e85765"
+relayer_image     = "us-central1-docker.pkg.dev/openbalance-hackathon/openbalance-testnet/relayer@sha256:190a34baf08dcc9719274111e411ba29d212dd29969db3637270ef24ad72654e"
+web_image         = "us-central1-docker.pkg.dev/openbalance-hackathon/openbalance-testnet/web@sha256:7b9825de067b406cd339539c671ed010bd9b9eb1c5f96dc3d7089f30b3ac44fa"
 venue_relay_image = "us-central1-docker.pkg.dev/openbalance-hackathon/openbalance-testnet/venue-relay@sha256:a7df25bf83146b46297aa465c59b430e24239a7c456f93ed28f92914d569726d"
 
 worker_images = {
   indexer                = "us-central1-docker.pkg.dev/openbalance-hackathon/openbalance-testnet/indexer@sha256:681677f8e5a3352e80899c8c586a25ae3e17e14b1f66aac3a1e7ce4435c44d90"
   integrations           = "us-central1-docker.pkg.dev/openbalance-hackathon/openbalance-testnet/integrations@sha256:4f1b9a1377638cca981784cb3c8fab3f653ab2ade95959552b7ffd4eeff1bd4e"
-  financial-worker       = "us-central1-docker.pkg.dev/openbalance-hackathon/openbalance-testnet/financial-worker@sha256:fa4c690a2944dad8aa6c735de564a6c04164374a4a6a312277945dcbc1950535"
+  financial-worker       = "us-central1-docker.pkg.dev/openbalance-hackathon/openbalance-testnet/financial-worker@sha256:5fb126f8cc3397752ae66c0aae015049b14abe534bdeabc85b4c1c3d602486ef"
   venue-relay-settlement = "us-central1-docker.pkg.dev/openbalance-hackathon/openbalance-testnet/venue-relay-settlement@sha256:b3f60d95b81cebb9b655b15a1aea0a9d0c993a031309601cca428396a18e0d60"
 }

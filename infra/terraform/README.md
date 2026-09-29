@@ -1,23 +1,28 @@
 # Deployment infrastructure
 
-This Terraform root creates the network, Artifact Registry, private evidence bucket, empty
-runtime-secret containers (including `database-url`), separate service identities,
-request-serving Cloud Run services, and separate shielded regional worker groups. It does not
-create secret versions, deploy contracts, expose internal APIs, or start worker containers.
+This Terraform root owns the network (deny-all ingress), Artifact Registry, private evidence bucket,
+runtime-secret containers and their per-secret grants, one service identity per process, the
+request-serving Cloud Run services, and one shielded regional worker group per background process.
+`lb.tf` adds the web app's custom domain: a global external Application Load Balancer, serverless
+NEG, and a DNS-authorized Certificate Manager certificate (see the root README for the two-step
+domain rollout). It never holds secret values: `scripts/populate-secrets.mjs` writes those, so nothing secret lands in
+plan output or state.
 
 The database is managed Neon Postgres (see `.env.testnet.example`), not a Terraform-managed Cloud
-SQL instance, so every environment has exactly one database rather than one per deployment layer.
-Populate the `database-url` secret with the environment's Neon connection string.
+SQL instance. Its connection string lives in the `database-url` secret.
 
-Before applying, supply immutable image digests, select a distinct GCP project for the environment,
-and configure a remote encrypted Terraform state backend. Populate secrets through the deployment
-operator after creation; do not pass secret values as Terraform variables. Grant each identity only
-its documented secret, signing, and storage access after the exact runtime requirements are known.
+Workers run on Container-Optimized OS. Their startup script (`worker-startup.sh.tftpl`) fetches that
+process's secrets under the instance identity at boot and runs the digest-pinned image. They carry an
+ephemeral external address for egress to public endpoints; the firewall admits no inbound traffic.
 
-Each worker group has no public IP, uses its own service identity, and intentionally has no startup
-command. Install its long-running container through an approved instance-management path after
-granting that identity only the required resources. The API and relayer are publicly routable
-because browser clients call them; their application authentication, origin policy, and rate limits
-remain mandatory. Do not run indexer, integration, or financial polling loops as request-only Cloud
-Run services. `terraform plan` is safe for review; applying it creates billable cloud resources and
-is outside local verification.
+A digest of the committed deployment manifests is stamped on every Cloud Run revision and worker
+template, so publishing new manifests and applying rolls every process that reads them.
+
+```bash
+export GOOGLE_OAUTH_ACCESS_TOKEN=$(gcloud auth print-access-token --account=<owner account>)
+terraform plan -var-file=testnet.tfvars -out=change.tfplan   # review every change
+terraform apply change.tfplan
+```
+
+State is local (`terraform.tfstate`, gitignored). Always apply a reviewed saved plan; a plan that
+shows changes nobody intended means the running services drifted and must be reconciled first.

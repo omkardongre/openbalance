@@ -30,6 +30,11 @@ const root = fileURLToPath(new URL("../", import.meta.url));
 const deployments = join(root, "deployments", "testnet");
 
 const PROJECT = process.env.GOOGLE_CLOUD_PROJECT ?? "openbalance-hackathon";
+// Required, and passed on every gcloud call: this machine holds several authenticated identities, and
+// the ambient active account can change underneath a run. An explicit flag cannot.
+const ACCOUNT = process.env.GOOGLE_CLOUD_ACCOUNT;
+if (!ACCOUNT) throw new Error("Set GOOGLE_CLOUD_ACCOUNT to the identity that owns this project.");
+const GCLOUD_SCOPE = [`--project=${PROJECT}`, `--account=${ACCOUNT}`];
 const ENVIRONMENT = process.env.OPENBALANCE_ENVIRONMENT ?? "testnet";
 const PREFIX = `openbalance-${ENVIRONMENT}`;
 const CHAIN_ID = 10_143;
@@ -76,7 +81,7 @@ async function currentValue(name) {
       "versions",
       "access",
       "latest",
-      `--project=${PROJECT}`,
+      ...GCLOUD_SCOPE,
       `--secret=${name}`,
     ]);
   } catch (error) {
@@ -90,7 +95,7 @@ async function currentValue(name) {
 async function addVersion(name, value) {
   await run(
     "gcloud",
-    ["secrets", "versions", "add", name, `--project=${PROJECT}`, "--data-file=-"],
+    ["secrets", "versions", "add", name, ...GCLOUD_SCOPE, "--data-file=-"],
     value,
   );
 }
@@ -207,6 +212,11 @@ await reconcile(
   "event-manifest",
   await manifest("financial-manifest.json"),
   "event contract binding",
+);
+await reconcile(
+  "checkout-manifest",
+  await manifest("checkout-manifest.json"),
+  "checkout policy the API accepts orders under",
 );
 
 // Separate keys on purpose. The relayer and the financial worker each reserve nonces for their own
