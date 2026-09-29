@@ -8,10 +8,9 @@ import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 import java.io.ByteArrayOutputStream
-import java.security.KeyFactory
+import org.bouncycastle.crypto.params.Ed25519PublicKeyParameters
+import org.bouncycastle.crypto.signers.Ed25519Signer
 import java.security.SecureRandom
-import java.security.Signature
-import java.security.spec.X509EncodedKeySpec
 import javax.net.ssl.HttpsURLConnection
 
 data class TrustedTime(val earliestUnixMs: Long, val latestUnixMs: Long, val observedMonotonicMs: Long, val bootId: String)
@@ -23,9 +22,9 @@ class SignedTimeSource(
     private val timeoutMs: Int = 5_000,
 ) {
     private val url = URL(endpoint)
-    private val publicKey = KeyFactory.getInstance("Ed25519").generatePublic(
-        X509EncodedKeySpec(Base64.decode(publicKeyDerBase64, Base64.DEFAULT)),
-    )
+    // Verified with the bundled BouncyCastle rather than the platform JCA: platform Ed25519 support
+    // varies by Android release, and a terminal must not lose trusted time on an older OS.
+    private val publicKey = ed25519PublicKey(Base64.decode(publicKeyDerBase64, Base64.DEFAULT))
 
     init {
         require(url.protocol == "https" && url.userInfo == null && url.query == null && url.ref == null)
@@ -67,8 +66,8 @@ class SignedTimeSource(
             throw IllegalStateException("Invalid time attestation")
         require(uncertaintyMs <= 5_000 && unixMs >= uncertaintyMs)
         val payload = "{\"domain\":\"openbalance:terminal-time:v1\",\"nonce\":\"$nonce\",\"unixMs\":$unixMs,\"uncertaintyMs\":$uncertaintyMs}".toByteArray()
-        val valid = Signature.getInstance("Ed25519").run {
-            initVerify(publicKey); update(payload); verify(signature.hexBytes())
+        val valid = Ed25519Signer().run {
+            init(false, publicKey); update(payload, 0, payload.size); verifySignature(signature.hexBytes())
         }
         if (!valid) throw IllegalStateException("Time attestation signature rejected")
         val elapsed = after.first - before.first
@@ -94,4 +93,16 @@ class SignedTimeSource(
     }
     private fun ByteArray.toHex() = joinToString("") { "%02x".format(it.toInt() and 0xff) }
     private fun String.hexBytes() = chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+}
+
+/** Ed25519 SubjectPublicKeyInfo is a fixed 12-byte header followed by the 32-byte key. */
+private val ED25519_SPKI_PREFIX = byteArrayOf(
+    0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+)
+
+internal fun ed25519PublicKey(spki: ByteArray): Ed25519PublicKeyParameters {
+    require(spki.size == 44 && spki.copyOfRange(0, 12).contentEquals(ED25519_SPKI_PREFIX)) {
+        "Time authority key is not an Ed25519 public key"
+    }
+    return Ed25519PublicKeyParameters(spki, 12)
 }

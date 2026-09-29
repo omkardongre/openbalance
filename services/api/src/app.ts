@@ -41,6 +41,7 @@ import {
   type OrganizerConfigurationService,
 } from "./organizer-configuration.js";
 import { OrganizerConfigurationMismatch } from "./organizer-configuration-chain.js";
+import type { TimeAuthority } from "./time-authority.js";
 
 export type OperationsControl = {
   access: OperationsAccessService;
@@ -58,6 +59,7 @@ export async function buildApp(
   operations?: OperationalReadService,
   control?: OperationsControl,
   faucet?: FaucetService,
+  timeAuthority?: TimeAuthority,
   readiness: ReadinessCheck[] = [],
 ) {
   const app = Fastify({ logger: false, bodyLimit: 32_768 });
@@ -69,6 +71,21 @@ export async function buildApp(
   });
   await app.register(rateLimit, { max: 20, timeWindow: "1 minute" });
   await attachHttpOperations(app, { serviceName: "openbalance-api", readiness });
+  if (timeAuthority) {
+    // Unauthenticated by design: a terminal refreshes time before it has any other credential in
+    // use, and the answer is public. The nonce makes each answer single-use, and the shared rate
+    // limit bounds signing work per client.
+    app.post("/v1/terminal/time", async (request, reply) => {
+      reply.header("Cache-Control", "no-store");
+      const parsed = z
+        .object({ nonce: z.string().regex(/^[a-f0-9]{64}$/) })
+        .strict()
+        .safeParse(request.body);
+      if (!parsed.success)
+        return reply.code(400).send({ error: "invalid_time_request", retryable: false });
+      return timeAuthority.attest(parsed.data.nonce);
+    });
+  }
 
   if (enrollment && origin) {
     const bodySchema = z.object({

@@ -23,6 +23,7 @@ import { OperationsAccessService } from "./operations-access.js";
 import { OperationsReportingService } from "./operations-reporting.js";
 import { OrganizerConfigurationService } from "./organizer-configuration.js";
 import { ViemOrganizerConfigurationChain } from "./organizer-configuration-chain.js";
+import { loadTimeAuthority } from "./time-authority.js";
 
 const environment = loadEnvironment(process.env);
 const telemetry = await startTelemetry({
@@ -147,6 +148,9 @@ if (
     },
   );
 }
+const timeAuthority = environment.TIME_AUTHORITY_KEY_PATH
+  ? await loadTimeAuthority(environment.TIME_AUTHORITY_KEY_PATH)
+  : undefined;
 const app = await buildApp(
   service,
   environment.WEBAUTHN_ORIGIN,
@@ -155,6 +159,7 @@ const app = await buildApp(
   operations,
   control,
   faucet,
+  timeAuthority,
   pool
     ? [
         {

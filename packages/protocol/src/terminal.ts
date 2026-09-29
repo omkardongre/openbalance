@@ -113,3 +113,31 @@ export function terminalIngressDigest(input: {
     ),
   );
 }
+
+/** Domain separator of the time attestation a terminal accepts before any offline sale. */
+export const terminalTimeDomain = "openbalance:terminal-time:v1";
+
+/**
+ * Exact UTF-8 bytes the time authority signs with Ed25519. Field order is fixed and the values are
+ * plain integers, so the Android verifier can rebuild the same string without a JSON library.
+ */
+export function terminalTimePayload(input: {
+  nonce: string;
+  unixMs: number;
+  uncertaintyMs: number;
+}): string {
+  if (
+    !/^[a-f0-9]{64}$/.test(input.nonce) ||
+    !Number.isSafeInteger(input.unixMs) ||
+    input.unixMs < 0 ||
+    !Number.isSafeInteger(input.uncertaintyMs) ||
+    input.uncertaintyMs < 0
+  )
+    throw new Error("Invalid time attestation");
+  return JSON.stringify({
+    domain: terminalTimeDomain,
+    nonce: input.nonce,
+    unixMs: input.unixMs,
+    uncertaintyMs: input.uncertaintyMs,
+  });
+}

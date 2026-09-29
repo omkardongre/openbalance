@@ -39,6 +39,7 @@ const environmentSchema = z.object({
     .string()
     .regex(/^[1-9][0-9]*$/)
     .optional(),
+  TIME_AUTHORITY_KEY_PATH: z.string().min(1).optional(),
 });
 
 export function loadEnvironment(environment: NodeJS.ProcessEnv) {

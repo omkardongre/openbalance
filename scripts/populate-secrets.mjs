@@ -21,6 +21,7 @@
 //   node scripts/populate-secrets.mjs --apply    # write the missing versions
 
 import { spawn } from "node:child_process";
+import { createPrivateKey, createPublicKey, generateKeyPairSync } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -198,6 +199,34 @@ async function ensureSigningKey(shortName, purpose) {
   results.push({ secret: shortName, action: "generated", address, note: purpose, fund: true });
 }
 
+/**
+ * Ed25519 key the API signs terminal time samples with. Generated once and kept: its public half is
+ * compiled into every terminal build, so replacing it silently would leave installed terminals unable
+ * to refresh trusted time. Only the public half is printed.
+ */
+async function ensureTimeAuthorityKey() {
+  const shortName = "time-authority";
+  const name = `${PREFIX}-${shortName}`;
+  const note = "api: signs terminal time; pin the public key into terminal builds";
+  const existing = await currentValue(name);
+  const publicKeyOf = (pem) =>
+    createPublicKey(createPrivateKey(pem))
+      .export({ type: "spki", format: "der" })
+      .toString("base64");
+  if (existing !== null) {
+    results.push({ secret: shortName, action: "kept", publicKey: publicKeyOf(existing), note });
+    return;
+  }
+  if (!apply) {
+    results.push({ secret: shortName, action: "would be generated", note });
+    return;
+  }
+  const { privateKey } = generateKeyPairSync("ed25519");
+  const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+  await addVersion(name, pem);
+  results.push({ secret: shortName, action: "generated", publicKey: publicKeyOf(pem), note });
+}
+
 loadEnvironmentFile();
 
 // The RPC URL embeds a provider API key, which is why it is a secret rather than a Terraform variable.
@@ -228,12 +257,15 @@ await ensureSigningKey(
   "faucet-signer",
   "api: dispenses test balance (needs MON and settlement asset)",
 );
+await ensureTimeAuthorityKey();
 
 const width = Math.max(...results.map((entry) => entry.secret.length));
 process.stdout.write(`\n${apply ? "Applied" : "Dry run"} against ${PROJECT} (${ENVIRONMENT})\n\n`);
 for (const entry of results) {
   process.stdout.write(`  ${entry.secret.padEnd(width)}  ${entry.action}\n`);
   if (entry.address) process.stdout.write(`  ${" ".repeat(width)}  address ${entry.address}\n`);
+  if (entry.publicKey)
+    process.stdout.write(`  ${" ".repeat(width)}  public key ${entry.publicKey}\n`);
   process.stdout.write(`  ${" ".repeat(width)}  ${entry.note}\n`);
 }
 

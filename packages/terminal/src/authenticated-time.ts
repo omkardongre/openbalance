@@ -1,4 +1,5 @@
 import { createPublicKey, randomBytes, verify } from "node:crypto";
+import { terminalTimePayload } from "@openbalance/protocol";
 import type { TrustedTimeSample } from "./clock.js";
 import { UntrustedTerminalTime } from "./clock.js";
 import type { AuthenticatedTimeSource, DeviceMonotonicClock } from "./device.js";
@@ -9,20 +10,11 @@ export function timeAttestationPayload(input: {
   unixMs: number;
   uncertaintyMs: number;
 }): string {
-  if (
-    !/^[a-f0-9]{64}$/.test(input.nonce) ||
-    !Number.isSafeInteger(input.unixMs) ||
-    input.unixMs < 0 ||
-    !Number.isSafeInteger(input.uncertaintyMs) ||
-    input.uncertaintyMs < 0
-  )
+  try {
+    return terminalTimePayload(input);
+  } catch {
     throw new UntrustedTerminalTime("Invalid time attestation");
-  return JSON.stringify({
-    domain: "openbalance:terminal-time:v1",
-    nonce: input.nonce,
-    unixMs: input.unixMs,
-    uncertaintyMs: input.uncertaintyMs,
-  });
+  }
 }
 
 /** Pin the authority key independently of the response. Never use the device wall clock. */
