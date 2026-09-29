@@ -1,169 +1,27 @@
 package xyz.openbalance.terminal
 
-import android.Manifest
-import android.content.pm.PackageManager
 import android.os.Bundle
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.material3.Button
-import androidx.compose.material3.Card
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Text
-import androidx.compose.material3.darkColorScheme
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.dp
-import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.lifecycle.viewmodel.compose.viewModel
-import xyz.openbalance.terminal.camera.QrScanner
-import xyz.openbalance.terminal.camera.RequestQr
-import xyz.openbalance.terminal.ui.TerminalViewModel
+import androidx.activity.enableEdgeToEdge
+import xyz.openbalance.terminal.ui.TerminalScreen
+import xyz.openbalance.terminal.ui.theme.TerminalTheme
+import android.graphics.Color as AndroidColor
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
+        // Edge-to-edge with light system-bar icons over the app's dark surface; Scaffold and the
+        // scanner apply the insets so content never sits under the status or navigation bar.
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.dark(AndroidColor.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.dark(AndroidColor.TRANSPARENT),
+        )
         super.onCreate(savedInstanceState)
-        window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
-        setContent { MaterialTheme(colorScheme = darkColorScheme(primary = Color(0xFF63E6BE))) { TerminalScreen() } }
-    }
-}
-
-@Composable
-private fun TerminalScreen(model: TerminalViewModel = viewModel()) {
-    val state by model.state.collectAsStateWithLifecycle()
-    val context = LocalContext.current
-    val cameraPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { allowed ->
-        if (!allowed) model.cameraError(IllegalStateException("Camera permission is required for offline exchange"))
-    }
-    if (state.scanOpen) {
-        Box(Modifier.fillMaxSize().background(Color.Black)) {
-            if (context.checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
-                QrScanner(Modifier.fillMaxSize(), model::scanned, model::cameraError)
-            } else {
-                Column(Modifier.align(Alignment.Center).padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("Camera access is required to scan ${if (state.scanPurpose == "ENROLLMENT") "the terminal enrollment" else "the attendee authorization"}.")
-                    Button(onClick = { cameraPermission.launch(Manifest.permission.CAMERA) }) { Text("Allow camera") }
-                }
-            }
-            Button(onClick = model::cancelScan, modifier = Modifier.align(Alignment.BottomCenter).padding(24.dp)) { Text("Cancel scan") }
-        }
-        return
-    }
-
-    Scaffold { padding ->
-        LazyColumn(
-            modifier = Modifier.fillMaxSize().padding(padding),
-            contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp),
-        ) {
-            item {
-                Text("OpenBalance Terminal", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-                Text("Disconnected receipts stay pending until finalized onchain.", color = Color(0xFFB8CCC5))
-                Spacer(Modifier.height(12.dp))
-                Card(Modifier.fillMaxWidth()) {
-                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text(if (state.configured) "Terminal configured" else "Configuration required", fontWeight = FontWeight.Bold)
-                        Text(state.signer.ifBlank { "Creating protected terminal identity" }, style = MaterialTheme.typography.bodySmall)
-                        Text(state.message)
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Button(onClick = model::beginEnrollmentScan, enabled = !state.busy) { Text("Scan enrollment") }
-                            Button(onClick = model::synchronize, enabled = state.configured && !state.busy) { Text("Synchronize") }
-                        }
-                        Button(onClick = model::refreshTime, enabled = state.configured && !state.busy) { Text("Refresh trusted time") }
-                        Button(onClick = model::synchronizeReceipts, enabled = state.configured && !state.busy) {
-                            Text("Sync pending receipts")
-                        }
-                    }
-                }
-            }
-            item { Text("Verified channels", style = MaterialTheme.typography.titleLarge) }
-            if (state.channels.isEmpty()) item { Text("No untouched finalized channels are installed.") }
-            items(state.channels, key = { it.channelId }) { channel ->
-                Card(Modifier.fillMaxWidth()) {
-                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text("Channel ${channel.channelId.take(14)}…", fontWeight = FontWeight.SemiBold)
-                        Text("Remaining ${channel.remainingUnits} token units")
-                        Text("Accept until ${channel.acceptUntil}", style = MaterialTheme.typography.bodySmall)
-                        Button(onClick = { model.selectChannel(channel.channelId) }, enabled = !state.busy) {
-                            Text(if (state.selectedChannelId == channel.channelId) "Selected" else "Use channel")
-                        }
-                    }
-                }
-            }
-            item { Text("Connected POS orders", style = MaterialTheme.typography.titleLarge) }
-            if (state.orders.isEmpty()) item { Text("No imported orders are waiting for offline payment.") }
-            items(state.orders, key = { it.orderId }) { order ->
-                Card(Modifier.fillMaxWidth()) {
-                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                            Text(order.orderReference, fontWeight = FontWeight.SemiBold)
-                            Text(order.state)
-                        }
-                        Text(order.description)
-                        Text("${order.grossUnits} ${order.assetSymbol} base units")
-                        Button(
-                            onClick = { model.createOfflineRequest(order.orderId) },
-                            enabled = order.state == "IMPORTED" && state.selectedChannelId != null && state.trustedTime != null && !state.busy,
-                        ) { Text("Create offline request") }
-                    }
-                }
-            }
-            item { Text("Recoverable sales", style = MaterialTheme.typography.titleLarge) }
-            if (state.sales.isEmpty()) item { Text("No locally prepared sales. Finalized channels and orders must be provisioned while connected.") }
-            items(state.sales, key = { it.requestId }) { sale ->
-                Card(Modifier.fillMaxWidth()) {
-                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                            Text(sale.requestId, fontWeight = FontWeight.SemiBold)
-                            Text(sale.state)
-                        }
-                        Text("Relay ${sale.relayState}", style = MaterialTheme.typography.bodySmall)
-                        sale.transactionHash?.let { Text("Transaction ${it.take(18)}…", style = MaterialTheme.typography.bodySmall) }
-                        sale.lastUploadError?.let { Text(it, color = Color(0xFFFF9F80), style = MaterialTheme.typography.bodySmall) }
-                        Text("Channel ${sale.channelId.take(14)}…", style = MaterialTheme.typography.bodySmall)
-                        if (sale.state == "PREPARED" || sale.state == "ATTENDEE_SIGNED") {
-                            RequestQr(sale.requestQr, Modifier.fillMaxWidth().height(260.dp))
-                            Text("Attendee scans this request, verifies the amount and vendor, then returns a signed response.")
-                            Button(onClick = {
-                                if (sale.state == "ATTENDEE_SIGNED") model.resumeAcceptance(sale.requestId)
-                                else model.beginScan(sale.requestId)
-                            }, enabled = state.trustedTime != null && !state.busy) {
-                                Text(if (sale.state == "PREPARED") "Scan attendee response" else "Resume acceptance")
-                            }
-                        }
-                        if (sale.state == "ACCEPTED") {
-                            Text(
-                                if (sale.relayState == "SETTLED") "Finalized onchain" else "Accepted pending settlement",
-                                color = if (sale.relayState == "SETTLED") Color(0xFF63E6BE) else Color(0xFFFFD166),
-                            )
-                            sale.receiptJson?.let { receipt ->
-                                RequestQr(receipt, Modifier.fillMaxWidth().height(300.dp))
-                                Text("Attendee: scan to retain your signed receipt.")
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        // Release builds keep payment screens out of screenshots, recordings and the recents preview.
+        // Debug builds allow capture so device testing and demo filming can record the screen.
+        if (!BuildConfig.DEBUG) window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        setContent { TerminalTheme { TerminalScreen() } }
     }
 }
