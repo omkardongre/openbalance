@@ -13,7 +13,9 @@ import javax.net.ssl.HttpsURLConnection
 class ConnectedProvisioningClient(private val timeoutMs: Int = 10_000) {
     fun fetch(config: ProvisioningConfig, terminalSigner: String, signDigest: (ByteArray) -> ByteArray): ProvisioningBatch {
         require(timeoutMs in 1..30_000)
-        val challenge = challenge(request(config, "/v1/terminal/provisioning-challenges", null))
+        // An explicit JSON body, as the web SDK sends: a bodiless POST from HttpURLConnection carries
+        // a default form-urlencoded content type, which the API rejects with 415.
+        val challenge = challenge(request(config, "/v1/terminal/provisioning-challenges", "{}"))
         val signature = signDigest(
             terminalProvisioningDigest(challenge.chainId, challenge.eventId, challenge.terminalInstanceId, challenge.value),
         ).also { require(it.size == 65) }.toHex()
@@ -25,7 +27,7 @@ class ConnectedProvisioningClient(private val timeoutMs: Int = 10_000) {
         return batch
     }
 
-    private fun request(config: ProvisioningConfig, path: String, body: String?): String {
+    private fun request(config: ProvisioningConfig, path: String, body: String): String {
         val connection = (URL("${config.apiEndpoint}$path").openConnection() as HttpsURLConnection).apply {
             requestMethod = "POST"
             instanceFollowRedirects = false
@@ -33,13 +35,11 @@ class ConnectedProvisioningClient(private val timeoutMs: Int = 10_000) {
             readTimeout = timeoutMs
             setRequestProperty("Accept", "application/json")
             setRequestProperty("Authorization", "Bearer ${config.accessToken}")
-            if (body != null) {
-                doOutput = true
-                setRequestProperty("Content-Type", "application/json")
-            }
+            doOutput = true
+            setRequestProperty("Content-Type", "application/json")
         }
         try {
-            if (body != null) connection.outputStream.use { it.write(body.toByteArray()) }
+            connection.outputStream.use { it.write(body.toByteArray()) }
             if (connection.responseCode != HttpURLConnection.HTTP_OK ||
                 connection.contentType?.startsWith("application/json") != true
             ) throw IllegalStateException("Terminal provisioning service rejected the request")
