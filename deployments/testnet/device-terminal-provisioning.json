@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "chainId": 10143,
+  "eventId": "0x6d4906e4269fcb569b16c397879fa0e5e0a0e18db1607af48287005d6ee8acc3",
+  "registry": "0x4bD8E4386e6a3DB1c63b145D812CD7eFE0bd9485",
+  "vendorName": "OpenBalance Android Terminal",
+  "vendorId": "0xe7f66275f0a0b151996db5aa06acde63be48255a1ba04efa6ef1542493e5e3ee",
+  "vendorAuthority": "0xBAB81720e540cc8A0e0826882A2620f953ea74F1",
+  "destinationVersion": 1,
+  "destination": "0xBAB81720e540cc8A0e0826882A2620f953ea74F1",
+  "terminalId": "0x56f7f724f83c34f5489d09598305ff0f062b1fb038836eec9d658ddd07258e83",
+  "terminalVersion": 1,
+  "terminalSigner": "0x649A447a46AA12aadd7D23b1a13caBA86f03ddd0"
+}
