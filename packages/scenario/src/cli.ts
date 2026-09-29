@@ -174,6 +174,9 @@ if (!rpcUrl || !deployerPrivateKey || !/^0x[0-9a-fA-F]{64}$/.test(deployerPrivat
                       ...(process.env.SCENARIO_WINDOWS
                         ? { windows: JSON.parse(process.env.SCENARIO_WINDOWS) }
                         : {}),
+                      ...(process.env.SCENARIO_STOP_AFTER === "reserve-open"
+                        ? { stopAfterReserveOpen: true }
+                        : {}),
                       ...(process.env.SCENARIO_PROVISIONED
                         ? {
                             provisioned: (() => {

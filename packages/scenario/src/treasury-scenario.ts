@@ -87,16 +87,33 @@ export type TreasuryScenarioOptions = {
     organizerFeeBps: number;
     platformFeeBps: number;
   };
+  /**
+   * Stop once the reserve channel is open and finalized, leaving it untouched. An untouched channel
+   * is what a physical terminal installs during provisioning; settling, reclaiming or refunding it
+   * here would disqualify it from that.
+   */
+  stopAfterReserveOpen?: boolean;
 };
 
-export type TreasuryScenarioResult = {
-  kind: "treasury";
-  channelId: Hex;
-  paymentId: Hex;
-  reclaimState: string;
-  withdrawalState: string;
-  refundState: string;
-};
+export type TreasuryScenarioResult =
+  | {
+      kind: "treasury";
+      channelId: Hex;
+      paymentId: Hex;
+      reclaimState: string;
+      withdrawalState: string;
+      refundState: string;
+    }
+  | {
+      kind: "treasury-reserve-open";
+      channelId: Hex;
+      runId: string;
+      channelSigner: Address;
+      reserveUnits: string;
+      acceptFrom: number;
+      acceptUntil: number;
+      submitUntil: number;
+    };
 
 type JourneyState = {
   account: Address;
@@ -462,6 +479,21 @@ export async function runTreasuryScenario(
     session,
     origin,
   );
+
+  if (options.stopAfterReserveOpen) {
+    // The channel signer is derived from the run id, so the run id is enough to sign vouchers later;
+    // the key itself is never printed.
+    return {
+      kind: "treasury-reserve-open",
+      channelId,
+      runId,
+      channelSigner: channelSigner.address,
+      reserveUnits: reserveUnits.toString(),
+      acceptFrom,
+      acceptUntil,
+      submitUntil,
+    };
+  }
 
   // A voucher is only acceptable once the channel's acceptance window has opened.
   await advanceToChainTime(publicClient, acceptFrom + 1, timeControl);

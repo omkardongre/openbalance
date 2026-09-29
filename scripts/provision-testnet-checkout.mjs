@@ -108,14 +108,19 @@ async function main() {
     throw new Error("Verifier and provisioning records disagree on the event identifier");
 
   const streamId = `testnet:${CHAIN_ID}:${eventId}`;
-  const vendorId = String(provisioning.vendorId).toLowerCase();
-  const terminalId = String(provisioning.terminalId).toLowerCase();
-  if (!BYTES32.test(vendorId) || !BYTES32.test(terminalId))
-    throw new Error("Provisioning record has no vendor or terminal identifier");
-
   const configVersion = BigInt(provisioning.configVersion);
-  const destinationVersion = BigInt(provisioning.destinationVersion);
-  const terminalVersion = BigInt(provisioning.terminalVersion);
+
+  // Optional second vendor whose terminal key lives on a physical Android terminal
+  // (scripts/provision-device-terminal.mjs). Absent means the manifest carries the primary vendor only.
+  let device = null;
+  try {
+    device = JSON.parse(await readFile(`${outDir}device-terminal-provisioning.json`, "utf8"));
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+  if (device && String(device.eventId).toLowerCase() !== eventId)
+    throw new Error("Device terminal record belongs to another event");
+  const vendorRecords = [{ ...provisioning, vendorName: VENDOR_NAME }, ...(device ? [device] : [])];
 
   // The event config carries the fee split and the reserve-window ceilings the manifest must respect.
   const config = fields(
@@ -147,47 +152,82 @@ async function main() {
     submissionCeiling,
   );
 
-  const vendor = fields(
-    await cast(["call", "--rpc-url", url, registry, "vendors(bytes32)(address,bool)", vendorId]),
-  );
-  if (vendor[0]?.toLowerCase() === ZERO_ADDRESS || vendor[1] !== "true")
-    throw new Error(`Vendor ${vendorId} is not registered and enabled`);
+  if (RESERVE_POLICY.maximumPerVoucherUnits > RESERVE_POLICY.maximumReserveUnits)
+    throw new Error("Per-voucher ceiling exceeds the reserve ceiling");
 
-  const destination = fields(
-    await cast([
-      "call",
-      "--rpc-url",
-      url,
-      registry,
-      "destinations(bytes32,uint256)(address,bool)",
+  /** Reads one vendor's destination and terminal binding back from the chain. */
+  const vendorPolicy = async (record) => {
+    const vendorId = String(record.vendorId).toLowerCase();
+    const terminalId = String(record.terminalId).toLowerCase();
+    if (!BYTES32.test(vendorId) || !BYTES32.test(terminalId))
+      throw new Error("Provisioning record has no vendor or terminal identifier");
+    const destinationVersion = BigInt(record.destinationVersion);
+    const terminalVersion = BigInt(record.terminalVersion);
+
+    const vendor = fields(
+      await cast(["call", "--rpc-url", url, registry, "vendors(bytes32)(address,bool)", vendorId]),
+    );
+    if (vendor[0]?.toLowerCase() === ZERO_ADDRESS || vendor[1] !== "true")
+      throw new Error(`Vendor ${vendorId} is not registered and enabled`);
+
+    const destination = fields(
+      await cast([
+        "call",
+        "--rpc-url",
+        url,
+        registry,
+        "destinations(bytes32,uint256)(address,bool)",
+        vendorId,
+        String(destinationVersion),
+      ]),
+    );
+    if (destination[0]?.toLowerCase() === ZERO_ADDRESS || destination[1] !== "true")
+      throw new Error(
+        `Vendor payout destination ${destinationVersion} is not approved and enabled`,
+      );
+
+    // The terminal record is the authority for which key may sign an intent, and which vendor it signs
+    // for. Both are asserted here so the manifest cannot bind a terminal to the wrong vendor.
+    const terminal = fields(
+      await cast([
+        "call",
+        "--rpc-url",
+        url,
+        registry,
+        "terminals(bytes32,uint256)(bytes32,address,uint48,uint48,bool)",
+        terminalId,
+        String(terminalVersion),
+      ]),
+    );
+    if (terminal[4] !== "true")
+      throw new Error(`Terminal ${terminalId} version ${terminalVersion} is not enabled`);
+    if (terminal[0]?.toLowerCase() !== vendorId)
+      throw new Error(`Terminal ${terminalId} is bound to a different vendor than ${vendorId}`);
+    const terminalSigner = terminal[1];
+    if (!ADDRESS.test(terminalSigner ?? "")) throw new Error("Terminal record has no signer");
+    if (terminalSigner.toLowerCase() !== String(record.terminalSigner).toLowerCase())
+      throw new Error("Chain and provisioning records disagree on the terminal signer");
+
+    return {
       vendorId,
-      String(destinationVersion),
-    ]),
-  );
-  if (destination[0]?.toLowerCase() === ZERO_ADDRESS || destination[1] !== "true")
-    throw new Error(`Vendor payout destination ${destinationVersion} is not approved and enabled`);
-
-  // The terminal record is the authority for which key may sign an intent, and which vendor it signs
-  // for. Both are asserted here so the manifest cannot bind a terminal to the wrong vendor.
-  const terminal = fields(
-    await cast([
-      "call",
-      "--rpc-url",
-      url,
-      registry,
-      "terminals(bytes32,uint256)(bytes32,address,uint48,uint48,bool)",
-      terminalId,
-      String(terminalVersion),
-    ]),
-  );
-  if (terminal[4] !== "true")
-    throw new Error(`Terminal ${terminalId} version ${terminalVersion} is not enabled`);
-  if (terminal[0]?.toLowerCase() !== vendorId)
-    throw new Error(`Terminal ${terminalId} is bound to a different vendor than ${vendorId}`);
-  const terminalSigner = terminal[1];
-  if (!ADDRESS.test(terminalSigner ?? "")) throw new Error("Terminal record has no signer");
-  if (terminalSigner.toLowerCase() !== String(provisioning.terminalSigner).toLowerCase())
-    throw new Error("Chain and provisioning records disagree on the terminal signer");
+      vendorName: record.vendorName,
+      destinationVersion: destinationVersion.toString(),
+      terminal: {
+        instanceId: terminalId,
+        keyVersion: terminalVersion.toString(),
+        signer: terminalSigner,
+      },
+      reservePolicy: {
+        maximumReserveUnits: RESERVE_POLICY.maximumReserveUnits.toString(),
+        maximumPerVoucherUnits: RESERVE_POLICY.maximumPerVoucherUnits.toString(),
+        maximumVoucherCount: RESERVE_POLICY.maximumVoucherCount,
+        acceptanceDurationSeconds,
+        submissionDelaySeconds,
+      },
+    };
+  };
+  const vendors = [];
+  for (const record of vendorRecords) vendors.push(await vendorPolicy(record));
 
   // Asset metadata comes from the token contract so the terminal renders the same unit the ledger
   // accounts in. A wrong decimals value here would misprice every displayed amount.
@@ -201,9 +241,6 @@ async function main() {
     throw new Error(`Unusable asset symbol ${assetSymbol}`);
   if (!Number.isInteger(assetDecimals) || assetDecimals < 0 || assetDecimals > 36)
     throw new Error(`Unusable asset decimals ${assetDecimals}`);
-
-  if (RESERVE_POLICY.maximumPerVoucherUnits > RESERVE_POLICY.maximumReserveUnits)
-    throw new Error("Per-voucher ceiling exceeds the reserve ceiling");
 
   const manifest = {
     schemaVersion: 1,
@@ -229,25 +266,7 @@ async function main() {
         organizerFeeBps,
         platformFeeBps,
         intentLifetimeSeconds: INTENT_LIFETIME_SECONDS,
-        vendors: [
-          {
-            vendorId,
-            vendorName: VENDOR_NAME,
-            destinationVersion: destinationVersion.toString(),
-            terminal: {
-              instanceId: terminalId,
-              keyVersion: terminalVersion.toString(),
-              signer: terminalSigner,
-            },
-            reservePolicy: {
-              maximumReserveUnits: RESERVE_POLICY.maximumReserveUnits.toString(),
-              maximumPerVoucherUnits: RESERVE_POLICY.maximumPerVoucherUnits.toString(),
-              maximumVoucherCount: RESERVE_POLICY.maximumVoucherCount,
-              acceptanceDurationSeconds,
-              submissionDelaySeconds,
-            },
-          },
-        ],
+        vendors,
       },
     ],
   };
@@ -279,9 +298,11 @@ async function main() {
         capabilityKeyCreated: capabilityCreated,
         streamId,
         eventId,
-        vendorId,
-        terminalId,
-        terminalSigner,
+        vendors: vendors.map((vendor) => ({
+          vendorId: vendor.vendorId,
+          terminalId: vendor.terminal.instanceId,
+          terminalSigner: vendor.terminal.signer,
+        })),
         assetSymbol,
         assetDecimals,
         organizerFeeBps,

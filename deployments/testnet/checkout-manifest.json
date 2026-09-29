@@ -39,6 +39,23 @@
             "acceptanceDurationSeconds": 600,
             "submissionDelaySeconds": 300
           }
+        },
+        {
+          "vendorId": "0xe7f66275f0a0b151996db5aa06acde63be48255a1ba04efa6ef1542493e5e3ee",
+          "vendorName": "OpenBalance Android Terminal",
+          "destinationVersion": "1",
+          "terminal": {
+            "instanceId": "0x56f7f724f83c34f5489d09598305ff0f062b1fb038836eec9d658ddd07258e83",
+            "keyVersion": "1",
+            "signer": "0x649A447a46AA12aadd7D23b1a13caBA86f03ddd0"
+          },
+          "reservePolicy": {
+            "maximumReserveUnits": "50000000",
+            "maximumPerVoucherUnits": "15000000",
+            "maximumVoucherCount": 8,
+            "acceptanceDurationSeconds": 600,
+            "submissionDelaySeconds": 300
+          }
         }
       ]
     }

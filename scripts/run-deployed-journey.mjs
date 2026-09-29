@@ -88,11 +88,19 @@ if (kind === "treasury") {
   environment.SCENARIO_WINDOWS =
     process.env.SCENARIO_WINDOWS ??
     JSON.stringify({ acceptFromSeconds: 30, acceptUntilSeconds: 240, submitUntilSeconds: 300 });
+  // Vendor and terminal default to the primary provisioning record. SCENARIO_PROVISIONED_FILE selects
+  // another record for the same event, such as device-terminal-provisioning.json for the Android
+  // terminal; config version and fees always come from the event record.
+  const target = process.env.SCENARIO_PROVISIONED_FILE
+    ? JSON.parse(readFileSync(join(deployments, process.env.SCENARIO_PROVISIONED_FILE), "utf8"))
+    : provisioning;
+  if (target.eventId !== provisioning.eventId)
+    throw new Error("SCENARIO_PROVISIONED_FILE belongs to a different event");
   environment.SCENARIO_PROVISIONED = JSON.stringify({
-    vendorId: provisioning.vendorId,
-    terminalId: provisioning.terminalId,
+    vendorId: target.vendorId,
+    terminalId: target.terminalId,
     configVersion: provisioning.configVersion,
-    destinationVersion: provisioning.destinationVersion,
+    destinationVersion: target.destinationVersion,
     organizerFeeBps: provisioning.organizerFeeBps,
     platformFeeBps: provisioning.platformFeeBps,
   });
