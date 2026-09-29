@@ -177,12 +177,12 @@ paths:
         "422":
           $ref: "#/components/responses/BadRequest"
         "429":
-          description: The daily faucet limit was reached
+          description: The daily faucet limit (`faucet_exhausted`) or this account's lifetime limit (`faucet_account_limit`) was reached
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
         "503":
-          description: The funding source is temporarily unavailable
+          description: The funding source is temporarily unavailable, or its wallet cannot cover the grant (`faucet_depleted`)
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }

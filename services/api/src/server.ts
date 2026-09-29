@@ -122,7 +122,8 @@ if (
   environment.FAUCET_TOKEN_ADDRESS &&
   environment.FAUCET_PRIVATE_KEY_PATH &&
   environment.FAUCET_MAX_AMOUNT &&
-  environment.FAUCET_DAILY_LIMIT
+  environment.FAUCET_DAILY_LIMIT &&
+  environment.FAUCET_ACCOUNT_LIMIT
 ) {
   const ledger = new PostgresFaucetLedger(pool);
   await ledger.assertReady();
@@ -142,6 +143,7 @@ if (
       token,
       maxAmount: BigInt(environment.FAUCET_MAX_AMOUNT),
       dailyLimit: BigInt(environment.FAUCET_DAILY_LIMIT),
+      accountLimit: BigInt(environment.FAUCET_ACCOUNT_LIMIT),
     },
   );
 }

@@ -235,11 +235,13 @@ export default function AccountPage() {
       });
       if (!response.ok) {
         const body = (await response.json().catch(() => null)) as { error?: string } | null;
-        throw new Error(
-          body?.error === "faucet_exhausted"
-            ? "The test faucet has reached its daily limit."
-            : "Test funding is unavailable right now.",
-        );
+        const messages: Record<string, string> = {
+          faucet_exhausted: "The test faucet has reached its daily limit.",
+          faucet_account_limit: "This account has already received its share of test funds.",
+          faucet_depleted: "The test faucet is out of funds. Try again later.",
+          faucet_rejected: "That amount is above the per-request test funding limit.",
+        };
+        throw new Error(messages[body?.error ?? ""] ?? "Test funding is unavailable right now.");
       }
       const result = (await response.json()) as { transactionHash: string };
       setFunding(result.transactionHash);

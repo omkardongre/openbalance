@@ -14,7 +14,13 @@ import {
 import { DeploymentMismatch } from "./deployment-chain.js";
 import type { DeploymentService } from "./deployments.js";
 import { EnrollmentRejected, type EnrollmentService } from "./enrollment.js";
-import { FaucetExhausted, FaucetRejected, type FaucetService } from "./faucet.js";
+import {
+  FaucetAccountLimit,
+  FaucetDepleted,
+  FaucetExhausted,
+  FaucetRejected,
+  type FaucetService,
+} from "./faucet.js";
 import {
   IncidentConflict,
   IncidentNotFound,
@@ -174,6 +180,10 @@ export async function buildApp(
               return reply.code(401).send({ error: "session_invalid", retryable: false });
             if (error instanceof FaucetExhausted)
               return reply.code(429).send({ error: "faucet_exhausted", retryable: false });
+            if (error instanceof FaucetAccountLimit)
+              return reply.code(429).send({ error: "faucet_account_limit", retryable: false });
+            if (error instanceof FaucetDepleted)
+              return reply.code(503).send({ error: "faucet_depleted", retryable: false });
             if (error instanceof FaucetRejected)
               return reply.code(422).send({ error: "faucet_rejected", retryable: false });
             // RPC errors can embed credential-bearing URLs; keep details out of HTTP responses.
