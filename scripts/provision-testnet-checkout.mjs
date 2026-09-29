@@ -39,7 +39,22 @@ const RESERVE_POLICY = {
   maximumPerVoucherUnits: 15_000_000n,
   maximumVoucherCount: 8,
 };
+// Reserve windows the terminal offers. The event config only bounds them from above, so a demo event
+// can return unspent reserves within minutes instead of hours while the on-chain ceilings stay put.
+// Unset means the ceiling itself. Each must be at least a minute so a terminal can still operate.
+// Read from CHECKOUT_RESERVE_ACCEPTANCE_SECONDS and CHECKOUT_RESERVE_SUBMISSION_SECONDS.
 const CAPABILITY_KEY_BYTES = 32;
+
+/** Resolves an operational window, refusing anything outside [60, on-chain ceiling]. */
+function reserveWindow(name, ceiling) {
+  const override = process.env[name];
+  if (override === undefined || override === "") return ceiling;
+  if (!/^[1-9][0-9]*$/.test(override)) throw new Error(`${name} must be a positive integer`);
+  const seconds = Number(override);
+  if (seconds < 60 || seconds > ceiling)
+    throw new Error(`${name} must be between 60 and the event config ceiling of ${ceiling}`);
+  return seconds;
+}
 
 const cast = (args) => foundry("cast", args, { cwd: root });
 
@@ -117,12 +132,20 @@ async function main() {
     throw new Error(`Event config ${configVersion} is not registered and enabled`);
   const organizerFeeBps = Number(config[2]);
   const platformFeeBps = Number(config[3]);
-  const acceptanceDurationSeconds = Number(config[4]);
-  const submissionDelaySeconds = Number(config[5]);
+  const acceptanceCeiling = Number(config[4]);
+  const submissionCeiling = Number(config[5]);
   if (!Number.isSafeInteger(organizerFeeBps) || !Number.isSafeInteger(platformFeeBps))
     throw new Error("Event config returned an unreadable fee split");
-  if (acceptanceDurationSeconds < 60 || submissionDelaySeconds < 60)
+  if (acceptanceCeiling < 60 || submissionCeiling < 60)
     throw new Error("Event config reserve windows are too short to operate a terminal");
+  const acceptanceDurationSeconds = reserveWindow(
+    "CHECKOUT_RESERVE_ACCEPTANCE_SECONDS",
+    acceptanceCeiling,
+  );
+  const submissionDelaySeconds = reserveWindow(
+    "CHECKOUT_RESERVE_SUBMISSION_SECONDS",
+    submissionCeiling,
+  );
 
   const vendor = fields(
     await cast(["call", "--rpc-url", url, registry, "vendors(bytes32)(address,bool)", vendorId]),
