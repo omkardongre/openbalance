@@ -41,7 +41,7 @@ chain = {
   deployment_block = "65010301"
 }
 
-api_image         = "us-central1-docker.pkg.dev/openbalance-hackathon/openbalance-testnet/api@sha256:4cf71587f94c4f2d4446c26b8859e40e018a497dcf62b373d6780f85e3e85765"
+api_image         = "us-central1-docker.pkg.dev/openbalance-hackathon/openbalance-testnet/api@sha256:bf3aeb01e45e2228519277809c3a05bc38327e472ad7204cb6d7372a7429a4d9"
 relayer_image     = "us-central1-docker.pkg.dev/openbalance-hackathon/openbalance-testnet/relayer@sha256:190a34baf08dcc9719274111e411ba29d212dd29969db3637270ef24ad72654e"
 web_image         = "us-central1-docker.pkg.dev/openbalance-hackathon/openbalance-testnet/web@sha256:7b9825de067b406cd339539c671ed010bd9b9eb1c5f96dc3d7089f30b3ac44fa"
 venue_relay_image = "us-central1-docker.pkg.dev/openbalance-hackathon/openbalance-testnet/venue-relay@sha256:a7df25bf83146b46297aa465c59b430e24239a7c456f93ed28f92914d569726d"

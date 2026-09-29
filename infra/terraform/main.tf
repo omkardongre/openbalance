@@ -52,7 +52,7 @@ locals {
   secrets = toset([
     "database-url", "operational-rpc-url", "account-manifest", "event-manifest",
     "sponsor-signer", "financial-signer", "faucet-signer",
-    "checkout-manifest", "checkout-capability", "integration-mapping",
+    "checkout-manifest", "checkout-capability", "integration-mapping", "time-authority",
     "venue-relay-key", "venue-relay-settlement-signer", "terminal-snapshot",
   ])
 
@@ -83,7 +83,8 @@ locals {
     # Both checkout secrets must hold a version before this applies: a mounted secret with no version
     # fails the revision outright. `scripts/populate-secrets.mjs` publishes the manifest; the capability
     # key is created once by `pnpm testnet:provision-checkout` and uploaded by the operator.
-    api                    = ["database-url", "operational-rpc-url", "account-manifest", "faucet-signer", "checkout-manifest", "checkout-capability"]
+    # `time-authority` signs terminal time samples; its public half is pinned into terminal builds.
+    api                    = ["database-url", "operational-rpc-url", "account-manifest", "faucet-signer", "checkout-manifest", "checkout-capability", "time-authority"]
     relayer                = ["database-url", "operational-rpc-url", "account-manifest", "event-manifest", "sponsor-signer"]
     web                    = []
     venue-relay            = ["venue-relay-key", "terminal-snapshot"]
@@ -164,6 +165,7 @@ locals {
       # The API constructs its checkout service only when both are set.
       CHECKOUT_MANIFEST_PATH       = local.secret_path["checkout-manifest"]
       CHECKOUT_CAPABILITY_KEY_PATH = local.secret_path["checkout-capability"]
+      TIME_AUTHORITY_KEY_PATH      = local.secret_path["time-authority"]
     }
     relayer = {
       HOST                                   = "0.0.0.0"

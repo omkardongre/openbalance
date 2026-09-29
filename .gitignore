@@ -83,3 +83,7 @@ local.properties
 .DS_Store
 Thumbs.db
 secrets/testnet/*.json
+secrets/testnet/operations-android-terminal.token
+secrets/testnet/device-journey.json
+secrets/testnet/terminal-enrollment-qr.png
+secrets/testnet/device-channel.json
