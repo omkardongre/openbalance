@@ -31,6 +31,10 @@ data class TerminalUiState(
     val scanPurpose: String? = null,
     val busy: Boolean = false,
     val message: String = "Loading durable terminal state",
+    /** Whether [message] reports a failure, so the UI can style it as an error rather than progress. */
+    val error: Boolean = false,
+    /** Whether provisioning has succeeded at least once this session. */
+    val synced: Boolean = false,
 )
 
 class TerminalViewModel(application: Application) : AndroidViewModel(application) {
@@ -84,7 +88,9 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
         _state.value = _state.value.copy(activeRequestId = null, scanOpen = true, scanPurpose = "ENROLLMENT", message = "Scan terminal enrollment")
     }
 
-    fun cancelScan() { _state.value = _state.value.copy(scanOpen = false, scanPurpose = null, activeRequestId = null, message = "Scan cancelled") }
+    fun cancelScan() {
+        _state.value = _state.value.copy(scanOpen = false, scanPurpose = null, activeRequestId = null, error = false, message = "Scan cancelled")
+    }
 
     fun scanned(value: String) = viewModelScope.launch(Dispatchers.IO) {
         if (_state.value.scanPurpose == "ENROLLMENT") {
@@ -133,6 +139,7 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
                 selectedChannelId = _state.value.selectedChannelId?.takeIf { selected -> channels.any { it.channelId == selected } }
                     ?: channels.firstOrNull()?.channelId,
                 message = "Verified $installed new channels; imported $imported new POS orders",
+                synced = true,
                 busy = false,
             )
         }
@@ -151,7 +158,7 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun selectChannel(channelId: String) {
-        _state.value = _state.value.copy(selectedChannelId = channelId, message = "Channel selected")
+        _state.value = _state.value.copy(selectedChannelId = channelId, error = false, message = "Channel selected")
     }
 
     fun createOfflineRequest(orderId: String) = viewModelScope.launch(Dispatchers.IO) {
@@ -184,12 +191,15 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
     }
 
     private suspend fun runBusy(message: String, operation: suspend () -> TerminalUiState) {
-        _state.value = _state.value.copy(busy = true, message = message)
+        _state.value = _state.value.copy(busy = true, message = message, error = false)
         runCatching { operation() }.onSuccess { _state.value = it }.onFailure(::fail)
     }
 
     private fun fail(error: Throwable) {
-        _state.value = _state.value.copy(busy = false, scanOpen = false, scanPurpose = null, message = error.message ?: "Terminal operation failed")
+        _state.value = _state.value.copy(
+            busy = false, scanOpen = false, scanPurpose = null, error = true,
+            message = error.message ?: "Terminal operation failed",
+        )
     }
 
     private fun relayMessage(prefix: String, uploaded: Int, settled: Int, retried: Int, quarantined: Int) =
