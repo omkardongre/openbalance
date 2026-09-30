@@ -50,10 +50,16 @@ export type VenueRelayAppOptions = {
   maximumClockSkewSeconds?: number;
   now?: () => number;
   readiness?: () => Promise<void>;
+  /** PEM certificate chain and key; when set the relay serves HTTPS itself. */
+  tls?: { cert: Buffer; key: Buffer };
 };
 
 export async function buildVenueRelayApp(options: VenueRelayAppOptions) {
-  const app = Fastify({ logger: false, bodyLimit: 128 * 1_024 });
+  const app = Fastify({
+    logger: false,
+    bodyLimit: 128 * 1_024,
+    ...(options.tls ? { https: { ...options.tls, minVersion: "TLSv1.2" as const } } : {}),
+  } as { logger: false; bodyLimit: number });
   await app.register(rateLimit, { max: 120, timeWindow: "1 minute" });
   await attachHttpOperations(app, {
     serviceName: "openbalance-venue-relay",

@@ -223,9 +223,58 @@ policy. `treasury` also needs a relayer vendor-treasury credential for the same 
 which is a separate credential from the API operations token. Both money steps wait out a 429 or a
 cold-start 503 instead of failing, since neither reaches a handler.
 
-An account's open channels share one `maximumTotalReserve`, so a treasury run that stopped after
-opening its channel blocks the next one until that channel is reclaimed. Reclaim it permissionlessly
-once its submission window closes (`apps/web/scripts/reclaim-reserve.mjs`).
+A reserve open caps the account's total reserved balance; the treasury run sets that cap to the
+account's current `reservedFor` plus the new reserve, so channels left open by earlier runs (expired
+but not yet reclaimed) do not block the next one. Reclaim them permissionlessly once their submission
+window closes (`apps/web/scripts/reclaim-reserve.mjs`).
+
+#### Physical terminal with a headless attendee
+
+To exercise the Android terminal end to end without a second phone, open a reserve for the device
+terminal and keep only its run identifier:
+
+```bash
+SCENARIO_STOP_AFTER=reserve-open SCENARIO_PROVISIONED_FILE=device-terminal-provisioning.json \
+  node scripts/run-deployed-journey.mjs treasury secrets/testnet/device-journey.json
+# write {"runId", "channelId"} from the output to secrets/testnet/device-channel.json
+node scripts/attendee-sign.mjs --adb            # payment request shown on the terminal
+node scripts/attendee-sign.mjs --adb            # terminal receipt, after the terminal accepts
+```
+
+The terminal uploads receipts to a venue relay, which runs on venue hardware rather than in the
+cloud. To run it on this machine for the physical phone:
+
+```bash
+node scripts/venue-relay-local.mjs setup   # keys, TLS, registry-bound terminal snapshot, enrollment QR
+./apps/terminal-android/gradlew -p apps/terminal-android installDebug
+node scripts/venue-relay-local.mjs start   # HTTPS relay + settlement worker + adb reverse tcp:3003
+```
+
+Re-enroll the terminal from `secrets/testnet/venue-relay/enrollment-qr.png` ("Re-enroll" chip);
+this replaces only the stored endpoints, not the terminal key or its journal. The phone reaches the
+relay at `https://localhost:3003` over USB, so it keeps working with Wi-Fi off. TLS uses a local CA
+name-constrained to `localhost`; `setup` writes its certificate into a gitignored debug resource
+overlay, so release builds trust only system CAs. The snapshot authorizes only what the registry
+records for the device terminal at a finalized block, and expires with it. The relay settles
+through the harness signer, which pays gas. Before submitting, the settlement worker looks for an
+existing `VoucherSettled` event, so a voucher someone else already settled is marked settled rather
+than sent again. It searches only the voucher's acceptance-to-submission window, in chunks of at most
+1,000 blocks, because Monad's public RPC rejects wider `eth_getLogs` ranges.
+
+`attendee-sign.mjs` is the attendee side of the QR exchange (`SCENARIO_KIND=attendee-sign`). It binds
+a local wallet file to the channel exactly as finalized onchain, runs the same authorization checks
+as the web wallet, signs with the channel key (re-derived from the run id, never stored) and writes
+the response QR to `secrets/testnet/attendee-response.png` for the terminal to scan. The wallet file
+records each approval before the response is written, so a rescan returns the stored answer rather
+than signing the same sequence twice.
+
+If the terminal does not scan the answer before its request expires, it releases that sequence and
+asks again for a new payment at the same position. The attendee (web wallet and this signer, via
+`@openbalance/attendee`) re-signs that position only when the earlier approval has no terminal
+receipt, is the channel tip, and has expired; the old approval is kept and marked superseded, and
+its receipt is refused. The vault settles each sequence once, so even a terminal that countersigned
+both answers collects only one, within `maxPerVoucher`. The input is an `obqr1:` payload, a receipt JSON, a PNG, or
+`--adb` for a screenshot of the connected device.
 
 The scenario package doubles as the driver for a deployed environment. `SCENARIO_KIND=api-enroll`
 enrolls a passkey and deploys the account, `api-fund` signs in and takes a faucet grant in a separate

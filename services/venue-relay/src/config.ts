@@ -11,8 +11,18 @@ const schema = z
     TERMINAL_SNAPSHOT_PATH: z.string().min(1),
     TERMINAL_INGRESS_AUDIENCE: z.string().url(),
     TERMINAL_MAXIMUM_CLOCK_SKEW_SECONDS: z.coerce.number().int().min(1).max(900).default(120),
+    // Terminals only speak HTTPS to the relay. On venue hardware the relay terminates TLS itself
+    // with a certificate from the venue's CA; behind a TLS-terminating proxy both stay unset.
+    VENUE_RELAY_TLS_CERT_PATH: z.string().min(1).optional(),
+    VENUE_RELAY_TLS_KEY_PATH: z.string().min(1).optional(),
   })
-  .strict();
+  .strict()
+  .refine(
+    (value) =>
+      (value.VENUE_RELAY_TLS_CERT_PATH === undefined) ===
+      (value.VENUE_RELAY_TLS_KEY_PATH === undefined),
+    { message: "VENUE_RELAY_TLS_CERT_PATH and VENUE_RELAY_TLS_KEY_PATH must be set together" },
+  );
 
 const CONFIGURATION_PREFIXES = ["VENUE_RELAY_", "TERMINAL_"];
 

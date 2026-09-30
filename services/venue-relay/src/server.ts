@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { startTelemetry } from "@openbalance/observability";
 import { buildVenueRelayApp } from "./app.js";
 import { loadVenueRelayEnvironment } from "./config.js";
@@ -22,6 +23,14 @@ const app = await buildVenueRelayApp({
   directory,
   audience: environment.TERMINAL_INGRESS_AUDIENCE,
   maximumClockSkewSeconds: environment.TERMINAL_MAXIMUM_CLOCK_SKEW_SECONDS,
+  ...(environment.VENUE_RELAY_TLS_CERT_PATH && environment.VENUE_RELAY_TLS_KEY_PATH
+    ? {
+        tls: {
+          cert: await readFile(environment.VENUE_RELAY_TLS_CERT_PATH),
+          key: await readFile(environment.VENUE_RELAY_TLS_KEY_PATH),
+        },
+      }
+    : {}),
   readiness: async () => {
     journal.assertReady();
   },
