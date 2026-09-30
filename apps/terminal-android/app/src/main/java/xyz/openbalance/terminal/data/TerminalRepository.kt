@@ -117,6 +117,7 @@ class TerminalRepository(
             val snapshot = parseSnapshot(channel.snapshotJson)
             val expiresAt = minOf(order.expiresAt, snapshot.acceptUntil, Math.addExact(nowSeconds, 120))
             check(latestTrustedAt >= acceptedAt && latestTrustedAt < expiresAt) { "Trusted time does not fit the payment window" }
+            releaseExpiredRequest(channel.channelId, channel.nextSequence, nowSeconds, now)
             val requestId = UUID.randomUUID().toString()
             var paymentBytes: ByteArray
             do paymentBytes = ByteArray(32).also(SecureRandom()::nextBytes) while (paymentBytes.all { it == 0.toByte() })
@@ -268,6 +269,22 @@ class TerminalRepository(
             row.orderId, value.getString("orderReference"), value.getString("description"), row.grossUnits,
             value.getString("assetSymbol"), value.getInt("assetDecimals"), row.expiresAt, row.state,
         )
+    }
+
+    /**
+     * A request the attendee never answered holds the channel's next sequence only until it expires.
+     * The terminal countersigns only after verifying the attendee's signature, so an unanswered
+     * request carries no terminal signature and can never settle; releasing it lets the channel
+     * continue at the same sequence. A request that is still live, or one the terminal has already
+     * scanned an answer for, keeps the sequence.
+     */
+    private suspend fun releaseExpiredRequest(channelId: String, sequence: Long, nowSeconds: Long, now: Long) {
+        val held = dao.saleAt(channelId, sequence) ?: return
+        check(held.state == "PREPARED" && open(held).request.expiresAt <= nowSeconds) {
+            "Channel sequence is held by an open or answered payment request"
+        }
+        check(dao.deleteUnansweredSale(held.requestId) == 1) { "Expired payment request changed concurrently" }
+        dao.expireRequestedOrder(held.requestId, now)
     }
 
     private fun view(row: SaleEntity): SaleView {

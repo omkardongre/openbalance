@@ -84,6 +84,12 @@ interface TerminalDao {
     @Insert(onConflict = OnConflictStrategy.ABORT) suspend fun insertSale(sale: SaleEntity)
     @Query("SELECT * FROM sales WHERE requestId = :requestId") suspend fun sale(requestId: String): SaleEntity?
     @Query("SELECT * FROM sales ORDER BY createdAt DESC LIMIT :limit") suspend fun sales(limit: Int = 100): List<SaleEntity>
+    @Query("SELECT * FROM sales WHERE channelId = :channelId AND sequence = :sequence")
+    suspend fun saleAt(channelId: String, sequence: Long): SaleEntity?
+    @Query("DELETE FROM sales WHERE requestId = :requestId AND state = 'PREPARED' AND relayState = 'NOT_READY'")
+    suspend fun deleteUnansweredSale(requestId: String): Int
+    @Query("UPDATE orders SET state='EXPIRED',updatedAt=:now WHERE requestId=:requestId AND state='REQUESTED'")
+    suspend fun expireRequestedOrder(requestId: String, now: Long): Int
     @Query("UPDATE sales SET state=:state, payloadNonce=:nonce, payloadCiphertext=:ciphertext, updatedAt=:now WHERE requestId=:requestId AND state=:expectedState")
     suspend fun transition(requestId: String, expectedState: String, state: String, nonce: ByteArray, ciphertext: ByteArray, now: Long): Int
     @Query("UPDATE sales SET relayState='PENDING',nextUploadAt=:now,updatedAt=:now WHERE requestId=:requestId AND state='ACCEPTED' AND relayState='NOT_READY'")

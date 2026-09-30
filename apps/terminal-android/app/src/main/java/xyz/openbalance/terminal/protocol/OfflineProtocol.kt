@@ -1,6 +1,7 @@
 package xyz.openbalance.terminal.protocol
 
 import org.json.JSONObject
+import org.web3j.crypto.Keys
 import org.web3j.crypto.Sign
 import xyz.openbalance.terminal.security.Keccak
 import java.math.BigInteger
@@ -311,7 +312,8 @@ object OfflineProtocol {
         val key = try { Sign.signedMessageHashToKey(digest, data) } catch (_: Exception) {
             throw InvalidOfflineExchange("Invalid signature")
         }
-        return "0x" + key.toString(16).padStart(128, '0').takeLast(40)
+        // An address is the last 20 bytes of keccak256 over the 64-byte public key, not of the key itself.
+        return "0x" + Keys.getAddress(key)
     }
 
     private fun validateVoucher(v: OfflineVoucher) {
