@@ -1,6 +1,7 @@
 import type { Hex } from "viem";
 import { runAccountScenario } from "./account-scenario.js";
 import { runApiEnrollment, runApiFunding, runApiScenario } from "./api-scenario.js";
+import { runAttendeeSigner } from "./attendee-signer.js";
 import { runCheckoutScenario } from "./checkout-scenario.js";
 import { runContentionGraphScenario } from "./contention-graph-scenario.js";
 import { runContentionScenario } from "./contention-scenario.js";
@@ -67,7 +68,40 @@ function describeFailure(error: unknown, depth = 0): string {
   return lines.join("\n");
 }
 
-if (!rpcUrl || !deployerPrivateKey || !/^0x[0-9a-fA-F]{64}$/.test(deployerPrivateKey)) {
+if (kind === "attendee-sign") {
+  // Holds no deployer key: the attendee side only reads the chain and signs with the channel key.
+  const required = [
+    "SCENARIO_RPC_URL",
+    "SCENARIO_STATE_PATH",
+    "SCENARIO_RUN_ID",
+    "SCENARIO_VAULT",
+    "SCENARIO_REGISTRY",
+    "SCENARIO_VENDOR_NAME",
+    "SCENARIO_INPUT",
+    "SCENARIO_RESPONSE_PNG",
+  ];
+  const missing = required.filter((name) => !process.env[name]);
+  if (missing.length > 0) {
+    process.stderr.write(`The attendee signer requires ${missing.join(", ")}\n`);
+    process.exitCode = 64;
+  } else {
+    runAttendeeSigner({
+      rpcUrl: process.env.SCENARIO_RPC_URL as string,
+      walletPath: process.env.SCENARIO_STATE_PATH as string,
+      runId: process.env.SCENARIO_RUN_ID as string,
+      vault: process.env.SCENARIO_VAULT as Hex,
+      registry: process.env.SCENARIO_REGISTRY as Hex,
+      vendorName: process.env.SCENARIO_VENDOR_NAME as string,
+      input: process.env.SCENARIO_INPUT as string,
+      responsePngPath: process.env.SCENARIO_RESPONSE_PNG as string,
+    })
+      .then((result) => process.stdout.write(`${JSON.stringify(result, null, 2)}\n`))
+      .catch((error: unknown) => {
+        process.stderr.write(`${describeFailure(error)}\n`);
+        process.exitCode = 1;
+      });
+  }
+} else if (!rpcUrl || !deployerPrivateKey || !/^0x[0-9a-fA-F]{64}$/.test(deployerPrivateKey)) {
   process.stderr.write(
     "Usage: SCENARIO_RPC_URL=<url> SCENARIO_DEPLOYER_PRIVATE_KEY=<hex> [SCENARIO_KIND=account|offline|relay|faucet] node dist/cli.js\n",
   );

@@ -270,12 +270,24 @@ importers:
       '@openbalance/api':
         specifier: workspace:*
         version: link:../../services/api
+      '@openbalance/attendee':
+        specifier: workspace:*
+        version: link:../attendee
       '@openbalance/protocol':
         specifier: workspace:*
         version: link:../protocol
+      '@zxing/library':
+        specifier: 0.23.0
+        version: 0.23.0
       pg:
         specifier: 8.23.0
         version: 8.23.0
+      pngjs:
+        specifier: 7.0.0
+        version: 7.0.0
+      qrcode:
+        specifier: 1.5.4
+        version: 1.5.4
       viem:
         specifier: 2.56.3
         version: 2.56.3(typescript@7.0.2)(zod@4.6.1)
@@ -289,6 +301,12 @@ importers:
       '@types/pg':
         specifier: 8.23.1
         version: 8.23.1
+      '@types/pngjs':
+        specifier: 6.0.5
+        version: 6.0.5
+      '@types/qrcode':
+        specifier: 1.5.6
+        version: 1.5.6
       typescript:
         specifier: 7.0.2
         version: 7.0.2
@@ -1576,6 +1594,9 @@ packages:
   '@types/pg@8.23.1':
     resolution: {integrity: sha512-fKVHpikPdg4GKks3JuLEhvwSyvwzF23hnabPy6DD8ljVbC7+6J5dQzdv4arV6jqq57djnMgs1HKBxX4P8aBI3A==}
 
+  '@types/pngjs@6.0.5':
+    resolution: {integrity: sha512-0k5eKfrA83JOZPppLtS2C7OUtyNAl2wKNxfyYl9Q5g9lPkgBl/9hNyAu6HuEH2J4XmIv2znEpkDd0SaZVxW6iQ==}
+
   '@types/qrcode@1.5.6':
     resolution: {integrity: sha512-te7NQcV2BOvdj2b1hCAHzAoMNuj65kNBMz0KBaxM6c3VGBOhU0dURQKOtH8CFNI/dsKkwlv32p26qYQTWoB5bw==}
 
@@ -2288,6 +2309,10 @@ packages:
   pngjs@5.0.0:
     resolution: {integrity: sha512-40QW5YalBNfQo5yRYmiw7Yz6TKKVr3h6970B2YE+3fQpsWcrbj1PzJgxeJ19DRQjhMbKPIuMY8rFaXc8moolVw==}
     engines: {node: '>=10.13.0'}
+
+  pngjs@7.0.0:
+    resolution: {integrity: sha512-LKWqWJRhstyYo9pGvgor/ivk2w94eSjE3RGVuzLGlr3NmD8bf7RcYGze1mNdEHRP6TRP6rMuDHk5t44hnTRyow==}
+    engines: {node: '>=14.19.0'}
 
   postcss@8.5.23:
     resolution: {integrity: sha512-g50586zr4bZmwFiTlflMu8E0bDTb5I5gertgwAKmsdUlTQIhZtunzUlD1WSzwcVWPoAVpsrA6vlfCD7oXvRwgg==}
@@ -3655,6 +3680,10 @@ snapshots:
       pg-protocol: 1.16.0
       pg-types: 2.2.0
 
+  '@types/pngjs@6.0.5':
+    dependencies:
+      '@types/node': 24.13.4
+
   '@types/qrcode@1.5.6':
     dependencies:
       '@types/node': 24.13.4
@@ -4267,6 +4296,8 @@ snapshots:
       thread-stream: 4.2.0
 
   pngjs@5.0.0: {}
+
+  pngjs@7.0.0: {}
 
   postcss@8.5.23:
     dependencies:

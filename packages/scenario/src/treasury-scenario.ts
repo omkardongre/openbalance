@@ -29,6 +29,7 @@ const OPEN_CHANNEL = keccak256(stringToHex("OPEN_CHANNEL"));
 const vaultAbi = parseAbi([
   "function channelTermsHash((bytes32 channelId,bytes32 eventId,address asset,uint256 reserveUnits,bytes32 vendorId,uint256 vendorDestinationVersion,bytes32 terminalInstanceId,uint256 terminalKeyVersion,address attendeeChannelSigner,uint256 configVersion,uint16 organizerFeeBps,uint16 platformFeeBps,uint256 maxPerVoucher,uint32 maxVoucherCount,uint48 acceptFrom,uint48 acceptUntil,uint48 submitUntil,bytes32 genesisDigest) config,address originalAccount) view returns (bytes32)",
   "function voucherDigest((uint32 protocolVersion,uint256 chainId,address vault,bytes32 channelId,uint32 sequence,bytes32 previousVoucherDigest,bytes32 paymentId,bytes32 orderRefHash,uint256 grossUnits,uint256 cumulativeGrossUnits,bytes32 receiptCommitment,uint48 acceptedAt,uint48 acceptUntil,uint48 submitUntil,uint256 configVersion) voucher) view returns (bytes32)",
+  "function reservedFor(address originalAccount) view returns (uint256)",
 ]);
 const registryReads = parseAbi([
   "function destinationDigest(bytes32 vendorId,uint256 version,address destination,uint256 deadline) view returns (bytes32)",
@@ -395,6 +396,15 @@ export async function runTreasuryScenario(
     functionName: "channelTermsHash",
     args: [channelConfig, state.account],
   })) as Hex;
+  // The account caps its total reserved balance, so the cap must cover channels it already holds
+  // (including expired ones not yet reclaimed) plus this one, or the open reverts.
+  const maximumTotalReserve =
+    ((await publicClient.readContract({
+      address: vault,
+      abi: vaultAbi,
+      functionName: "reservedFor",
+      args: [state.account],
+    })) as bigint) + reserveUnits;
   const openTerms = keccak256(
     encodeAbiParameters(
       [
@@ -404,7 +414,7 @@ export async function runTreasuryScenario(
         { type: "uint256" },
         { type: "bytes32" },
       ],
-      [vault, channelId, reserveUnits, reserveUnits, termsHash],
+      [vault, channelId, reserveUnits, maximumTotalReserve, termsHash],
     ),
   );
   const openDeadline = BigInt(now + 3_600);
@@ -448,7 +458,7 @@ export async function runTreasuryScenario(
     args: [
       vault,
       channelConfig,
-      reserveUnits,
+      maximumTotalReserve,
       openDeadline,
       false,
       {
