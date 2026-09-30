@@ -3,10 +3,15 @@ package xyz.openbalance.terminal.ui
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import android.os.SystemClock
+import android.provider.Settings
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import xyz.openbalance.terminal.BuildConfig
 import xyz.openbalance.terminal.TerminalApplication
@@ -35,6 +40,12 @@ data class TerminalUiState(
     val error: Boolean = false,
     /** Whether provisioning has succeeded at least once this session. */
     val synced: Boolean = false,
+    /** Seconds the current trusted-time sample stays usable; null when there is no usable sample. */
+    val timeValidSeconds: Long? = null,
+    /** Wall-clock seconds, ticked once a second, for countdowns only. Never used for payment decisions. */
+    val nowSeconds: Long = System.currentTimeMillis() / 1000,
+    /** The sale shown full screen: a live payment request, or the receipt just accepted. */
+    val focusedSaleId: String? = null,
 )
 
 class TerminalViewModel(application: Application) : AndroidViewModel(application) {
@@ -70,13 +81,58 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
                 }
             }.onFailure(::fail)
         }
+        viewModelScope.launch {
+            while (isActive) {
+                tickClock()
+                delay(1_000)
+            }
+        }
+    }
+
+    /**
+     * Keeps readiness honest: a sample that has aged past the source's freshness limit, or that
+     * belongs to an earlier boot, is dropped so the UI stops reporting time as ready. The payment
+     * path still checks freshness itself through [SignedTimeSource.current]; this only mirrors it.
+     */
+    private fun tickClock() {
+        val current = _state.value
+        val sample = current.trustedTime
+        val validFor = sample?.let { source ->
+            val sameBoot = runCatching { bootCount() == source.bootId }.getOrDefault(false)
+            val elapsed = SystemClock.elapsedRealtime() - source.observedMonotonicMs
+            if (!sameBoot || elapsed < 0) 0L else ((SignedTimeSource.MAX_SAMPLE_AGE_MS - elapsed) / 1_000).coerceAtLeast(0)
+        }
+        val expired = sample != null && validFor == 0L
+        _state.update {
+            it.copy(
+                nowSeconds = System.currentTimeMillis() / 1000,
+                trustedTime = if (expired) null else it.trustedTime,
+                timeValidSeconds = if (expired) null else validFor,
+                message = if (expired && !it.busy) "Trusted time expired; refresh while connected" else it.message,
+                error = if (expired && !it.busy) true else it.error,
+            )
+        }
+    }
+
+    private fun bootCount(): String =
+        Settings.Global.getInt(app.contentResolver, Settings.Global.BOOT_COUNT, -1).also { check(it >= 0) }.toString()
+
+    fun focusSale(requestId: String) {
+        _state.update { it.copy(focusedSaleId = requestId) }
+    }
+
+    fun dismissFocusedSale() {
+        _state.update { it.copy(focusedSaleId = null) }
     }
 
     fun refreshTime() = viewModelScope.launch(Dispatchers.IO) {
         runBusy("Refreshing authenticated time") {
             val source = requireNotNull(timeSource) { "Trusted-time endpoint and pinned key are not configured" }
             val sample = source.sample()
-            _state.value.copy(trustedTime = sample, message = "Authenticated time ready", busy = false)
+            _state.value.copy(
+                trustedTime = sample, timeValidSeconds = SignedTimeSource.MAX_SAMPLE_AGE_MS / 1_000,
+                message = "Authenticated time ready", busy = false,
+            )
         }
     }
 
@@ -112,6 +168,7 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
             app.scheduleRelay()
             _state.value.copy(
                 sales = app.repository.recoverSales(), activeRequestId = null, scanOpen = false, scanPurpose = null,
+                focusedSaleId = completed.requestId,
                 message = "Receipt ${completed.requestId} durably accepted pending settlement", busy = false,
             )
         }
@@ -136,8 +193,14 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
                 channels = channels,
                 orders = app.repository.orderViews(),
                 sales = app.repository.recoverSales(),
-                selectedChannelId = _state.value.selectedChannelId?.takeIf { selected -> channels.any { it.channelId == selected } }
-                    ?: channels.firstOrNull()?.channelId,
+                // Keep the cashier's choice while it still accepts payments; otherwise default to the
+                // open reserve that closes last.
+                selectedChannelId = run {
+                    val nowSeconds = System.currentTimeMillis() / 1000
+                    val open = channels.filter { it.acceptUntil > nowSeconds }
+                    _state.value.selectedChannelId?.takeIf { selected -> open.any { it.channelId == selected } }
+                        ?: open.maxByOrNull { it.acceptUntil }?.channelId
+                },
                 message = "Verified $installed new channels; imported $imported new POS orders",
                 synced = true,
                 busy = false,
@@ -172,6 +235,7 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
             val sale = app.repository.prepareOrderSale(orderId, channelId, earliest, latest, latest, System.currentTimeMillis())
             _state.value.copy(
                 orders = app.repository.orderViews(), sales = app.repository.recoverSales(),
+                focusedSaleId = sale.requestId,
                 message = "Payment request ${sale.requestId} durably prepared", busy = false,
             )
         }
@@ -186,7 +250,10 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
             val current = source.current(sample)
             app.repository.accept(requestId, (current.second + 999) / 1000, System.currentTimeMillis()) { source.current(sample) }
             app.scheduleRelay()
-            _state.value.copy(sales = app.repository.recoverSales(), busy = false, message = "Receipt recovered; settlement pending")
+            _state.value.copy(
+                sales = app.repository.recoverSales(), focusedSaleId = requestId,
+                busy = false, message = "Receipt recovered; settlement pending",
+            )
         }
     }
 

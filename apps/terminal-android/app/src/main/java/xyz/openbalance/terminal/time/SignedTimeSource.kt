@@ -80,10 +80,15 @@ class SignedTimeSource(
         if (current.second != sample.bootId || current.first < sample.observedMonotonicMs)
             throw IllegalStateException("Trusted time continuity lost")
         val elapsed = current.first - sample.observedMonotonicMs
-        check(elapsed <= 300_000) { "Trusted time sample is stale; refresh while connected" }
+        check(elapsed <= MAX_SAMPLE_AGE_MS) { "Trusted time sample is stale; refresh while connected" }
         val drift = (elapsed + 999) / 1_000
         return Math.subtractExact(Math.addExact(sample.earliestUnixMs, elapsed), drift) to
             Math.addExact(Math.addExact(sample.latestUnixMs, elapsed), drift)
+    }
+
+    companion object {
+        /** How long a sample may be carried forward on the monotonic clock before it must be refreshed. */
+        const val MAX_SAMPLE_AGE_MS = 300_000L
     }
 
     private fun monotonic(): Pair<Long, String> {

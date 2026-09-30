@@ -31,6 +31,11 @@ data class SaleView(
     val receiptJson: String?,
     val transactionHash: String?,
     val lastUploadError: String?,
+    val grossUnits: String = "0",
+    /** Request expiry, epoch seconds: the attendee must answer before this. */
+    val expiresAt: Long = 0,
+    /** Creation time, epoch milliseconds. */
+    val createdAt: Long = 0,
 )
 data class RelayUploadLease(
     val requestId: String,
@@ -48,6 +53,8 @@ data class OrderView(
     val assetDecimals: Int,
     val expiresAt: Long,
     val state: String,
+    /** The payment request charged against this order, once one exists. */
+    val requestId: String? = null,
 )
 data class ChannelView(val channelId: String, val remainingUnits: String, val acceptUntil: Long)
 
@@ -267,7 +274,7 @@ class TerminalRepository(
         val value = JSONObject(String(payloads.open(row.payloadNonce, row.payloadCiphertext, row.orderId.toByteArray())))
         OrderView(
             row.orderId, value.getString("orderReference"), value.getString("description"), row.grossUnits,
-            value.getString("assetSymbol"), value.getInt("assetDecimals"), row.expiresAt, row.state,
+            value.getString("assetSymbol"), value.getInt("assetDecimals"), row.expiresAt, row.state, row.requestId,
         )
     }
 
@@ -293,6 +300,8 @@ class TerminalRepository(
             row.requestId, row.channelId, row.state, row.relayState,
             OfflineProtocol.encodeRequestQr(payload.request), payload.receipt?.let(OfflineProtocol::canonicalReceipt),
             row.transactionHash, row.lastUploadError,
+            OfflineProtocol.decodeVoucher(payload.request.voucher).grossUnits.toString(),
+            payload.request.expiresAt, row.createdAt,
         )
     }
 
