@@ -117,6 +117,96 @@ describe("attendee offline authorization", () => {
       );
   });
 
+  describe("superseding an approval the terminal never confirmed", () => {
+    const first = request();
+    const approved = prepareAttendeeAuthorization({
+      state,
+      request: first,
+      nowSeconds: 130,
+      paymentAlreadyAuthorized: false,
+    });
+    const tip = { paymentId: first.paymentId, request: first, receipt: null };
+    const reissued = () => ({
+      ...request({ paymentId: hex32("c"), grossUnits: 90n, cumulativeGrossUnits: 90n }),
+      requestId: "request:2",
+      expiresAt: 195,
+    });
+
+    it("re-signs the same sequence once the unconfirmed request has expired", () => {
+      const prepared = prepareAttendeeAuthorization({
+        state: approved.nextState,
+        request: reissued(),
+        nowSeconds: 185,
+        paymentAlreadyAuthorized: false,
+        tip,
+      });
+      expect(prepared.supersededPaymentId).toBe(first.paymentId);
+      expect(prepared.nextState).toMatchObject({
+        revision: 3,
+        spentUnits: 90n,
+        approvedVoucherCount: 1,
+        nextSequence: 2,
+        lastVoucherDigest: prepared.voucherDigest,
+      });
+    });
+
+    it("refuses while the old request is live, confirmed, or not the tip", () => {
+      const receipt = {
+        receiptId: "receipt:1",
+        terminalId: state.terminalId,
+        channelId: state.channelId,
+        sequence: 1,
+        paymentId: first.paymentId,
+        voucher: first.voucher,
+        attendeeSignature: `0x${"1".repeat(130)}` as Hex,
+        terminalSignature: `0x${"2".repeat(130)}` as Hex,
+      };
+      const cases = [
+        { tip, nowSeconds: 180 },
+        { tip: { ...tip, receipt }, nowSeconds: 185 },
+        { tip: { ...tip, paymentId: hex32("d") }, nowSeconds: 185 },
+        { tip: undefined, nowSeconds: 185 },
+      ];
+      for (const candidate of cases)
+        expect(() =>
+          prepareAttendeeAuthorization({
+            state: approved.nextState,
+            request: reissued(),
+            paymentAlreadyAuthorized: false,
+            ...candidate,
+          }),
+        ).toThrow(OfflineAuthorizationRejected);
+      // Same payment again is a rescan, never a supersede.
+      expect(() =>
+        prepareAttendeeAuthorization({
+          state: approved.nextState,
+          request: { ...first, requestId: "request:3" },
+          nowSeconds: 185,
+          paymentAlreadyAuthorized: false,
+          tip,
+        }),
+      ).toThrow(OfflineAuthorizationRejected);
+    });
+
+    it("never rewinds past a different previous digest", () => {
+      expect(() =>
+        prepareAttendeeAuthorization({
+          state: approved.nextState,
+          request: {
+            ...request({
+              paymentId: hex32("c"),
+              previousVoucherDigest: hex32("e"),
+            }),
+            expiresAt: 195,
+          },
+          nowSeconds: 185,
+          paymentAlreadyAuthorized: false,
+          tip,
+        }),
+      ).toThrow(OfflineAuthorizationRejected);
+    });
+  });
+
   it("verifies the returned receipt against both channel authorities", async () => {
     const terminalRequest = request();
     const digest = offlineVoucherDigest(decodeOfflineVoucher(terminalRequest.voucher));

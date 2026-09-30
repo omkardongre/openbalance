@@ -46,6 +46,8 @@ export type PreparedAttendeeAuthorization = {
   voucherDigest: Hex;
   grossUnits: bigint;
   cumulativeGrossUnits: bigint;
+  /** The earlier, never-confirmed approval this one replaces at the same sequence, if any. */
+  supersededPaymentId: Hex | null;
   nextState: AttendeeChannelState;
 };
 
@@ -111,14 +113,85 @@ export function createAttendeeChannelState(input: {
   };
 }
 
+/** The newest local approval on a channel, as the caller stored it. */
+export type UnconfirmedTipAuthorization = {
+  paymentId: Hex;
+  request: TerminalPaymentRequest;
+  receipt: VoucherReceipt | null;
+};
+
+/**
+ * Rewinds the channel cursor past the newest approval when the terminal has visibly abandoned it.
+ *
+ * The attendee advances its cursor when it signs, but a voucher settles only with the terminal's
+ * countersignature, which a compliant terminal gives only before the request's `expiresAt` and
+ * only while it still holds that sequence. A terminal that never received the response in time
+ * releases the sequence and asks again at the same position; without this the channel would be
+ * stuck for good. Rewinding is allowed only when every condition holds:
+ * - the approval has no terminal receipt (the terminal never confirmed it);
+ * - it is the channel tip, so nothing was chained after it;
+ * - its request has expired on this device's clock, and the new request is for another payment
+ *   at the same sequence and previous digest, which a compliant terminal issues only after
+ *   releasing the old one.
+ * Safety does not rest on the terminal being honest: the vault settles each sequence once, so a
+ * terminal that countersigned both vouchers still gets only one of them, bounded by
+ * `maxPerVoucher` and the reserve.
+ */
+function rewindUnconfirmedTip(
+  state: AttendeeChannelState,
+  tip: UnconfirmedTipAuthorization,
+  request: TerminalPaymentRequest,
+  voucher: ReturnType<typeof decodeOfflineVoucher>,
+  nowSeconds: number,
+): AttendeeChannelState {
+  const tipVoucher = decodeOfflineVoucher(tip.request.voucher);
+  if (
+    tip.receipt !== null ||
+    !sameHex(tip.paymentId, tip.request.paymentId) ||
+    sameHex(tip.paymentId, request.paymentId) ||
+    !sameHex(tip.request.channelId, state.channelId) ||
+    !sameHex(tip.request.terminalId, state.terminalId) ||
+    !sameHex(tipVoucher.channelId, state.channelId) ||
+    tipVoucher.sequence !== state.nextSequence - 1 ||
+    !sameHex(offlineVoucherDigest(tipVoucher), state.lastVoucherDigest) ||
+    tipVoucher.cumulativeGrossUnits !== state.spentUnits ||
+    state.approvedVoucherCount < 1 ||
+    nowSeconds <= tip.request.expiresAt ||
+    voucher.sequence !== tipVoucher.sequence ||
+    !sameHex(voucher.previousVoucherDigest, tipVoucher.previousVoucherDigest)
+  )
+    throw new OfflineAuthorizationRejected(
+      "Offline request is expired, duplicated, or outside the activated channel",
+    );
+  return {
+    ...state,
+    spentUnits: tipVoucher.cumulativeGrossUnits - tipVoucher.grossUnits,
+    approvedVoucherCount: state.approvedVoucherCount - 1,
+    nextSequence: tipVoucher.sequence,
+    lastVoucherDigest: tipVoucher.previousVoucherDigest,
+  };
+}
+
 export function prepareAttendeeAuthorization(input: {
   state: AttendeeChannelState;
   request: TerminalPaymentRequest;
   nowSeconds: number;
   paymentAlreadyAuthorized: boolean;
+  /**
+   * The newest local approval on this channel, if any. Supplied so that a request re-issued at
+   * that approval's sequence can supersede it; see `rewindUnconfirmedTip` for the conditions.
+   */
+  tip?: UnconfirmedTipAuthorization | undefined;
 }): PreparedAttendeeAuthorization {
-  const { state, request } = input;
+  const { request } = input;
   const voucher = decodeOfflineVoucher(request.voucher);
+  const supersedes =
+    input.tip !== undefined && voucher.sequence === input.state.nextSequence - 1
+      ? input.tip
+      : undefined;
+  const state = supersedes
+    ? rewindUnconfirmedTip(input.state, supersedes, request, voucher, input.nowSeconds)
+    : input.state;
   const expectedCumulative = state.spentUnits + voucher.grossUnits;
   if (
     state.schemaVersion !== 1 ||
@@ -156,9 +229,10 @@ export function prepareAttendeeAuthorization(input: {
     voucherDigest: digest,
     grossUnits: voucher.grossUnits,
     cumulativeGrossUnits: voucher.cumulativeGrossUnits,
+    supersededPaymentId: supersedes?.paymentId ?? null,
     nextState: {
       ...state,
-      revision: state.revision + 1,
+      revision: input.state.revision + 1,
       spentUnits: voucher.cumulativeGrossUnits,
       approvedVoucherCount: state.approvedVoucherCount + 1,
       nextSequence: state.nextSequence + 1,

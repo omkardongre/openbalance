@@ -48,7 +48,24 @@ export type StoredAuthorization = {
   cumulativeGrossUnits: bigint;
   createdAt: number;
   receipt: VoucherReceipt | null;
+  /**
+   * Set when the terminal abandoned this approval (never confirmed it before it expired) and
+   * re-requested the same sequence for the payment named here. Absent on rows from before.
+   */
+  supersededBy?: Hex;
 };
+
+/** The newest live (not superseded) approval on the channel at the given sequence, if any. */
+async function tipAuthorization(
+  store: IDBObjectStore,
+  channelId: Hex,
+  sequence: number,
+): Promise<StoredAuthorization | undefined> {
+  const rows = await requestResult(
+    store.index("byChannel").getAll(channelId) as IDBRequest<StoredAuthorization[]>,
+  );
+  return rows.find((row) => !row.supersededBy && row.request.sequence === sequence);
+}
 
 function requestResult<T>(request: IDBRequest<T>): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -292,6 +309,13 @@ export async function authorizeOfflineRequest(input: {
         StoredAuthorization | undefined
       >,
     );
+    const tip = channel
+      ? await tipAuthorization(
+          read.objectStore("authorizations"),
+          input.request.channelId,
+          channel.state.nextSequence - 1,
+        )
+      : undefined;
     await transactionDone(read);
     if (channel?.status !== "ACTIVE")
       throw new Error("This channel is not finalized and active on this device.");
@@ -305,6 +329,7 @@ export async function authorizeOfflineRequest(input: {
       request: input.request,
       nowSeconds: input.nowSeconds ?? Math.floor(Date.now() / 1_000),
       paymentAlreadyAuthorized: false,
+      tip,
     });
     const attendeeSignature = await decryptAndSign(
       database,
@@ -345,8 +370,26 @@ export async function authorizeOfflineRequest(input: {
       write.abort();
       throw new Error("Channel changed while approval was in progress. Scan the terminal again.");
     }
+    const authorizations = write.objectStore("authorizations");
+    if (prepared.supersededPaymentId) {
+      // The revision check above already pins the channel; this pins the replaced approval, so a
+      // receipt stored for it in the meantime can never be silently overwritten.
+      const replaced = await requestResult(
+        authorizations.get(prepared.supersededPaymentId) as IDBRequest<
+          StoredAuthorization | undefined
+        >,
+      );
+      if (!replaced || replaced.receipt || replaced.supersededBy) {
+        write.abort();
+        throw new Error("Channel changed while approval was in progress. Scan the terminal again.");
+      }
+      authorizations.put({
+        ...replaced,
+        supersededBy: input.request.paymentId,
+      } satisfies StoredAuthorization);
+    }
     channels.put({ ...current, state: prepared.nextState } satisfies StagedChannel);
-    write.objectStore("authorizations").add(authorization);
+    authorizations.add(authorization);
     await transactionDone(write);
     return authorization;
   } finally {
@@ -370,6 +413,10 @@ export async function storeTerminalReceipt(payload: string): Promise<StoredAutho
       if (canonicalVoucherReceipt(authorization.receipt) === payload) return authorization;
       throw new Error("A different terminal receipt is already stored for this payment.");
     }
+    if (authorization?.supersededBy)
+      throw new Error(
+        "This approval expired and was replaced by a newer one; its receipt cannot be stored.",
+      );
     if (
       !authorization ||
       channel?.status !== "ACTIVE" ||
@@ -392,7 +439,7 @@ export async function storeTerminalReceipt(payload: string): Promise<StoredAutho
     const current = await requestResult(
       store.get(receipt.paymentId) as IDBRequest<StoredAuthorization>,
     );
-    if (!current || current.requestHash !== authorization.requestHash) {
+    if (!current || current.requestHash !== authorization.requestHash || current.supersededBy) {
       write.abort();
       throw new Error("Authorization changed while the receipt was being verified.");
     }

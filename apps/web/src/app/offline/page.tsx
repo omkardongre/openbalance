@@ -266,7 +266,9 @@ export default function OfflineWalletPage() {
                     <span>
                       {authorization.receipt
                         ? "TERMINAL RECEIPT STORED"
-                        : "AWAITING TERMINAL RECEIPT"}
+                        : authorization.supersededBy
+                          ? "EXPIRED, REPLACED BY A NEWER REQUEST"
+                          : "AWAITING TERMINAL RECEIPT"}
                     </span>
                     <small>{new Date(authorization.createdAt).toLocaleString()}</small>
                   </div>
