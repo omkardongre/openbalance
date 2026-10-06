@@ -8,11 +8,11 @@ import { Pool } from "pg";
 import { createPublicClient, http } from "viem";
 import { buildRelayerApp } from "./app.js";
 import { AttendeeFinancialCommandService } from "./attendee-commands.js";
-import { AttendeeReclaimService } from "./attendee-reclaims.js";
 import { loadRelayerEnvironment } from "./config.js";
 import { loadFinancialEventManifest } from "./financial-manifest.js";
 import { ViemFinancialManifestVerifier } from "./financial-manifest-chain.js";
 import { FinancialOperationJournal } from "./financial-operations.js";
+import { ReserveReclaimService } from "./reserve-reclaims.js";
 import { VendorFinancialCommandService } from "./vendor-commands.js";
 import { VendorTreasuryAccessService } from "./vendor-treasury-access.js";
 import { finalizedChannelReader, VendorVoucherSettlementService } from "./vendor-vouchers.js";
@@ -55,7 +55,7 @@ let financial:
   | {
       access: AccountAccessService;
       commands: AttendeeFinancialCommandService;
-      reclaims: AttendeeReclaimService;
+      reclaims: ReserveReclaimService;
       treasuryAccess: VendorTreasuryAccessService;
       treasuryCommands: VendorFinancialCommandService;
       voucherSettlements: VendorVoucherSettlementService;
@@ -90,7 +90,7 @@ if (environment.FINANCIAL_EVENT_MANIFEST_PATH) {
       events: manifest.events,
       maximumLifetimeSeconds: BigInt(environment.FINANCIAL_COMMAND_MAX_LIFETIME_SECONDS),
     }),
-    reclaims: new AttendeeReclaimService({
+    reclaims: new ReserveReclaimService({
       pool,
       journal,
       manifest,

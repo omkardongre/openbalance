@@ -17,8 +17,12 @@ import {
   AttendeeCommandRejected,
   type AttendeeFinancialCommandService,
 } from "./attendee-commands.js";
-import { AttendeeReclaimRejected, type AttendeeReclaimService } from "./attendee-reclaims.js";
 import { FinancialOperationConflict, FinancialOperationRejected } from "./financial-operations.js";
+import {
+  MAX_RECLAIMABLE_LISTING,
+  ReserveReclaimRejected,
+  type ReserveReclaimService,
+} from "./reserve-reclaims.js";
 import {
   VendorCommandNotFound,
   VendorCommandRejected,
@@ -30,13 +34,38 @@ import {
 } from "./vendor-treasury-access.js";
 import { type VendorVoucherSettlementService, VoucherChannelNotFound } from "./vendor-vouchers.js";
 
+const reserveReturnRoute = "/v1/reserve-channels/:id/reclaims";
+const bytes32Param = z.string().regex(/^0x[0-9a-fA-F]{64}$/);
+
+function reclaimError(reply: FastifyReply, error: unknown) {
+  if (error instanceof ReserveReclaimRejected) {
+    const notFound =
+      error.code === "channel_not_found" ||
+      error.code === "event_not_found" ||
+      error.code === "reclaim_not_found";
+    return reply.code(notFound ? 404 : 409).send({
+      error: error.code,
+      action:
+        error.code === "reclaim_not_yet_eligible"
+          ? "Wait until the disclosed submission deadline."
+          : "Refresh the finalized reserve state.",
+      retryable: error.code === "reclaim_not_yet_eligible",
+    });
+  }
+  if (error instanceof FinancialOperationConflict)
+    return reply.code(409).send({ error: "reclaim_in_progress", retryable: true });
+  if (error instanceof FinancialOperationRejected)
+    return reply.code(422).send({ error: "reclaim_rejected", retryable: false });
+  throw error;
+}
+
 export async function buildRelayerApp(
   sponsorship: DeploymentSponsorshipService,
   origin: string,
   financial?: {
     access: AccountAccessService;
     commands: AttendeeFinancialCommandService;
-    reclaims?: AttendeeReclaimService;
+    reclaims?: ReserveReclaimService;
     treasuryAccess?: VendorTreasuryAccessService;
     treasuryCommands?: VendorFinancialCommandService;
     voucherSettlements?: VendorVoucherSettlementService;
@@ -53,7 +82,14 @@ export async function buildRelayerApp(
   await attachHttpOperations(app, { serviceName: "openbalance-relayer", readiness });
   app.addHook("onRequest", async (request, reply) => {
     reply.header("Cache-Control", "no-store");
-    if (request.method === "POST" && request.headers.origin !== origin)
+    // The origin check protects requests that carry a session or credential. A reserve return
+    // carries neither and always pays the original account, so any caller, browser or not, may
+    // submit it.
+    if (
+      request.method === "POST" &&
+      request.headers.origin !== origin &&
+      request.routeOptions.url !== reserveReturnRoute
+    )
       return reply.code(403).send({ error: "origin_denied" });
   });
   app.post("/v1/accounts/deployments/sponsor", async (request, reply) => {
@@ -146,46 +182,54 @@ export async function buildRelayerApp(
     });
     const reclaims = financial.reclaims;
     if (reclaims) {
-      app.post("/v1/reserve-channels/:id/reclaims", async (request, reply) => {
-        const parsed = z
-          .object({ id: z.string().regex(/^0x[0-9a-fA-F]{64}$/) })
-          .strict()
-          .safeParse(request.params);
-        const body = z
-          .object({ eventId: z.string().regex(/^0x[0-9a-fA-F]{64}$/) })
-          .strict()
-          .safeParse(request.body);
-        const idempotencyKey = request.headers["idempotency-key"];
-        if (!parsed.success || !body.success || typeof idempotencyKey !== "string")
+      // No session, credential or idempotency key: the vault pays only the original account, and
+      // the service keeps at most one live return per channel however many callers ask.
+      app.post(reserveReturnRoute, async (request, reply) => {
+        const params = z.object({ id: bytes32Param }).strict().safeParse(request.params);
+        const body = z.object({ eventId: bytes32Param }).strict().safeParse(request.body);
+        if (!params.success || !body.success)
           return reply.code(400).send({ error: "invalid_reclaim_request", retryable: false });
         try {
-          const identity = await financial.access.authenticate(request.headers.authorization);
           const result = await reclaims.accept({
-            identity,
             eventId: body.data.eventId as `0x${string}`,
-            channelId: parsed.data.id as `0x${string}`,
-            idempotencyKey,
+            channelId: params.data.id as `0x${string}`,
           });
-          return reply.code(202).send(result);
+          return reply.code(result.created ? 202 : 200).send(result);
         } catch (error) {
-          if (error instanceof AccountAccessRejected)
-            return reply.code(401).send({ error: "session_invalid", retryable: false });
-          if (error instanceof AttendeeReclaimRejected) {
-            const notFound = error.code === "channel_not_found";
-            return reply.code(notFound ? 404 : 409).send({
-              error: error.code,
-              action:
-                error.code === "reclaim_not_yet_eligible"
-                  ? "Wait until the disclosed submission deadline."
-                  : "Refresh the finalized reserve state.",
-              retryable: error.code === "reclaim_not_yet_eligible",
-            });
-          }
-          if (error instanceof FinancialOperationConflict)
-            return reply.code(409).send({ error: "idempotency_conflict", retryable: false });
-          if (error instanceof FinancialOperationRejected)
-            return reply.code(422).send({ error: "reclaim_rejected", retryable: false });
-          throw error;
+          return reclaimError(reply, error);
+        }
+      });
+
+      app.get(reserveReturnRoute, async (request, reply) => {
+        const params = z.object({ id: bytes32Param }).strict().safeParse(request.params);
+        if (!params.success)
+          return reply.code(400).send({ error: "invalid_channel_id", retryable: false });
+        try {
+          return await reclaims.status(params.data.id as `0x${string}`);
+        } catch (error) {
+          return reclaimError(reply, error);
+        }
+      });
+
+      app.get("/v1/events/:eventId/reclaimable-channels", async (request, reply) => {
+        const params = z.object({ eventId: bytes32Param }).strict().safeParse(request.params);
+        const query = z
+          .object({
+            limit: z.coerce
+              .number()
+              .int()
+              .min(1)
+              .max(MAX_RECLAIMABLE_LISTING)
+              .default(MAX_RECLAIMABLE_LISTING),
+          })
+          .strict()
+          .safeParse(request.query);
+        if (!params.success || !query.success)
+          return reply.code(400).send({ error: "invalid_reclaimable_request", retryable: false });
+        try {
+          return await reclaims.reclaimable(params.data.eventId as `0x${string}`, query.data.limit);
+        } catch (error) {
+          return reclaimError(reply, error);
         }
       });
     }

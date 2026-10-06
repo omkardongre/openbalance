@@ -296,6 +296,32 @@ export class FinancialOperationJournal {
     return result.rows[0] ? operation(result.rows[0]) : null;
   }
 
+  /**
+   * Newest operation one actor holds for an aggregate, plus how many of that actor's attempts on it
+   * ended FAILED. Lets a caller keep exactly one live operation per aggregate while still allowing a
+   * fresh attempt once an earlier one has expired.
+   */
+  async aggregateHistory(
+    actorId: string,
+    kind: FinancialOperationKind,
+    aggregateId: Hex,
+  ): Promise<{ latest: FinancialOperation | null; failed: number }> {
+    if (!actorIdPattern.test(actorId) || !operationKind.has(kind) || !bytes32.test(aggregateId))
+      throw new FinancialOperationRejected("Invalid aggregate lookup");
+    const result = await this.pool.query<OperationRow & { failed_count: string }>(
+      `SELECT o.*,COUNT(*) FILTER (WHERE o.state='FAILED') OVER () AS failed_count
+       FROM financial_operations o
+       WHERE o.actor_id=$1 AND o.operation_kind=$2 AND o.aggregate_id=$3
+       ORDER BY o.created_at DESC,o.operation_id DESC
+       LIMIT 1`,
+      [actorId, kind, aggregateId.toLowerCase()],
+    );
+    const row = result.rows[0];
+    return row
+      ? { latest: operation(row), failed: Number(row.failed_count) }
+      : { latest: null, failed: 0 };
+  }
+
   async claim(
     limit: number,
     owner: string,

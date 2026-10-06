@@ -14,6 +14,7 @@ import {
   type FinancialCommandProposal,
   PermanentFinancialOperationFailure,
 } from "./financial-worker.js";
+import { RESERVE_RETURN_ACTOR } from "./reserve-reclaims.js";
 import { expectedFinancialEvent } from "./viem-financial-finality.js";
 
 const selector = (abi: Parameters<typeof getAbiItem>[0]["abi"], name: string) => {
@@ -115,9 +116,11 @@ export class DatabaseFinancialCommandPolicy implements FinancialCommandPolicy {
         throw new PermanentFinancialOperationFailure("account_not_verified");
       return;
     }
-    const requiredActor = operation.kind === "RESERVE_RECLAIM" ? "attendee:" : "vendor-treasury:";
-    if (!operation.actorId.startsWith(requiredActor))
-      throw new PermanentFinancialOperationFailure("actor_not_sponsored");
+    const sponsoredActor =
+      operation.kind === "RESERVE_RECLAIM"
+        ? operation.actorId === RESERVE_RETURN_ACTOR
+        : operation.actorId.startsWith("vendor-treasury:");
+    if (!sponsoredActor) throw new PermanentFinancialOperationFailure("actor_not_sponsored");
     if (
       operation.kind === "REFUND" &&
       !this.#manifest.events.some(
