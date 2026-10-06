@@ -1,0 +1,9 @@
+# staging-settings: `cre workflow simulate --broadcast`, delivered through the Monad testnet
+# simulation forwarder to the trigger bound to it.
+staging-settings:
+  user-workflow:
+    workflow-name: "openbalance-reserve-return-staging"
+  workflow-artifacts:
+    workflow-path: "./main.ts"
+    config-path: "./config.staging.json"
+    secrets-path: ""

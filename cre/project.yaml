@@ -1,0 +1,11 @@
+# CRE project settings. The RPC URL is interpolated from the environment so the operational
+# provider's key never lands in this file; `scripts/cre-reserve-return.mjs` supplies it.
+staging-settings:
+  rpcs:
+    - chain-name: monad-testnet
+      url: ${CRE_MONAD_TESTNET_RPC_URL}
+
+production-settings:
+  rpcs:
+    - chain-name: monad-testnet
+      url: ${CRE_MONAD_TESTNET_RPC_URL}
