@@ -36,12 +36,14 @@ Use a browser with a platform passkey (Chrome, Safari, or Edge on a phone or lap
 Paying at a stall and opening an outage reserve need a registered vendor terminal, which signs each
 intent with its own key; that step is shown in the demo video. Demo reserves use short windows:
 offline acceptance for 10 minutes, then 5 minutes to upload, so an unspent reserve becomes
-returnable 15 minutes after it is opened, and anyone can trigger the return from `/account`.
+returnable 15 minutes after it is opened. Anyone can trigger the return, from `/account` or with
+no account at all (see *Reserve return* below).
 
 ## Layout
 
 ```text
 contracts/          Solidity sources, Foundry config and tests
+cre/                Chainlink CRE project: the scheduled reserve-return workflow
 packages/
   protocol/         Shared typed encoding, boundary validation, ABI
   verifier/         Independent finalized-state / deployment-binding verifier core
@@ -110,11 +112,60 @@ pnpm testnet:verify      # publishes source to the explorer for every deployed c
 ```
 
 All four commands are idempotent: re-running `deploy` does not redeploy, and `verify` treats an
-already-verified contract as success. `deployments/testnet/` holds the account manifest, the
+already-verified contract as success. `pnpm testnet:reclaim-trigger` deploys the reserve-return
+trigger the same way (see *Reserve return*), and `verify` then includes it. `deployments/testnet/` holds the account manifest, the
 relayer's routing manifest, and the verifier manifest, each binding an address to the hash of the
 bytecode actually running there at a finalized block. `pnpm verify:remote-config` checks that the
 configured database and both RPC providers are reachable and serve the intended chain before any of
 the above runs against them.
+
+### Reserve return
+
+After a channel's `submitUntil`, `ResilienceVault.reclaim(channelId)` pays the unspent reserve back
+to the account that opened it. Anyone may call it, and no caller can change where the money goes.
+There are three ways to trigger it, all reaching the same contract rule:
+
+- **Sponsored, by anyone.** `POST /v1/reserve-channels/:id/reclaims` on the relayer with body
+  `{"eventId": "0x…"}`. It takes no session, credential, idempotency key or browser origin, so curl
+  works. The relayer checks the finalized projection (deadline passed, not yet returned), queues one
+  `RESERVE_RECLAIM` per channel under the `reserve-return:public` actor, and returns the existing
+  operation to any repeat caller. A new attempt is allowed only after an earlier one FAILED. Poll
+  `GET` on the same path for its state and transaction hash.
+- **Scheduled.** A Chainlink CRE cron workflow in `cre/reserve-return`. Each run reads
+  `GET /v1/events/:eventId/reclaimable-channels` (channels due and still holding money, oldest
+  deadline first) under identical consensus. It re-checks every candidate at the finalized block in
+  one Multicall3 read, then sends one signed report listing the channels that pass to
+  `ReclaimTrigger`. The trigger calls `reclaim` for each in its own try/catch. It has no owner and
+  holds no funds, so a stale listing or a replayed report can do nothing the vault would not allow
+  anyway.
+- **Directly**, from any wallet: `apps/web/scripts/reclaim-reserve.mjs` (see `RECLAIM.md`).
+
+The trigger binds one CRE forwarder immutably, so there is one per forwarder:
+
+```bash
+pnpm testnet:reclaim-trigger                                    # simulation forwarder (default)
+RECLAIM_TRIGGER_FORWARDER=production pnpm testnet:reclaim-trigger   # after CRE deploy access
+```
+
+Both read the vault from `verifier-manifest.json` and read the trigger's immutables back at the
+finalized block. They write `deployments/testnet/reclaim-trigger-manifest.json`. The simulation
+trigger on testnet is `0x593c5Cf0250CFf0942D344B9F943AB4A4267f015`.
+
+Running the workflow needs the CRE CLI (`~/.cre/bin/cre`, logged in with `cre login`) and Bun
+1.2.21 or later. Then:
+
+```bash
+(cd cre/reserve-return && bun install && bun test)   # dependencies, WASM toolchain, unit tests
+node scripts/cre-reserve-return.mjs signer            # create/show the broadcast key (0600, gitignored)
+node scripts/cre-reserve-return.mjs fund 0.5          # top it up from the deployer keystore
+node scripts/cre-reserve-return.mjs simulate          # one cron run, broadcast through the simulation forwarder
+```
+
+`simulate` hands the broadcast key and the RPC URL to the CLI only through its environment, so
+neither lands in `cre/.env` or `project.yaml`, and it redacts the RPC URL from the output. The
+workflow uses TypeScript 5.9 because the CRE compiler drives the TypeScript compiler API, which
+TypeScript 7 no longer exposes. It sits outside the pnpm workspace because CRE builds each workflow
+from its own Bun-managed directory.
 
 ### Event provisioning
 

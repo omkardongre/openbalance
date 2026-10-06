@@ -38,6 +38,15 @@ const USDC = "0x534b2f3A21130d7a60830c2Df862319e593943A3";
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 const BYTES32 = /^0x[0-9a-fA-F]{64}$/;
 
+// Chainlink CRE forwarders on Monad testnet. `simulation` delivers reports broadcast by
+// `cre workflow simulate --broadcast`; `production` delivers reports from a DON-deployed workflow.
+// A trigger binds one forwarder immutably, so each forwarder gets its own trigger deployment.
+// https://docs.chain.link/cre/guides/workflow/using-evm-client/forwarder-directory-ts
+const CRE_FORWARDERS = {
+  simulation: "0xB9F79d863261869B234c481D1f9A7af84AeAd192",
+  production: "0xF8344CFd5c43616a4366C34E3EEE75af79a74482",
+};
+
 function requireEnv(name) {
   const value = process.env[name];
   if (!value) throw new Error(`Missing required environment variable: ${name}`);
@@ -419,6 +428,93 @@ async function manifest() {
   );
 }
 
+/**
+ * Deploys the ReclaimTrigger that scheduled CRE reports call to return expired reserves, bound to the
+ * event's vault from the verifier manifest and to one CRE forwarder (`RECLAIM_TRIGGER_FORWARDER`,
+ * `simulation` by default). Resumable like `deploy`: an existing trigger for that forwarder is never
+ * redeployed. Its immutables are read back at the finalized block before the manifest records it.
+ */
+async function reclaimTrigger() {
+  const url = rpcUrl();
+  await chainId(url);
+  const state = await readState();
+  if (!state.event) throw new Error("Deployment state is incomplete; run `deploy` first");
+  const kind = process.env.RECLAIM_TRIGGER_FORWARDER ?? "simulation";
+  const forwarder = CRE_FORWARDERS[kind];
+  if (!forwarder)
+    throw new Error(`RECLAIM_TRIGGER_FORWARDER must be one of ${Object.keys(CRE_FORWARDERS)}`);
+  const forwarderCode = await cast(["code", "--rpc-url", url, forwarder]);
+  if (!forwarderCode || forwarderCode === "0x")
+    throw new Error(`CRE ${kind} forwarder ${forwarder} has no bytecode on this chain`);
+  const verifierManifest = JSON.parse(await readFile(`${outDir}verifier-manifest.json`, "utf8"));
+  if (verifierManifest.eventId !== state.event.eventId.toLowerCase())
+    throw new Error("verifier-manifest.json describes a different event; run `manifest` first");
+  const vault = verifierManifest.vault.address;
+
+  state.reclaimTriggers ??= {};
+  if (!state.reclaimTriggers[kind]) {
+    const created = await forgeCreate(url, "src/automation/ReclaimTrigger.sol:ReclaimTrigger", [
+      forwarder,
+      vault,
+    ]);
+    state.reclaimTriggers[kind] = { forwarder, vault, ...created };
+    await writeState(state);
+  }
+  const deployed = state.reclaimTriggers[kind];
+  if (deployed.forwarder !== forwarder || deployed.vault !== vault)
+    throw new Error(`Recorded ${kind} trigger is bound to a different forwarder or vault`);
+
+  const blockNumber = await receiptBlock(url, deployed.transactionHash);
+  const finalized = await awaitFinality(url, blockNumber);
+  const bindings = {
+    forwarder: [
+      await call(url, deployed.address, "forwarder()(address)", [], finalized),
+      forwarder,
+    ],
+    vault: [await call(url, deployed.address, "vault()(address)", [], finalized), vault],
+  };
+  for (const [field, [actual, expected]] of Object.entries(bindings))
+    if (actual.trim().toLowerCase() !== expected.toLowerCase())
+      throw new Error(
+        `trigger.${field} mismatch: chain says ${actual.trim()}, expected ${expected}`,
+      );
+
+  const manifestPath = `${outDir}reclaim-trigger-manifest.json`;
+  let manifestFile = { schemaVersion: 1, chainId: CHAIN_ID, eventId: verifierManifest.eventId };
+  try {
+    manifestFile = JSON.parse(await readFile(manifestPath, "utf8"));
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+  if (manifestFile.eventId !== verifierManifest.eventId)
+    throw new Error("reclaim-trigger-manifest.json describes a different event");
+  manifestFile.triggers = {
+    ...manifestFile.triggers,
+    [kind]: {
+      address: deployed.address,
+      forwarder,
+      vault,
+      runtimeCodeHash: await codeHashAt(url, deployed.address, finalized),
+      transactionHash: deployed.transactionHash,
+      blockNumber: blockNumber.toString(),
+    },
+  };
+  await writeFile(manifestPath, `${JSON.stringify(manifestFile, null, 2)}\n`);
+  process.stdout.write(
+    `${JSON.stringify(
+      {
+        passed: true,
+        forwarder: kind,
+        trigger: deployed.address,
+        explorer: `https://testnet.monadexplorer.com/address/${deployed.address}`,
+        written: ["reclaim-trigger-manifest.json"],
+      },
+      null,
+      2,
+    )}\n`,
+  );
+}
+
 // BlockVision's Sourcify service backs contract verification on the Monad explorers; one endpoint
 // serves both networks and infers the network from the chain ID.
 const SOURCIFY = "https://sourcify-api-monad.blockvision.org";
@@ -449,6 +545,10 @@ async function verify() {
     ["src/payments/SettlementLedger.sol:SettlementLedger", verifierManifest.ledger.address],
     ["src/payments/ExactPayRouter.sol:ExactPayRouter", verifierManifest.router.address],
     ["src/payments/ResilienceVault.sol:ResilienceVault", verifierManifest.vault.address],
+    ...Object.values(state.reclaimTriggers ?? {}).map((trigger) => [
+      "src/automation/ReclaimTrigger.sol:ReclaimTrigger",
+      trigger.address,
+    ]),
   ];
 
   const results = [];
@@ -528,7 +628,7 @@ async function awaitVerification(jobId, timeoutMs = 120_000) {
   }
 }
 
-const commands = { preflight, deploy, manifest, verify };
+const commands = { preflight, deploy, manifest, verify, "reclaim-trigger": reclaimTrigger };
 const command = process.argv[2];
 if (!commands[command]) {
   process.stderr.write(`Usage: deploy-testnet.mjs ${Object.keys(commands).join(" | ")}\n`);

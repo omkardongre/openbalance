@@ -17,5 +17,13 @@
     "eventId": "0x6d4906e4269fcb569b16c397879fa0e5e0a0e18db1607af48287005d6ee8acc3",
     "transactionHash": "0x8eb9c5584e09a326d89a98bc192264fc720b86ea53b037371bdafe4c7bf5641a",
     "blockNumber": "65010301"
+  },
+  "reclaimTriggers": {
+    "simulation": {
+      "forwarder": "0xB9F79d863261869B234c481D1f9A7af84AeAd192",
+      "vault": "0x1537AdeD24e15fddC773172C263335B456Ae2E5A",
+      "address": "0x593c5Cf0250CFf0942D344B9F943AB4A4267f015",
+      "transactionHash": "0xb53cb7afd1dde08e99bd53616313399bb6cafc809142d586f9a353b6c9d17895"
+    }
   }
 }

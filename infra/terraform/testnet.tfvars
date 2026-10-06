@@ -42,13 +42,13 @@ chain = {
 }
 
 api_image         = "us-central1-docker.pkg.dev/openbalance-hackathon/openbalance-testnet/api@sha256:bf3aeb01e45e2228519277809c3a05bc38327e472ad7204cb6d7372a7429a4d9"
-relayer_image     = "us-central1-docker.pkg.dev/openbalance-hackathon/openbalance-testnet/relayer@sha256:190a34baf08dcc9719274111e411ba29d212dd29969db3637270ef24ad72654e"
-web_image         = "us-central1-docker.pkg.dev/openbalance-hackathon/openbalance-testnet/web@sha256:7b9825de067b406cd339539c671ed010bd9b9eb1c5f96dc3d7089f30b3ac44fa"
+relayer_image     = "us-central1-docker.pkg.dev/openbalance-hackathon/openbalance-testnet/relayer@sha256:9b74f35009d0916bb96ca703554ace2e725064e96418549e20d406aefd4cc678"
+web_image         = "us-central1-docker.pkg.dev/openbalance-hackathon/openbalance-testnet/web@sha256:072767036eca35343f0d95f47573d93d311bc70f6459eefb310cd887b5f40cdc"
 venue_relay_image = "us-central1-docker.pkg.dev/openbalance-hackathon/openbalance-testnet/venue-relay@sha256:a7df25bf83146b46297aa465c59b430e24239a7c456f93ed28f92914d569726d"
 
 worker_images = {
   indexer                = "us-central1-docker.pkg.dev/openbalance-hackathon/openbalance-testnet/indexer@sha256:681677f8e5a3352e80899c8c586a25ae3e17e14b1f66aac3a1e7ce4435c44d90"
   integrations           = "us-central1-docker.pkg.dev/openbalance-hackathon/openbalance-testnet/integrations@sha256:4f1b9a1377638cca981784cb3c8fab3f653ab2ade95959552b7ffd4eeff1bd4e"
-  financial-worker       = "us-central1-docker.pkg.dev/openbalance-hackathon/openbalance-testnet/financial-worker@sha256:5fb126f8cc3397752ae66c0aae015049b14abe534bdeabc85b4c1c3d602486ef"
+  financial-worker       = "us-central1-docker.pkg.dev/openbalance-hackathon/openbalance-testnet/financial-worker@sha256:ca8b99141e5b2ca9c327384517730350ca7dca29a43738c33ade3ade5b6d38c6"
   venue-relay-settlement = "us-central1-docker.pkg.dev/openbalance-hackathon/openbalance-testnet/venue-relay-settlement@sha256:b3f60d95b81cebb9b655b15a1aea0a9d0c993a031309601cca428396a18e0d60"
 }
