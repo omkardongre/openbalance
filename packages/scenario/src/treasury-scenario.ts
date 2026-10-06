@@ -247,6 +247,29 @@ async function awaitOperation(
   }
 }
 
+/** Polls a channel's public reserve-return status until it is finalized. */
+async function awaitReserveReturn(
+  relayerUrl: string,
+  channelId: Hex,
+  origin: string,
+  timeoutMs = 180_000,
+) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const response = await pacedFetch(`${relayerUrl}/v1/reserve-channels/${channelId}/reclaims`, {
+      headers: { origin },
+    });
+    const body = (await response.json().catch(() => ({}))) as { state?: string };
+    if (!response.ok) throw new Error(`reserve return read failed with ${response.status}`);
+    if (body.state === "FINALIZED") return body.state;
+    if (body.state === "FAILED" || body.state === "QUARANTINED")
+      throw new Error(`reserve return for ${channelId} ended in ${body.state}`);
+    if (Date.now() >= deadline)
+      throw new Error(`reserve return for ${channelId} still ${body.state} after ${timeoutMs}ms`);
+    await new Promise((resolve) => setTimeout(resolve, 6_000));
+  }
+}
+
 /**
  * Drives the vendor and attendee money operations through the running relayer, every one of them
  * sponsored: opens a reserve channel from the enrolled account, settles a dual-signed voucher to
@@ -561,11 +584,13 @@ export async function runTreasuryScenario(
   // past `submitUntil` rather than asking the service to relax the rule.
   await advanceToChainTime(publicClient, submitUntil + 1, timeControl);
 
+  // Sent with no session or credential: the return is public because the vault pays only the
+  // original account, which is what makes it safe for anyone, including a scheduler, to trigger.
   const reclaim = await postAwaitingProjection(
     options.relayerUrl,
     `/v1/reserve-channels/${channelId}/reclaims`,
     { eventId },
-    { authorization: `Bearer ${session}`, "idempotency-key": `reclaim:${channelId}` },
+    {},
     origin,
   );
 
@@ -642,13 +667,7 @@ export async function runTreasuryScenario(
     channelId,
     paymentId,
     reclaimState: reclaim.operationId
-      ? await awaitOperation(
-          options.relayerUrl,
-          "financial-operations",
-          reclaim.operationId,
-          session,
-          origin,
-        )
+      ? await awaitReserveReturn(options.relayerUrl, channelId, origin)
       : (reclaim.state ?? "ACCEPTED"),
     withdrawalState: withdrawal.operationId
       ? await awaitOperation(

@@ -277,11 +277,19 @@ export default function CheckoutPage() {
     if (!current || !identity) return;
     setBusy(true);
     try {
-      const next = await serviceRequest<Operation>(
-        relayer,
-        `/v1/financial-operations/${encodeURIComponent(current.operationId)}`,
-        { headers: { Authorization: `Bearer ${identity.sessionToken}` } },
-      );
+      // Reserve returns are public operations tracked per channel, not under this session.
+      const next =
+        current.kind === "RESERVE_RECLAIM"
+          ? await serviceRequest<Operation>(
+              relayer,
+              `/v1/reserve-channels/${encodeURIComponent(current.aggregateId)}/reclaims`,
+              {},
+            )
+          : await serviceRequest<Operation>(
+              relayer,
+              `/v1/financial-operations/${encodeURIComponent(current.operationId)}`,
+              { headers: { Authorization: `Bearer ${identity.sessionToken}` } },
+            );
       if (target === "payment") setOperation(next);
       else setChannelOperation(next);
       if (next.state === "FINALIZED") {
@@ -420,7 +428,7 @@ export default function CheckoutPage() {
   }
 
   async function reclaim() {
-    if (!identity || !checkout || !channelId) return;
+    if (!checkout || !channelId) return;
     setBusy(true);
     try {
       const result = await serviceRequest<Operation>(
@@ -428,11 +436,7 @@ export default function CheckoutPage() {
         `/v1/reserve-channels/${channelId}/reclaims`,
         {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${identity.sessionToken}`,
-            "Idempotency-Key": financialIdempotencyKey("RESERVE_RECLAIM", channelId),
-          },
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ eventId: checkout.intent.eventId }),
         },
       );

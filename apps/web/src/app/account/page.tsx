@@ -2,7 +2,6 @@
 
 import { startAuthentication } from "@simplewebauthn/browser";
 import { useState } from "react";
-import { financialIdempotencyKey } from "../../lib/financial-client";
 
 const accountPattern = /^0x[0-9a-fA-F]{40}$/;
 
@@ -178,35 +177,32 @@ export default function AccountPage() {
   }
 
   async function reclaim() {
-    if (!session || !channel) return;
+    if (!channel) return;
     setBusy(true);
     try {
+      // A reserve return needs no session: the vault pays only this account, so the relayer
+      // accepts it from anyone and keeps one live return per channel.
       const result = (await relayerRequest(`/v1/reserve-channels/${channel.channelId}/reclaims`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${session}`,
-          "Idempotency-Key": financialIdempotencyKey("RESERVE_RECLAIM", channel.channelId),
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ eventId: channel.eventId }),
       })) as Operation;
       setReclaimOperation(result);
-      setStatus("Reclaim accepted. It remains pending until network finality.");
+      setStatus("Return accepted. It remains pending until network finality.");
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Reclaim was not accepted.");
+      setStatus(error instanceof Error ? error.message : "Return was not accepted.");
     } finally {
       setBusy(false);
     }
   }
 
   async function refreshReclaim() {
-    if (!session || !reclaimOperation) return;
+    if (!channel || !reclaimOperation) return;
     setBusy(true);
     try {
-      const result = (await relayerRequest(
-        `/v1/financial-operations/${reclaimOperation.operationId}`,
-        { method: "GET", headers: { Authorization: `Bearer ${session}` } },
-      )) as Operation;
+      const result = (await relayerRequest(`/v1/reserve-channels/${channel.channelId}/reclaims`, {
+        method: "GET",
+      })) as Operation;
       setReclaimOperation(result);
       if (result.state === "FINALIZED") await loadChannel();
       else setStatus(`Reclaim state: ${result.state.toLowerCase()}.`);
