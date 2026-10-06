@@ -10,6 +10,8 @@ import { EventFactory } from "../src/payments/EventFactory.sol";
 import { EventRegistry } from "../src/payments/EventRegistry.sol";
 import { SettlementLedger } from "../src/payments/SettlementLedger.sol";
 import { ResilienceVault } from "../src/payments/ResilienceVault.sol";
+import { IReceiver } from "../src/automation/IReceiver.sol";
+import { ReclaimTrigger } from "../src/automation/ReclaimTrigger.sol";
 
 interface VmReserve {
     function publicKeyP256(uint256 key) external pure returns (uint256, uint256);
@@ -334,6 +336,35 @@ contract ReserveChannelTest {
         bytes32 digest = vault.voucherDigest(late);
         vm.expectRevert(ResilienceVault.InvalidVoucher.selector);
         vault.settleVoucher(late, signature(CHANNEL_KEY, digest), signature(TERMINAL_KEY, digest));
+    }
+
+    function testReclaimTriggerReturnsEligibleReservesAndIsolatesFailures() public {
+        open(config());
+        ReclaimTrigger trigger = new ReclaimTrigger(address(this), address(vault));
+        assert(type(IReceiver).interfaceId == IReceiver.onReport.selector);
+        assert(trigger.supportsInterface(type(IReceiver).interfaceId));
+        bytes32[] memory channelIds = new bytes32[](3);
+        channelIds[0] = keccak256("channel:reserve:unknown");
+        channelIds[1] = CHANNEL_ID;
+        channelIds[2] = CHANNEL_ID;
+        bytes memory report = abi.encode(address(vault), channelIds);
+
+        vm.prank(address(0x777));
+        vm.expectRevert(ReclaimTrigger.UnauthorizedSender.selector);
+        trigger.onReport("", report);
+        vm.expectRevert(ReclaimTrigger.InvalidPolicy.selector);
+        trigger.onReport("", abi.encode(address(ledger), channelIds));
+
+        trigger.onReport("", report);
+        (,,,, bool early) = vault.channelState(CHANNEL_ID);
+        assert(!early && token.balanceOf(address(vault)) == 10_000);
+
+        vm.warp(280);
+        trigger.onReport("", report);
+        (,,,, bool reclaimed) = vault.channelState(CHANNEL_ID);
+        assert(reclaimed);
+        assert(token.balanceOf(address(account)) == 100_000);
+        assert(token.balanceOf(address(trigger)) == 0 && vault.totalReserved() == 0);
     }
 
     function testSharedChannelAndVoucherHashesMatch() public view {
