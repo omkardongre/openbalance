@@ -36,8 +36,14 @@ Use a browser with a platform passkey (Chrome, Safari, or Edge on a phone or lap
 Paying at a stall and opening an outage reserve need a registered vendor terminal, which signs each
 intent with its own key; that step is shown in the demo video. Demo reserves use short windows:
 offline acceptance for 10 minutes, then 5 minutes to upload, so an unspent reserve becomes
-returnable 15 minutes after it is opened. Anyone can trigger the return, from `/account` or with
-no account at all (see *Reserve return* below).
+returnable 15 minutes after it is opened. After sign-in, `/account` lists each offline balance with
+when it can be spent and when the rest comes back, and offers *Return now* once it is due. Anyone
+can trigger the return, from `/account` or with no account at all (see *Reserve return* below).
+
+An organizer credential on `/operations` also shows the event's offline reserves from
+`GET /v1/events/:eventId/reserves`: reserved, spent offline, still open, due back and returned. The
+five figures must add up to the reserved total or the API refuses to answer. Offline sales a
+terminal has not uploaded yet are only visible on that terminal.
 
 ## Layout
 
@@ -140,16 +146,55 @@ There are three ways to trigger it, all reaching the same contract rule:
   anyway.
 - **Directly**, from any wallet: `apps/web/scripts/reclaim-reserve.mjs` (see `RECLAIM.md`).
 
-The trigger binds one CRE forwarder immutably, so there is one per forwarder:
+#### Chainlink CRE workflow
+
+CRE is the orchestration layer for reserve return: it decides which reserves are due, proves it
+against the chain, and makes the contract pay them back.
+
+```mermaid
+sequenceDiagram
+    participant Cron as CRE cron trigger
+    participant WF as Workflow (cre/reserve-return)
+    participant R as Relayer listing
+    participant M as Multicall3 (finalized block)
+    participant F as CRE forwarder
+    participant T as ReclaimTrigger
+    participant V as ResilienceVault
+    Cron->>WF: every minute
+    WF->>R: GET reclaimable-channels (HTTP, identical consensus)
+    R-->>WF: candidate channel ids
+    WF->>M: channelConfig + channelState for each, one read
+    M-->>WF: deadline passed? returned? money left? right event?
+    WF->>F: one signed report: abi.encode(vault, channelIds)
+    F->>T: onReport
+    T->>V: reclaim(channelId), each in try/catch
+    V-->>V: unspent balance back to the original account
+```
+
+The listing only suggests and the chain decides: a wrong or stale listing costs no gas and moves no
+money. CRE capabilities used: cron trigger, HTTP client with consensus, EVM read at the finalized
+block, signed report, EVM write.
+
+| Evidence (Monad testnet) | Value |
+|---|---|
+| `ReclaimTrigger` (Sourcify full match) | [`0x593c5Cf0250CFf0942D344B9F943AB4A4267f015`](https://testnet.monadexplorer.com/address/0x593c5Cf0250CFf0942D344B9F943AB4A4267f015) |
+| Broadcast run (6 Oct 2026): 1 due reserve listed, verified, returned (1 USDC) | [`0x0cb104ee…0d65`](https://testnet.monadexplorer.com/tx/0x0cb104ee1ad2a145f0e744ac27e477897e14a274ed038b7618a0a1a6f21c0d65) |
+| Forwarder | Simulation forwarder `0xB9F79d863261869B234c481D1f9A7af84AeAd192` |
+
+Status: the workflow runs with `cre workflow simulate --broadcast`, which signs and broadcasts real
+transactions on Monad testnet. It is not deployed on a Chainlink DON, which needs commercial terms
+from Chainlink. The trigger binds one CRE forwarder immutably, so there is one per forwarder:
 
 ```bash
 pnpm testnet:reclaim-trigger                                    # simulation forwarder (default)
-RECLAIM_TRIGGER_FORWARDER=production pnpm testnet:reclaim-trigger   # after CRE deploy access
+RECLAIM_TRIGGER_FORWARDER=production pnpm testnet:reclaim-trigger   # production forwarder (DON)
 ```
 
 Both read the vault from `verifier-manifest.json` and read the trigger's immutables back at the
 finalized block. They write `deployments/testnet/reclaim-trigger-manifest.json`. The simulation
-trigger on testnet is `0x593c5Cf0250CFf0942D344B9F943AB4A4267f015`.
+trigger on testnet is `0x593c5Cf0250CFf0942D344B9F943AB4A4267f015`. Its first broadcast run
+returned a 1 USDC reserve in
+`0x0cb104ee1ad2a145f0e744ac27e477897e14a274ed038b7618a0a1a6f21c0d65`.
 
 Running the workflow needs the CRE CLI (`~/.cre/bin/cre`, logged in with `cre login`) and Bun
 1.2.21 or later. Then:

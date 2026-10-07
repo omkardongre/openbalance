@@ -241,6 +241,69 @@ export class OperationsReportingService {
     });
   }
 
+  /**
+   * Where the event's offline reserves stand, from finalized channel projections: what attendees
+   * set aside, what vendors have settled from it, what has gone back, and what is due to go back.
+   * "Open" reserves are still inside their submission window, so offline sales accepted by a
+   * terminal may still settle against them; those sales are only visible once uploaded.
+   */
+  reserves(identity: OperationsIdentity) {
+    return snapshot(this.pool, async (db) => {
+      const cursor = await requireScope(db, identity);
+      const result = await db.query(
+        `WITH scoped AS (
+           SELECT ch.reserve_units,ch.spent_units,ch.returned_units,ch.submit_until,ch.reclaimed,
+                  EXTRACT(EPOCH FROM clock_timestamp())::bigint AS now_seconds
+           FROM channel_projections ch
+           JOIN finalized_chain_logs l ON l.transition_id=ch.opened_transition_id
+           WHERE ch.stream_id=$1 AND l.event_id=$2
+         )
+         SELECT COUNT(*)::integer AS reserve_count,
+                COALESCE(SUM(reserve_units),0) AS reserved_units,
+                COALESCE(SUM(spent_units),0) AS settled_units,
+                COALESCE(SUM(returned_units),0) AS returned_units,
+                COUNT(*) FILTER (WHERE NOT reclaimed AND submit_until>now_seconds)::integer AS open_count,
+                COALESCE(SUM(reserve_units-spent_units)
+                  FILTER (WHERE NOT reclaimed AND submit_until>now_seconds),0) AS open_units,
+                COUNT(*) FILTER (WHERE NOT reclaimed AND submit_until<=now_seconds
+                  AND reserve_units>spent_units)::integer AS returnable_count,
+                COALESCE(SUM(reserve_units-spent_units)
+                  FILTER (WHERE NOT reclaimed AND submit_until<=now_seconds),0) AS returnable_units,
+                MIN(submit_until) FILTER (WHERE NOT reclaimed AND submit_until>now_seconds)
+                  AS next_deadline,
+                MAX(now_seconds) AS as_of
+         FROM scoped`,
+        [identity.streamId, identity.eventId.toLowerCase()],
+      );
+      const row = result.rows[0];
+      const reserved = BigInt(row.reserved_units);
+      const settled = BigInt(row.settled_units);
+      const returned = BigInt(row.returned_units);
+      const open = BigInt(row.open_units);
+      const returnable = BigInt(row.returnable_units);
+      // Every reserved unit is exactly one of: settled to a vendor, returned, still open, or due to
+      // return. A mismatch means the projection is inconsistent, so refuse to report it.
+      if (settled + returned + open + returnable !== reserved)
+        throw new Error("Reserve projection does not conserve reserved value");
+      return {
+        eventId: identity.eventId,
+        finalizedThrough: {
+          blockNumber: cursor.block_number.toString(),
+          blockHash: cursor.block_hash as Hex,
+          indexedAt: new Date(cursor.updated_at).toISOString(),
+        },
+        asOf: row.as_of === null ? null : row.as_of.toString(),
+        reserveCount: Number(row.reserve_count),
+        reservedUnits: reserved.toString(),
+        settledOfflineUnits: settled.toString(),
+        returnedUnits: returned.toString(),
+        open: { count: Number(row.open_count), units: open.toString() },
+        returnable: { count: Number(row.returnable_count), units: returnable.toString() },
+        nextDeadline: row.next_deadline === null ? null : row.next_deadline.toString(),
+      };
+    });
+  }
+
   reconciliation(identity: OperationsIdentity) {
     return snapshot(this.pool, async (db) => {
       const cursor = await requireScope(db, identity);

@@ -25,6 +25,14 @@ against its RPC and verifies pinned runtime bytecode, contract bindings, channel
 historical terminal authority, and untouched state at one finalized block before installing a channel.
 
 The native UI selects an installed channel and creates a durable, short-lived payment request from an
-imported order only while authenticated time fits both the order and channel windows. Prepared sales
+imported order only while authenticated time fits both the order and channel windows.
+
+Offline limits come only from the reserve's finalized terms (`data/OfflineLimits.kt`): the per-sale
+cap (`maxPerVoucher`), the remaining balance and the sales left (`maxVoucherCount`). Checkout shows
+them on the selected reserve and disables *Charge* with the reason when an order would exceed one,
+plus a countdown to the reserve's `acceptUntil`. A pending-upload banner on Checkout and Sales counts
+every accepted sale still on the device, totals it, and names the earliest `submitUntil` as the
+upload deadline; it turns red under 5 minutes, after the deadline, or when the relay refused a sale,
+and clears as the background relay worker settles sales. Prepared sales
 can resume stored authorization and display the complete signed receipt. Ordered relay upload and
 installed-device evidence remain incomplete; no native end-to-end public-network proof is claimed.

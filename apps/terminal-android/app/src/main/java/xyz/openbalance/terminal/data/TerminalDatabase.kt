@@ -104,6 +104,8 @@ interface TerminalDao {
     suspend fun completeUploadLease(requestId: String, owner: String, relayState: String, nextUploadAt: Long, transactionHash: String?, lastError: String?, acknowledgedAt: Long?, now: Long): Int
     @Query("SELECT COUNT(*) FROM sales WHERE state='ACCEPTED' AND relayState IN ('PENDING','RETRY','UPLOADING','RELAYED')")
     suspend fun pendingRelayCount(): Int
+    @Query("SELECT * FROM sales WHERE state='ACCEPTED' AND relayState IN ('PENDING','RETRY','UPLOADING','RELAYED','QUARANTINED') ORDER BY createdAt")
+    suspend fun unsettledSales(): List<SaleEntity>
     @Query("SELECT * FROM orders WHERE orderId = :orderId") suspend fun order(orderId: String): OrderEntity?
     @Query("SELECT * FROM orders ORDER BY importedAt,orderId LIMIT :limit") suspend fun orders(limit: Int = 100): List<OrderEntity>
     @Insert(onConflict = OnConflictStrategy.IGNORE) suspend fun insertOrder(order: OrderEntity): Long

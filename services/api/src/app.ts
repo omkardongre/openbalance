@@ -731,6 +731,21 @@ export async function buildApp(
       }
     });
 
+    app.get("/v1/events/:eventId/reserves", async (request, reply) => {
+      reply.header("Cache-Control", "private, no-store");
+      const parsed = z.object({ eventId: bytes32 }).strict().safeParse(request.params);
+      if (!parsed.success)
+        return reply.code(400).send({ error: "invalid_reserve_summary_request", retryable: false });
+      try {
+        const identity = await control.access.authenticate(request.headers.authorization);
+        control.access.assertRole(identity, ["ORGANIZER", "FINANCE"]);
+        control.access.assertEvent(identity, parsed.data.eventId as `0x${string}`);
+        return await control.reporting.reserves(identity);
+      } catch (error) {
+        return operationsError(reply, error);
+      }
+    });
+
     app.post("/v1/incidents", async (request, reply) => {
       const parsed = z
         .object({

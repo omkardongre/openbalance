@@ -36,6 +36,8 @@ data class SaleView(
     val expiresAt: Long = 0,
     /** Creation time, epoch milliseconds. */
     val createdAt: Long = 0,
+    /** The reserve's submission deadline, epoch seconds: an unsettled sale is lost after it. */
+    val submitUntil: Long = 0,
 )
 data class RelayUploadLease(
     val requestId: String,
@@ -56,7 +58,17 @@ data class OrderView(
     /** The payment request charged against this order, once one exists. */
     val requestId: String? = null,
 )
-data class ChannelView(val channelId: String, val remainingUnits: String, val acceptUntil: Long)
+data class ChannelView(
+    val channelId: String,
+    val remainingUnits: String,
+    val acceptUntil: Long,
+    /** The reserve's finalized per-sale cap. */
+    val maxPerSaleUnits: BigInteger = BigInteger.ZERO,
+    /** Sales the reserve can still take before its finalized sale count runs out. */
+    val salesLeft: Long = 0,
+    /** Offline sales against this reserve must reach the chain before this, epoch seconds. */
+    val submitUntil: Long = 0,
+)
 
 class TerminalRepository(
     private val database: TerminalDatabase,
@@ -268,8 +280,21 @@ class TerminalRepository(
     suspend fun channels(): List<ChannelEntity> = dao.channels()
     suspend fun channelViews(): List<ChannelView> = dao.channels().map { row ->
         val snapshot = parseSnapshot(row.snapshotJson)
-        ChannelView(row.channelId, (snapshot.reserveUnits - BigInteger(row.spentUnits)).toString(), snapshot.acceptUntil)
+        ChannelView(
+            row.channelId, (snapshot.reserveUnits - BigInteger(row.spentUnits)).toString(), snapshot.acceptUntil,
+            snapshot.maxPerVoucher, (snapshot.maxVoucherCount - row.nextSequence + 1).coerceAtLeast(0), snapshot.submitUntil,
+        )
     }
+
+    /** Every unsettled accepted sale, not just the recent list, so the totals cannot undercount. */
+    suspend fun pendingUploads(): OfflineLimits.PendingUploads = OfflineLimits.pendingUploads(
+        dao.unsettledSales().map { row ->
+            val voucher = OfflineProtocol.decodeVoucher(open(row).request.voucher)
+            OfflineLimits.UnsettledSale(row.relayState, row.relayAcknowledgedAt != null, voucher.grossUnits, voucher.submitUntil)
+        },
+        // Display only: the deadline the vault enforces is chain time, which this clock tracks closely.
+        System.currentTimeMillis() / 1_000,
+    )
     suspend fun orderViews(): List<OrderView> = dao.orders().map { row ->
         val value = JSONObject(String(payloads.open(row.payloadNonce, row.payloadCiphertext, row.orderId.toByteArray())))
         OrderView(
@@ -296,12 +321,13 @@ class TerminalRepository(
 
     private fun view(row: SaleEntity): SaleView {
         val payload = open(row)
+        val voucher = OfflineProtocol.decodeVoucher(payload.request.voucher)
         return SaleView(
             row.requestId, row.channelId, row.state, row.relayState,
             OfflineProtocol.encodeRequestQr(payload.request), payload.receipt?.let(OfflineProtocol::canonicalReceipt),
             row.transactionHash, row.lastUploadError,
-            OfflineProtocol.decodeVoucher(payload.request.voucher).grossUnits.toString(),
-            payload.request.expiresAt, row.createdAt,
+            voucher.grossUnits.toString(),
+            payload.request.expiresAt, row.createdAt, voucher.submitUntil,
         )
     }
 

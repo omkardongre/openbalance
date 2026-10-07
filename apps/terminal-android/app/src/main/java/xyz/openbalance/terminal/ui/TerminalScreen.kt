@@ -115,11 +115,13 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import xyz.openbalance.terminal.camera.QrScanner
 import xyz.openbalance.terminal.camera.RequestQr
 import xyz.openbalance.terminal.data.ChannelView
+import xyz.openbalance.terminal.data.OfflineLimits
 import xyz.openbalance.terminal.data.OrderView
 import xyz.openbalance.terminal.data.SaleView
 import xyz.openbalance.terminal.ui.theme.MonoSmall
 import xyz.openbalance.terminal.ui.theme.TerminalColors
 import java.math.BigDecimal
+import java.math.BigInteger
 import java.math.RoundingMode
 import java.time.Instant
 import java.time.ZoneId
@@ -128,6 +130,12 @@ import java.time.format.DateTimeFormatter
 // Reserve channels are denominated in the event's settlement asset; the testnet event settles in USDC.
 private const val CHANNEL_ASSET_DECIMALS = 6
 private const val CHANNEL_ASSET_SYMBOL = "USDC"
+
+/** A reserve this close to its acceptance deadline is flagged so the cashier can switch or sync. */
+private const val RESERVE_CLOSING_SECONDS = 10 * 60L
+
+/** Offline sales this close to their submission deadline must be uploaded now or they will not settle. */
+private const val UPLOAD_URGENT_SECONDS = 5 * 60L
 
 @Composable
 fun TerminalScreen(model: TerminalViewModel = viewModel()) {
@@ -162,7 +170,7 @@ private enum class Tab(val label: String, val icon: ImageVector) {
 private fun HomeScreen(state: TerminalUiState, model: TerminalViewModel) {
     // Checkout first: its readiness card routes to setup when the terminal is not enrolled yet.
     var tab by rememberSaveable { mutableStateOf(Tab.Checkout) }
-    val pendingSales = state.sales.count { it.state == "ACCEPTED" && it.relayState != "SETTLED" }
+    val pendingSales = state.sales.count { isPendingSale(it, state.nowSeconds) }
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         bottomBar = {
@@ -230,6 +238,9 @@ private fun CheckoutTab(state: TerminalUiState, model: TerminalViewModel, openTe
     TabList {
         item { TopBar(state) }
         item { ReadinessCard(state, model, onChangeReserve = { pickingReserve = true }, openTerminal = openTerminal) }
+        if (state.pending.waitingCount > 0 || state.pending.needsAttentionCount > 0) {
+            item(key = "pending") { PendingUploadBanner(state, model) }
+        }
         live?.let { sale ->
             item(key = "live") { LivePaymentBanner(sale, state) { model.focusSale(sale.requestId) } }
         }
@@ -254,7 +265,7 @@ private fun CheckoutTab(state: TerminalUiState, model: TerminalViewModel, openTe
 
 @Composable
 private fun SalesTab(state: TerminalUiState, model: TerminalViewModel) {
-    val pending = state.sales.count { it.state == "ACCEPTED" && it.relayState != "SETTLED" }
+    val pending = state.sales.count { isPendingSale(it, state.nowSeconds) }
     val settled = state.sales.count { it.relayState == "SETTLED" }
     val haptics = LocalHapticFeedback.current
     TabList {
@@ -278,6 +289,29 @@ private fun SalesTab(state: TerminalUiState, model: TerminalViewModel) {
                 Icon(Icons.Rounded.Send, null, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(8.dp))
                 Text("Upload receipts and check settlement", style = MaterialTheme.typography.labelLarge)
+            }
+        }
+        if (state.pending.waitingCount > 0 || state.pending.needsAttentionCount > 0) {
+            item(key = "pending") { PendingUploadBanner(state, model) }
+        }
+        if (state.pending.settlingCount > 0) {
+            item {
+                Text(
+                    "${state.pending.settlingCount} uploaded sale${if (state.pending.settlingCount == 1) "" else "s"} · " +
+                        "${formatUnits(state.pending.settlingUnits.toString(), CHANNEL_ASSET_DECIMALS)} $CHANNEL_ASSET_SYMBOL " +
+                        "with the venue relay, settling onchain",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        if (state.pending.missedCount > 0) {
+            item {
+                Text(
+                    "${state.pending.missedCount} sale${if (state.pending.missedCount == 1) "" else "s"} missed the upload deadline · " +
+                        "${formatUnits(state.pending.missedUnits.toString(), CHANNEL_ASSET_DECIMALS)} $CHANNEL_ASSET_SYMBOL " +
+                        "will not be paid; the attendee gets it back",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
         }
         item { MessageLine(state) }
@@ -359,10 +393,23 @@ private fun ReadinessCard(state: TerminalUiState, model: TerminalViewModel, onCh
                     Spacer(Modifier.width(10.dp))
                     Column(Modifier.weight(1f)) {
                         Text("${formatUnits(selected.remainingUnits, CHANNEL_ASSET_DECIMALS)} $CHANNEL_ASSET_SYMBOL reserve", style = MaterialTheme.typography.titleSmall)
-                        Text("${shortAddress(selected.channelId)} · accepts until ${clock(selected.acceptUntil)}", style = MonoSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(
+                            "Up to ${formatUnits(selected.maxPerSaleUnits.toString(), CHANNEL_ASSET_DECIMALS)} per sale · " +
+                                "${selected.salesLeft} sale${if (selected.salesLeft == 1L) "" else "s"} left",
+                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Text(shortAddress(selected.channelId), style = MonoSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     if (usable.size > 1) Text("Change", style = MaterialTheme.typography.labelLarge, color = TerminalColors.Mint)
                 }
+                // The reserve stops taking offline payments at acceptUntil; count down to it the way
+                // trusted time is counted down, so a cashier is never surprised mid-queue.
+                val left = selected.acceptUntil - state.nowSeconds
+                StatusPill(
+                    "Takes payments for ${countdown(left)} · until ${clock(selected.acceptUntil)}",
+                    if (left <= RESERVE_CLOSING_SECONDS) TerminalColors.Amber else TerminalColors.Mint,
+                    pulsing = left <= RESERVE_CLOSING_SECONDS,
+                )
             }
             MessageLine(state)
             action?.let { (label, onClick) ->
@@ -418,6 +465,71 @@ private fun LivePaymentBanner(sale: SaleView, state: TerminalUiState, onOpen: ()
                 )
             }
             Text("Open", style = MaterialTheme.typography.labelLarge, color = TerminalColors.Amber)
+        }
+    }
+}
+
+/**
+ * Offline sales still on this device. They are paid only once they reach the chain before their
+ * reserve's submission deadline, so the warning names the deadline and escalates as it nears.
+ */
+@Composable
+private fun PendingUploadBanner(state: TerminalUiState, model: TerminalViewModel) {
+    val pending = state.pending
+    val uploadBy = pending.uploadBy
+    val left = uploadBy?.let { it - state.nowSeconds }
+    val missed = left != null && left <= 0
+    val urgent = missed || (left != null && left <= UPLOAD_URGENT_SECONDS) || pending.needsAttentionCount > 0
+    val color = if (urgent) TerminalColors.Coral else TerminalColors.Amber
+    val haptics = LocalHapticFeedback.current
+    Surface(
+        shape = MaterialTheme.shapes.medium,
+        color = color.copy(alpha = 0.12f),
+        border = BorderStroke(1.dp, color.copy(alpha = 0.5f)),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Rounded.Warning, "Warning", tint = color, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    if (pending.waitingCount > 0) {
+                        "${pending.waitingCount} offline sale${if (pending.waitingCount == 1) "" else "s"} not uploaded · " +
+                            "${formatUnits(pending.waitingUnits.toString(), CHANNEL_ASSET_DECIMALS)} $CHANNEL_ASSET_SYMBOL"
+                    } else {
+                        "Sales need attention"
+                    },
+                    style = MaterialTheme.typography.titleSmall, color = color,
+                )
+            }
+            if (uploadBy != null && left != null) {
+                Text(
+                    if (missed) {
+                        "The upload deadline passed at ${clock(uploadBy)}. Upload now; anything that misses its deadline will not be paid."
+                    } else {
+                        "Upload before ${clock(uploadBy)} (${countdown(left)} left) to get paid. Connect, or bring the terminal to the venue relay."
+                    },
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurface,
+                )
+            }
+            if (pending.needsAttentionCount > 0) {
+                Text(
+                    "${pending.needsAttentionCount} sale${if (pending.needsAttentionCount == 1) " was" else "s were"} refused by the relay. Ask the organizer to check ${if (pending.needsAttentionCount == 1) "it" else "them"}.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurface,
+                )
+            }
+            if (pending.waitingCount > 0) {
+                FilledTonalButton(
+                    onClick = { haptics.performHapticFeedback(HapticFeedbackType.LongPress); model.synchronizeReceipts() },
+                    enabled = state.configured && !state.busy,
+                    shape = MaterialTheme.shapes.medium,
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                ) {
+                    Icon(Icons.Rounded.Send, null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Upload now", style = MaterialTheme.typography.labelLarge)
+                }
+            }
         }
     }
 }
@@ -738,7 +850,9 @@ private fun EmptyCard(icon: ImageVector, title: String, body: String) {
 private fun OrderRow(order: OrderView, state: TerminalUiState, model: TerminalViewModel) {
     val haptics = LocalHapticFeedback.current
     val live = state.sales.any { isLiveRequest(it, state.nowSeconds) }
-    val canCharge = state.selectedChannelId != null && state.trustedTime != null && !state.busy && !live
+    val reserve = state.channels.firstOrNull { it.channelId == state.selectedChannelId }
+    val block = reserve?.let { OfflineLimits.chargeBlock(BigInteger(order.grossUnits), it) }
+    val canCharge = reserve != null && block == null && state.trustedTime != null && !state.busy && !live
     Surface(
         shape = MaterialTheme.shapes.medium,
         color = MaterialTheme.colorScheme.surfaceContainer,
@@ -757,6 +871,18 @@ private fun OrderRow(order: OrderView, state: TerminalUiState, model: TerminalVi
                     Text(formatUnits(order.grossUnits, order.assetDecimals), style = MaterialTheme.typography.titleLarge)
                     Spacer(Modifier.width(4.dp))
                     Text(order.assetSymbol, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(bottom = 3.dp))
+                }
+                block?.let {
+                    Text(
+                        when (it) {
+                            is OfflineLimits.Block.OverPerSale ->
+                                "Over the ${formatUnits(it.maxPerSaleUnits.toString(), CHANNEL_ASSET_DECIMALS)} offline limit per sale"
+                            is OfflineLimits.Block.OverRemaining ->
+                                "Only ${formatUnits(it.remainingUnits.toString(), CHANNEL_ASSET_DECIMALS)} left on this reserve"
+                            OfflineLimits.Block.NoSalesLeft -> "This reserve has no sales left"
+                        },
+                        style = MaterialTheme.typography.bodySmall, color = TerminalColors.Coral,
+                    )
                 }
             }
             Spacer(Modifier.width(12.dp))
@@ -843,8 +969,16 @@ private fun SaleRow(sale: SaleView, state: TerminalUiState, onOpen: () -> Unit) 
     }
 }
 
+private fun isPendingSale(sale: SaleView, nowSeconds: Long) =
+    sale.state == "ACCEPTED" && sale.relayState != "SETTLED" &&
+        !OfflineLimits.isMissed(sale.relayState, sale.submitUntil, nowSeconds)
+
 private fun saleBadge(sale: SaleView, nowSeconds: Long) = when {
-    sale.state == "ACCEPTED" -> if (sale.relayState == "SETTLED") "SETTLED" else "PENDING"
+    sale.state == "ACCEPTED" -> when {
+        sale.relayState == "SETTLED" -> "SETTLED"
+        OfflineLimits.isMissed(sale.relayState, sale.submitUntil, nowSeconds) -> "MISSED"
+        else -> "PENDING"
+    }
     sale.state == "PREPARED" && sale.expiresAt <= nowSeconds -> "EXPIRED"
     else -> sale.state
 }
@@ -962,6 +1096,7 @@ private fun StateBadge(raw: String) {
         "ATTENDEE_SIGNED" -> "Signed" to TerminalColors.Amber
         "PENDING" -> "Pending" to TerminalColors.Amber
         "SETTLED" -> "Settled" to TerminalColors.Mint
+        "MISSED" -> "Missed" to TerminalColors.Muted
         else -> raw.lowercase().replaceFirstChar { it.uppercase() }.replace('_', ' ') to TerminalColors.Muted
     }
     Text(
@@ -1077,10 +1212,11 @@ private fun formatUnits(units: String, decimals: Int): String = runCatching {
 private fun shortAddress(value: String): String =
     if (value.length > 14) "${value.take(6)}…${value.takeLast(4)}" else value
 
-/** Minutes and seconds left, clamped at zero, e.g. "4:07". */
+/** Time left, clamped at zero: "4:07" under an hour, "1:04:07" above it. */
 private fun countdown(seconds: Long): String {
     val left = seconds.coerceAtLeast(0)
-    return "%d:%02d".format(left / 60, left % 60)
+    return if (left >= 3_600) "%d:%02d:%02d".format(left / 3_600, left % 3_600 / 60, left % 60)
+    else "%d:%02d".format(left / 60, left % 60)
 }
 
 private val clockFormat = DateTimeFormatter.ofPattern("HH:mm").withZone(ZoneId.systemDefault())

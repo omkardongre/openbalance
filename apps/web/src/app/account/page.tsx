@@ -1,7 +1,8 @@
 "use client";
 
 import { startAuthentication } from "@simplewebauthn/browser";
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { type ReserveBalance, ReserveBalances, type ReturnOperation } from "./reserve-balances";
 
 const accountPattern = /^0x[0-9a-fA-F]{40}$/;
 
@@ -16,14 +17,9 @@ type ActivityItem = {
 };
 
 type Activity = { items: ActivityItem[]; nextCursor: unknown };
-type Channel = {
-  channelId: `0x${string}`;
-  eventId: `0x${string}`;
-  status: "ACTIVE" | "RECLAIMED";
-  remainingUnits: string;
-  submitUntil: string;
-};
-type Operation = { operationId: string; state: string; transactionHash: string | null };
+
+/** How many of the most recent offline balances the account page loads on sign-in. */
+const RECENT_RESERVES = 6;
 
 function short(value: string) {
   return `${value.slice(0, 8)}…${value.slice(-6)}`;
@@ -45,8 +41,9 @@ export default function AccountPage() {
   const [busy, setBusy] = useState(false);
   const [activity, setActivity] = useState<Activity>();
   const [channelId, setChannelId] = useState("");
-  const [channel, setChannel] = useState<Channel>();
-  const [reclaimOperation, setReclaimOperation] = useState<Operation>();
+  const [reserves, setReserves] = useState<ReserveBalance[]>([]);
+  const [returns, setReturns] = useState<Record<string, ReturnOperation>>({});
+  const [nowSeconds, setNowSeconds] = useState(() => Math.floor(Date.now() / 1_000));
   const [fundAmount, setFundAmount] = useState("5");
   const [funding, setFunding] = useState<string>();
   const api = process.env.NEXT_PUBLIC_API_URL;
@@ -82,12 +79,69 @@ export default function AccountPage() {
     return response.json();
   }
 
+  // Deadlines move from "spend until" to "comes back from" on their own; a coarse tick is enough
+  // because the copy shows minutes.
+  useEffect(() => {
+    const timer = setInterval(() => setNowSeconds(Math.floor(Date.now() / 1_000)), 15_000);
+    return () => clearInterval(timer);
+  }, []);
+
+  // A return is final only once the network confirms it; poll until then, then reload the balance.
+  useEffect(() => {
+    const waiting = Object.entries(returns).filter(
+      ([, operation]) => !["FINALIZED", "FAILED", "QUARANTINED"].includes(operation.state),
+    );
+    if (waiting.length === 0 || !session) return;
+    const timer = setTimeout(async () => {
+      for (const [id] of waiting) {
+        try {
+          const next = (await relayerRequest(`/v1/reserve-channels/${id}/reclaims`, {
+            method: "GET",
+          })) as ReturnOperation;
+          setReturns((current) => ({ ...current, [id]: next }));
+          if (next.state === "FINALIZED") await loadReserve(session, id as `0x${string}`);
+        } catch {
+          // A transient status failure leaves the return in place; the next tick asks again.
+        }
+      }
+    }, 3_000);
+    return () => clearTimeout(timer);
+  });
+
+  async function loadReserve(sessionToken: string, id: `0x${string}`) {
+    const reserve = (await request(`/v1/reserve-channels/${id}`, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${sessionToken}` },
+    })) as ReserveBalance;
+    setReserves((current) => [reserve, ...current.filter((item) => item.channelId !== id)]);
+    return reserve;
+  }
+
   async function loadActivity(sessionToken: string) {
     const result = (await request("/v1/accounts/me/activity?limit=25", {
       method: "GET",
       headers: { Authorization: `Bearer ${sessionToken}` },
     })) as Activity;
     setActivity(result);
+    const ids = [
+      ...new Set(
+        result.items
+          .filter((item) => item.aggregateKind === "CHANNEL")
+          .map((item) => item.aggregateId.toLowerCase() as `0x${string}`),
+      ),
+    ].slice(0, RECENT_RESERVES);
+    const loaded = await Promise.allSettled(
+      ids.map(
+        async (id) =>
+          (await request(`/v1/reserve-channels/${id}`, {
+            method: "GET",
+            headers: { Authorization: `Bearer ${sessionToken}` },
+          })) as ReserveBalance,
+      ),
+    );
+    setReserves(
+      loaded.flatMap((outcome) => (outcome.status === "fulfilled" ? [outcome.value] : [])),
+    );
   }
 
   async function signIn() {
@@ -147,6 +201,8 @@ export default function AccountPage() {
       });
       setSession(undefined);
       setActivity(undefined);
+      setReserves([]);
+      setReturns({});
       setStatus("Session revoked.");
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Sign out failed.");
@@ -155,59 +211,38 @@ export default function AccountPage() {
     }
   }
 
-  async function loadChannel() {
+  /** Looks up an older offline balance that is no longer in the recent activity window. */
+  async function lookUpReserve() {
     if (!session || !/^0x[0-9a-fA-F]{64}$/.test(channelId)) {
-      setStatus("Enter a valid reserve channel identifier.");
+      setStatus("Enter a valid balance identifier.");
       return;
     }
     setBusy(true);
     try {
-      const result = (await request(`/v1/reserve-channels/${channelId}`, {
-        method: "GET",
-        headers: { Authorization: `Bearer ${session}` },
-      })) as Channel;
-      setChannel(result);
-      setStatus("Finalized reserve state loaded.");
+      await loadReserve(session, channelId.toLowerCase() as `0x${string}`);
+      setChannelId("");
+      setStatus("Balance loaded.");
     } catch (error) {
-      setChannel(undefined);
-      setStatus(error instanceof Error ? error.message : "Reserve state is unavailable.");
+      setStatus(error instanceof Error ? error.message : "That balance is unavailable.");
     } finally {
       setBusy(false);
     }
   }
 
-  async function reclaim() {
-    if (!channel) return;
+  async function returnReserve(reserve: ReserveBalance) {
     setBusy(true);
     try {
-      // A reserve return needs no session: the vault pays only this account, so the relayer
-      // accepts it from anyone and keeps one live return per channel.
-      const result = (await relayerRequest(`/v1/reserve-channels/${channel.channelId}/reclaims`, {
+      // A return needs no session: the vault pays only this account, so the relayer accepts it
+      // from anyone and keeps one live return per balance.
+      const result = (await relayerRequest(`/v1/reserve-channels/${reserve.channelId}/reclaims`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ eventId: channel.eventId }),
-      })) as Operation;
-      setReclaimOperation(result);
-      setStatus("Return accepted. It remains pending until network finality.");
+        body: JSON.stringify({ eventId: reserve.eventId }),
+      })) as ReturnOperation;
+      setReturns((current) => ({ ...current, [reserve.channelId]: result }));
+      setStatus("Return started.");
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Return was not accepted.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function refreshReclaim() {
-    if (!channel || !reclaimOperation) return;
-    setBusy(true);
-    try {
-      const result = (await relayerRequest(`/v1/reserve-channels/${channel.channelId}/reclaims`, {
-        method: "GET",
-      })) as Operation;
-      setReclaimOperation(result);
-      if (result.state === "FINALIZED") await loadChannel();
-      else setStatus(`Reclaim state: ${result.state.toLowerCase()}.`);
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Reclaim status is unavailable.");
+      setStatus(error instanceof Error ? error.message : "The return was not accepted.");
     } finally {
       setBusy(false);
     }
@@ -280,6 +315,38 @@ export default function AccountPage() {
         )}
         <p role="status">{status}</p>
         {session && activity && (
+          <section className="activity" aria-labelledby="balances-heading">
+            <div className="section-heading">
+              <div>
+                <p className="eyebrow">For when the network drops</p>
+                <h2 id="balances-heading">Offline balances</h2>
+              </div>
+            </div>
+            <ReserveBalances
+              reserves={reserves}
+              operations={returns}
+              nowSeconds={nowSeconds}
+              busy={busy}
+              onReturn={returnReserve}
+            />
+            <details>
+              <summary>Look up an older balance</summary>
+              <label>
+                Balance identifier
+                <input
+                  autoComplete="off"
+                  spellCheck={false}
+                  value={channelId}
+                  onChange={(event) => setChannelId(event.target.value)}
+                />
+              </label>
+              <button type="button" disabled={busy} onClick={lookUpReserve}>
+                Look up balance
+              </button>
+            </details>
+          </section>
+        )}
+        {session && activity && (
           <section className="activity" aria-labelledby="activity-heading">
             <div className="section-heading">
               <div>
@@ -304,11 +371,6 @@ export default function AccountPage() {
                       <span>Block {item.blockNumber}</span>
                       <code title={item.transactionHash}>{short(item.transactionHash)}</code>
                     </div>
-                    {item.aggregateKind === "CHANNEL" && (
-                      <button type="button" onClick={() => setChannelId(item.aggregateId)}>
-                        Inspect reserve
-                      </button>
-                    )}
                   </li>
                 ))}
               </ol>
@@ -344,48 +406,6 @@ export default function AccountPage() {
               <div className="proof-ref">
                 <span>Test funding finalized</span>
                 <code title={funding}>{short(funding)}</code>
-              </div>
-            )}
-          </section>
-        )}
-        {session && (
-          <section className="activity" aria-labelledby="reserve-heading">
-            <div className="section-heading">
-              <div>
-                <p className="eyebrow">Reserve recovery</p>
-                <h2 id="reserve-heading">Recover unspent value</h2>
-              </div>
-            </div>
-            <label>
-              Reserve channel identifier
-              <input value={channelId} onChange={(event) => setChannelId(event.target.value)} />
-            </label>
-            <button type="button" disabled={busy} onClick={loadChannel}>
-              Load finalized reserve
-            </button>
-            {channel && (
-              <div className="reserve-readback">
-                <span>{channel.status}</span>
-                <strong>{channel.remainingUnits} base units remaining</strong>
-                <small>
-                  Submission deadline:{" "}
-                  {new Date(Number(channel.submitUntil) * 1_000).toLocaleString()}
-                </small>
-                {channel.status === "ACTIVE" &&
-                  Date.now() >= Number(channel.submitUntil) * 1_000 &&
-                  !reclaimOperation && (
-                    <button type="button" disabled={busy} onClick={reclaim}>
-                      Reclaim eligible balance
-                    </button>
-                  )}
-                {reclaimOperation && (
-                  <>
-                    <strong>Reclaim {reclaimOperation.state}</strong>
-                    <button type="button" disabled={busy} onClick={refreshReclaim}>
-                      Refresh reclaim status
-                    </button>
-                  </>
-                )}
               </div>
             )}
           </section>

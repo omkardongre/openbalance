@@ -17,6 +17,7 @@ import xyz.openbalance.terminal.BuildConfig
 import xyz.openbalance.terminal.TerminalApplication
 import xyz.openbalance.terminal.data.SaleView
 import xyz.openbalance.terminal.data.ChannelView
+import xyz.openbalance.terminal.data.OfflineLimits
 import xyz.openbalance.terminal.data.OrderView
 import xyz.openbalance.terminal.provisioning.ConnectedProvisioningClient
 import xyz.openbalance.terminal.provisioning.FinalizedChannelVerifier
@@ -46,6 +47,8 @@ data class TerminalUiState(
     val nowSeconds: Long = System.currentTimeMillis() / 1000,
     /** The sale shown full screen: a live payment request, or the receipt just accepted. */
     val focusedSaleId: String? = null,
+    /** Offline sales not settled yet, across the whole journal. */
+    val pending: OfflineLimits.PendingUploads = OfflineLimits.PendingUploads(),
 )
 
 class TerminalViewModel(application: Application) : AndroidViewModel(application) {
@@ -63,7 +66,7 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
                 _state.value = _state.value.copy(
                     signer = identity.signer,
                     configured = timeSource != null && config != null,
-                    sales = app.repository.recoverSales(),
+                    sales = app.repository.recoverSales(), pending = app.repository.pendingUploads(),
                     channels = app.repository.channelViews(),
                     orders = app.repository.orderViews(),
                     message = when {
@@ -75,7 +78,7 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
                 if (config != null) {
                     val summary = app.relay.runBatch(config)
                     _state.value = _state.value.copy(
-                        sales = app.repository.recoverSales(),
+                        sales = app.repository.recoverSales(), pending = app.repository.pendingUploads(),
                         message = relayMessage("Restart recovery", summary.uploaded, summary.settled, summary.retried, summary.quarantined),
                     )
                 }
@@ -85,6 +88,19 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
             while (isActive) {
                 tickClock()
                 delay(1_000)
+            }
+        }
+        // The relay worker uploads and settles sales in the background; re-read the journal so the
+        // pending-upload warning clears on its own instead of only after the next tap.
+        viewModelScope.launch(Dispatchers.IO) {
+            while (isActive) {
+                delay(JOURNAL_REFRESH_MS)
+                if (_state.value.busy) continue
+                runCatching {
+                    val sales = app.repository.recoverSales()
+                    val pending = app.repository.pendingUploads()
+                    _state.update { if (it.busy) it else it.copy(sales = sales, pending = pending) }
+                }
             }
         }
     }
@@ -167,7 +183,8 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
             val completed = app.repository.accept(accepted.requestId, (current.second + 999) / 1000, System.currentTimeMillis()) { source.current(sample) }
             app.scheduleRelay()
             _state.value.copy(
-                sales = app.repository.recoverSales(), activeRequestId = null, scanOpen = false, scanPurpose = null,
+                sales = app.repository.recoverSales(), pending = app.repository.pendingUploads(),
+                channels = app.repository.channelViews(), activeRequestId = null, scanOpen = false, scanPurpose = null,
                 focusedSaleId = completed.requestId,
                 message = "Receipt ${completed.requestId} durably accepted pending settlement", busy = false,
             )
@@ -192,7 +209,7 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
                 configured = timeSource != null,
                 channels = channels,
                 orders = app.repository.orderViews(),
-                sales = app.repository.recoverSales(),
+                sales = app.repository.recoverSales(), pending = app.repository.pendingUploads(),
                 // Keep the cashier's choice while it still accepts payments; otherwise default to the
                 // open reserve that closes last.
                 selectedChannelId = run {
@@ -213,7 +230,7 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
             val config = requireNotNull(app.provisioning.current()) { "Terminal enrollment is not installed" }
             val summary = app.relay.runBatch(config)
             _state.value.copy(
-                sales = app.repository.recoverSales(),
+                sales = app.repository.recoverSales(), pending = app.repository.pendingUploads(),
                 message = relayMessage("Relay sync", summary.uploaded, summary.settled, summary.retried, summary.quarantined),
                 busy = false,
             )
@@ -234,7 +251,7 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
             val latest = Math.addExact(window.second, 999) / 1_000
             val sale = app.repository.prepareOrderSale(orderId, channelId, earliest, latest, latest, System.currentTimeMillis())
             _state.value.copy(
-                orders = app.repository.orderViews(), sales = app.repository.recoverSales(),
+                orders = app.repository.orderViews(), sales = app.repository.recoverSales(), pending = app.repository.pendingUploads(),
                 focusedSaleId = sale.requestId,
                 message = "Payment request ${sale.requestId} durably prepared", busy = false,
             )
@@ -251,7 +268,8 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
             app.repository.accept(requestId, (current.second + 999) / 1000, System.currentTimeMillis()) { source.current(sample) }
             app.scheduleRelay()
             _state.value.copy(
-                sales = app.repository.recoverSales(), focusedSaleId = requestId,
+                sales = app.repository.recoverSales(), pending = app.repository.pendingUploads(),
+                channels = app.repository.channelViews(), focusedSaleId = requestId,
                 busy = false, message = "Receipt recovered; settlement pending",
             )
         }
@@ -271,4 +289,8 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
 
     private fun relayMessage(prefix: String, uploaded: Int, settled: Int, retried: Int, quarantined: Int) =
         "$prefix: $uploaded stored, $settled finalized, $retried retrying, $quarantined quarantined"
+
+    private companion object {
+        const val JOURNAL_REFRESH_MS = 20_000L
+    }
 }

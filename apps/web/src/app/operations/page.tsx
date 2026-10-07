@@ -51,6 +51,18 @@ type Reconciliation = {
   }>;
 };
 
+type ReserveSummary = {
+  finalizedThrough: { blockNumber: string; blockHash: string; indexedAt: string };
+  asOf: string | null;
+  reserveCount: number;
+  reservedUnits: string;
+  settledOfflineUnits: string;
+  returnedUnits: string;
+  open: { count: number; units: string };
+  returnable: { count: number; units: string };
+  nextDeadline: string | null;
+};
+
 type Incident = {
   incidentId: string;
   severity: string;
@@ -102,6 +114,7 @@ export default function OperationsPage() {
   const [vendorId, setVendorId] = useState("");
   const [statement, setStatement] = useState<Statement>();
   const [reconciliation, setReconciliation] = useState<Reconciliation>();
+  const [reserves, setReserves] = useState<ReserveSummary>();
   const [incidents, setIncidents] = useState<Incident[]>();
   const [profile, setProfile] = useState<OperationsProfile>();
   const [severity, setSeverity] = useState("MEDIUM");
@@ -288,7 +301,8 @@ export default function OperationsPage() {
       setEventId(profile.eventId);
       if (profile.vendorId) setVendorId(profile.vendorId);
       const encodedEvent = encodeURIComponent(profile.eventId);
-      const [nextStatement, nextReconciliation, nextIncidents] = await Promise.all([
+      const eventScope = ["ORGANIZER", "FINANCE"].includes(profile.role);
+      const [nextStatement, nextReconciliation, nextReserves, nextIncidents] = await Promise.all([
         scopedVendor &&
         bytes32.test(scopedVendor) &&
         ["VENDOR", "ORGANIZER", "FINANCE"].includes(profile.role)
@@ -296,18 +310,23 @@ export default function OperationsPage() {
               `/v1/events/${encodedEvent}/statements?vendorId=${encodeURIComponent(scopedVendor)}`,
             )
           : Promise.resolve(undefined),
-        ["ORGANIZER", "FINANCE"].includes(profile.role)
+        eventScope
           ? request<Reconciliation>(`/v1/events/${encodedEvent}/reconciliation`)
+          : Promise.resolve(undefined),
+        eventScope
+          ? request<ReserveSummary>(`/v1/events/${encodedEvent}/reserves`)
           : Promise.resolve(undefined),
         request<{ items: Incident[] }>(`/v1/events/${encodedEvent}/incidents?status=OPEN&limit=25`),
       ]);
       setStatement(nextStatement);
       setReconciliation(nextReconciliation);
+      setReserves(nextReserves);
       setIncidents(nextIncidents.items);
       setStatus(`${profile.role.toLowerCase()} scope loaded from finalized records.`);
     } catch (error) {
       setStatement(undefined);
       setReconciliation(undefined);
+      setReserves(undefined);
       setIncidents(undefined);
       setProfile(undefined);
       setStatus(error instanceof Error ? error.message : "Operations data is unavailable.");
@@ -453,6 +472,58 @@ export default function OperationsPage() {
                   <strong>{statement.totals.availableAllocationUnits ?? "Pending"}</strong>
                   <small>{statement.totals.allocationStatus.replaceAll("_", " ")}</small>
                 </article>
+              </section>
+            )}
+
+            {reserves && (
+              <section className="shell operations-panel" aria-labelledby="reserves-heading">
+                <div className="section-heading">
+                  <div>
+                    <p className="eyebrow">Offline reserves</p>
+                    <h2 id="reserves-heading">
+                      {reserves.reserveCount} reserve{reserves.reserveCount === 1 ? "" : "s"}
+                    </h2>
+                  </div>
+                  <p>Finalized block {reserves.finalizedThrough.blockNumber}</p>
+                </div>
+                <section className="operations-grid" aria-label="Offline reserve totals">
+                  <article>
+                    <span>Reserved</span>
+                    <strong>{reserves.reservedUnits}</strong>
+                    <small>Set aside by attendees</small>
+                  </article>
+                  <article>
+                    <span>Spent offline</span>
+                    <strong>{reserves.settledOfflineUnits}</strong>
+                    <small>Settled to vendors</small>
+                  </article>
+                  <article>
+                    <span>Still open</span>
+                    <strong>{reserves.open.units}</strong>
+                    <small>
+                      {reserves.open.count} open
+                      {reserves.nextDeadline
+                        ? ` · offline sales can settle until ${new Date(
+                            Number(reserves.nextDeadline) * 1_000,
+                          ).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
+                        : ""}
+                    </small>
+                  </article>
+                  <article>
+                    <span>Due back</span>
+                    <strong>{reserves.returnable.units}</strong>
+                    <small>{reserves.returnable.count} past deadline, not yet returned</small>
+                  </article>
+                  <article>
+                    <span>Returned</span>
+                    <strong>{reserves.returnedUnits}</strong>
+                    <small>Paid back to attendees</small>
+                  </article>
+                </section>
+                <p className="summary">
+                  Offline sales still on a terminal are not counted until it uploads them; each
+                  terminal shows its own pending uploads.
+                </p>
               </section>
             )}
 

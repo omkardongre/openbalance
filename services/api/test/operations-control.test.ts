@@ -138,6 +138,55 @@ describe("operational control plane", () => {
     expect(response.headers["cache-control"]).toBe("private, no-store");
   });
 
+  it("splits every reserved unit into settled, returned, open and due-to-return", async () => {
+    const summary = (row: Record<string, unknown>) =>
+      new OperationsReportingService({
+        connect: async () => ({
+          query: async (text: string) => {
+            if (text.startsWith("SELECT c.block_number"))
+              return {
+                rowCount: 1,
+                rows: [
+                  {
+                    block_number: "100",
+                    block_hash: `0x${"33".repeat(32)}`,
+                    updated_at: new Date("2026-10-07T00:00:00Z"),
+                  },
+                ],
+              };
+            if (text.startsWith("WITH scoped")) return { rows: [row] };
+            return { rowCount: null, rows: [] };
+          },
+          release: () => undefined,
+        }),
+      } as unknown as Pool).reserves({ ...identity, role: "ORGANIZER", vendorId: null });
+    const totals = {
+      reserve_count: 3,
+      reserved_units: "30000000",
+      settled_units: "9000000",
+      returned_units: "6000000",
+      open_count: 1,
+      open_units: "10000000",
+      returnable_count: 1,
+      returnable_units: "5000000",
+      next_deadline: "1791300000",
+      as_of: "1791296961",
+    };
+
+    await expect(summary(totals)).resolves.toMatchObject({
+      reserveCount: 3,
+      reservedUnits: "30000000",
+      settledOfflineUnits: "9000000",
+      returnedUnits: "6000000",
+      open: { count: 1, units: "10000000" },
+      returnable: { count: 1, units: "5000000" },
+      nextDeadline: "1791300000",
+    });
+    await expect(summary({ ...totals, returnable_units: "4000000" })).rejects.toThrow(
+      "Reserve projection does not conserve reserved value",
+    );
+  });
+
   it("prevents a vendor from opening an incident against another vendor", async () => {
     const incidents = new IncidentService({} as Pool);
     await expect(
