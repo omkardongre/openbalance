@@ -1,5 +1,6 @@
 export * from "./config.js";
 export * from "./events.js";
+export * from "./hypersync.js";
 export * from "./indexer.js";
 export * from "./provisional.js";
 export * from "./rebuild.js";

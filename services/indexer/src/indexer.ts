@@ -1,4 +1,5 @@
 import type { Hex } from "viem";
+import { MAXIMUM_HYPERSYNC_BATCH } from "./config.js";
 import { decodeIndexedTransition, sortChainLogs } from "./events.js";
 import type { FinalizedChainSource } from "./source.js";
 import type { IndexerStore } from "./store.js";
@@ -36,7 +37,7 @@ export class FinalizedIndexer {
       options.deploymentBlock < 0n ||
       !Number.isSafeInteger(options.batchSize) ||
       options.batchSize < 1 ||
-      options.batchSize > 2_000
+      options.batchSize > MAXIMUM_HYPERSYNC_BATCH
     )
       throw new Error("Invalid finalized indexer configuration");
     this.#options = options;

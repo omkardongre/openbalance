@@ -23,6 +23,7 @@ async function main() {
       rpcUrl: config.rpcUrl,
       contracts: config.contracts,
       finalityTag: config.finalityTag,
+      maxLogRange: config.rpcLogRange,
       chain: defineChain({
         id: config.chainId,
         name: config.chainName,

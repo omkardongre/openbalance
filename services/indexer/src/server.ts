@@ -3,6 +3,7 @@ import { startTelemetry, writeLog } from "@openbalance/observability";
 import { Pool } from "pg";
 import { defineChain } from "viem";
 import { loadIndexerConfig } from "./config.js";
+import { HyperSyncFinalizedChainSource, HyperSyncLogClient } from "./hypersync.js";
 import { FinalizedHistoryConflict, FinalizedIndexer } from "./indexer.js";
 import { ProvisionalIndexer, ProvisionalReorgTooDeep } from "./provisional.js";
 import { ConservationReconciler } from "./reconciliation.js";
@@ -41,12 +42,43 @@ async function main() {
     application_name: "openbalance-indexer",
   });
   const store = new PgIndexerStore(pool);
-  const source = new ViemFinalizedChainSource({
+  const rpcSource = new ViemFinalizedChainSource({
     rpcUrl: config.rpcUrl,
     chain,
     contracts: config.contracts,
     finalityTag: config.finalityTag,
+    maxLogRange: config.rpcLogRange,
   });
+  const logBatches = telemetry.meter.createCounter("openbalance_indexer_log_batches", {
+    unit: "{batch}",
+  });
+  // HyperSync supplies finalized logs; heads, block hashes and conservation reads stay on the RPC.
+  const source = config.hypersync
+    ? new HyperSyncFinalizedChainSource({
+        rpc: rpcSource,
+        hypersync: new HyperSyncLogClient({
+          url: config.hypersync.url,
+          apiToken: config.hypersync.apiToken,
+          contracts: config.contracts,
+        }),
+        catchUpMilliseconds: config.hypersync.catchUpMilliseconds,
+        onSuccess: () => logBatches.add(1, { source: "hypersync" }),
+        onFallback: (error, fromBlock, toBlock) => {
+          logBatches.add(1, { source: "rpc_fallback", reason: error.reason });
+          log(
+            error.reason === "AUTH" ? "error" : "info",
+            "HyperSync unavailable; batch read from RPC",
+            {
+              reason: error.reason,
+              detail: error.message,
+              fromBlock: fromBlock.toString(),
+              toBlock: toBlock.toString(),
+            },
+          );
+        },
+      })
+    : rpcSource;
+  log("info", "Indexer log source", { logSource: config.hypersync ? "envio-hypersync" : "rpc" });
   const indexer = new FinalizedIndexer({
     streamId: config.streamId,
     chainId: BigInt(config.chainId),
@@ -65,9 +97,11 @@ async function main() {
         eventId: config.eventId,
         contracts: config.contracts,
         deploymentBlock: config.deploymentBlock,
-        batchSize: config.batchSize,
+        // The provisional tail is read over RPC, so it keeps an RPC-sized batch.
+        batchSize: config.rpcLogRange,
         maximumReorgDepth: config.provisionalReorgDepth,
-        source,
+        // The provisional tail is above the finalized head, where HyperSync has not ingested yet.
+        source: rpcSource,
         store,
       })
     : undefined;
@@ -82,8 +116,11 @@ async function main() {
     await store.assertReady();
     log("info", "Indexer started", { streamId: config.streamId });
     while (!stopping) {
+      // Backfill runs batch after batch; the poll interval applies once caught up or after an error.
+      let behind = false;
       try {
         const run = await indexer.runOnce();
+        behind = !run.caughtUp;
         if (run.toBlock !== null)
           log("info", "Finalized batch committed", {
             fromBlock: run.fromBlock?.toString(),
@@ -125,7 +162,7 @@ async function main() {
           break;
         }
       }
-      if (!stopping) await delay(config.pollIntervalMilliseconds);
+      if (!stopping && !behind) await delay(config.pollIntervalMilliseconds);
     }
   } finally {
     await pool.end();

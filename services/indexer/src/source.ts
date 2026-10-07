@@ -39,6 +39,8 @@ export type ViemFinalizedChainSourceOptions = {
   contracts: IndexedContracts;
   /** Finality policy: public networks use `finalized`; local development chains use `latest`. */
   finalityTag?: "finalized" | "safe" | "latest";
+  /** Largest block range per eth_getLogs call; longer requests are split. */
+  maxLogRange?: number;
 };
 
 export class DeploymentManifestMismatch extends Error {}
@@ -68,10 +70,14 @@ export class ViemFinalizedChainSource implements FinalizedChainSource {
   readonly #client;
   readonly #contracts: IndexedContracts;
   readonly #finalityTag: "finalized" | "safe" | "latest";
+  readonly #maxLogRange: bigint;
 
   constructor(options: ViemFinalizedChainSourceOptions) {
     if (!URL.canParse(options.rpcUrl)) throw new Error("Invalid indexer RPC URL");
     this.#finalityTag = options.finalityTag ?? "finalized";
+    const maxLogRange = options.maxLogRange ?? 2_000;
+    if (!Number.isSafeInteger(maxLogRange) || maxLogRange < 1) throw new Error("Invalid log range");
+    this.#maxLogRange = BigInt(maxLogRange);
     this.#contracts = {
       router: getAddress(options.contracts.router),
       ledger: getAddress(options.contracts.ledger),
@@ -164,12 +170,18 @@ export class ViemFinalizedChainSource implements FinalizedChainSource {
   }
 
   async getLogs(fromBlock: bigint, toBlock: bigint): Promise<RawChainLog[]> {
-    const logs = await this.#client.getLogs({
-      address: [this.#contracts.router, this.#contracts.ledger, this.#contracts.vault],
-      fromBlock,
-      toBlock,
-    });
-    return logs.map(completeLog);
+    const logs: RawChainLog[] = [];
+    // Providers cap eth_getLogs ranges, so a HyperSync-sized batch that falls back is split here.
+    for (let from = fromBlock; from <= toBlock; from += this.#maxLogRange) {
+      const to = from + this.#maxLogRange - 1n < toBlock ? from + this.#maxLogRange - 1n : toBlock;
+      const page = await this.#client.getLogs({
+        address: [this.#contracts.router, this.#contracts.ledger, this.#contracts.vault],
+        fromBlock: from,
+        toBlock: to,
+      });
+      logs.push(...page.map(completeLog));
+    }
+    return logs;
   }
 
   async readConservation(blockNumber: bigint): Promise<ConservationSnapshot> {
