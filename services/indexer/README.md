@@ -24,6 +24,28 @@ with contract state at the exact indexed block.
   schema. It records source and shadow fingerprints plus an approval digest; promotion rechecks the
   cursor, history, fingerprints, and digest under a stream lock before replacing only projections.
 
+## Envio HyperSync log source
+
+With `INDEXER_HYPERSYNC_URL` set, finalized logs come from
+[Envio HyperSync](https://docs.envio.dev/docs/HyperSync/overview) instead of `eth_getLogs`. Only the
+logs move. The finalized head, canonical block hashes, the deployment manifest check and the
+conservation reads all stay on the RPC, so HyperSync is never the sole source of financial truth:
+
+- Every HyperSync log's block hash is compared with the RPC's canonical hash before the batch commits.
+- The reconciler compares projected totals with `totalLiability` and `totalReserved` read over RPC.
+- A batch is read only once HyperSync has ingested past it (it trails the finalized head by 1 to 4
+  blocks on Monad testnet). If it does not catch up within `INDEXER_HYPERSYNC_CATCH_UP_MS`, or
+  HyperSync fails, that batch is read from the RPC and counted in
+  `openbalance_indexer_log_batches{source="rpc_fallback",reason}`.
+- The client paces itself against the token's `x-ratelimit-*` budget (free plan: 15 queries a
+  minute) and waits for the window to reset instead of retrying into 429s.
+
+HyperSync is billed per query, not per block, so backfill uses batches of up to 1,000,000 blocks. On
+a fresh database the indexer backfilled the testnet event's 3.9 million blocks in about 18 seconds
+(5 batches) and reconciled with no differences. `pnpm hypersync:parity` re-reads the whole history
+through HyperSync and compares it, transition by transition, with what the indexer committed. It is
+read only.
+
 ## Configuration
 
 Configuration is supplied only through the process environment:
@@ -39,8 +61,12 @@ INDEXER_ROUTER_ADDRESS
 INDEXER_LEDGER_ADDRESS
 INDEXER_VAULT_ADDRESS
 INDEXER_DEPLOYMENT_BLOCK
-INDEXER_BATCH_SIZE                 optional, default 500
-INDEXER_POLL_INTERVAL_MS           optional, default 2000
+INDEXER_BATCH_SIZE                 optional, default 500 (1,000,000 with HyperSync)
+INDEXER_RPC_LOG_RANGE              optional, default 500, max blocks per eth_getLogs call
+INDEXER_POLL_INTERVAL_MS           optional, default 2000 (5000 with HyperSync)
+INDEXER_HYPERSYNC_URL              optional, e.g. https://monad-testnet.hypersync.xyz
+ENVIO_API_TOKEN                    or INDEXER_HYPERSYNC_TOKEN_PATH (a file); required with the URL
+INDEXER_HYPERSYNC_CATCH_UP_MS      optional, default 3000
 INDEXER_DATABASE_POOL_SIZE         optional, default 5
 INDEXER_PROVISIONAL_ENABLED        optional, default false
 INDEXER_PROVISIONAL_REORG_DEPTH    optional, default 128

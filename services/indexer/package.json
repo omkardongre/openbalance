@@ -20,6 +20,7 @@
     "dev": "tsx watch src/server.ts",
     "migrate": "tsx src/migrate.ts",
     "rebuild": "tsx src/rebuild-cli.ts",
+    "hypersync:parity": "tsx src/hypersync-parity-cli.ts",
     "start": "node dist/server.js",
     "test": "vitest run"
   },
