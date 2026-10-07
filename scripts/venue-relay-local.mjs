@@ -150,6 +150,10 @@ async function snapshot() {
   const now = Math.floor(Date.now() / 1_000);
   // Every reserve channel opened for this terminal that the vault still holds open.
   const channels = new Set();
+  // Keep channels from the previous snapshot, so sales on an earlier reserve can still upload.
+  if (existsSync(path("terminals.json")))
+    for (const entry of JSON.parse(readFileSync(path("terminals.json"), "utf8")).terminals ?? [])
+      channels.add(entry.channelId);
   const channelFile = join(secrets, "device-channel.json");
   if (existsSync(channelFile))
     channels.add(JSON.parse(readFileSync(channelFile, "utf8")).channelId);
@@ -250,7 +254,11 @@ async function setup() {
   );
 }
 
-function start() {
+async function start() {
+  // The relay reads the snapshot once at startup and refuses every upload after it expires (12 h),
+  // and it authorizes only the channels listed in it, so refresh it on every start.
+  const count = await snapshot();
+  process.stdout.write(`[setup] terminal snapshot refreshed for ${count} channel(s)\n`);
   execFileSync("adb", ["reverse", `tcp:${port}`, `tcp:${port}`], { stdio: "inherit" });
   const relayDir = join(root, "services", "venue-relay");
   const common = {
@@ -297,7 +305,7 @@ function start() {
 
 const command = process.argv[2];
 if (command === "setup") await setup();
-else if (command === "start") start();
+else if (command === "start") await start();
 else {
   process.stderr.write("Usage: venue-relay-local.mjs <setup|start>\n");
   process.exit(64);
