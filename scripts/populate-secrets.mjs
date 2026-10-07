@@ -251,6 +251,13 @@ await reconcile(
 // Separate keys on purpose. The relayer and the financial worker each reserve nonces for their own
 // signing address independently, so one shared address would let them issue colliding nonces, which
 // the chain resolves by dropping a transaction rather than by reporting an error.
+// From the Envio dashboard; a free token, but still a credential, so a secret rather than a variable.
+await reconcile(
+  "envio-api-token",
+  requireEnv("ENVIO_API_TOKEN"),
+  "indexer: Envio HyperSync log source",
+);
+
 await ensureSigningKey("sponsor-signer", "relayer: sponsors account deployment (needs MON)");
 await ensureSigningKey("financial-signer", "financial worker: money operations (needs MON)");
 await ensureSigningKey(

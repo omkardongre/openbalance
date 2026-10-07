@@ -44,6 +44,16 @@ variable "chain" {
   })
 }
 
+# Envio HyperSync endpoint for the chain; the indexer reads finalized logs from it.
+variable "hypersync_url" {
+  type    = string
+  default = "https://monad-testnet.hypersync.xyz"
+  validation {
+    condition     = can(regex("^https://[a-z0-9-]+\\.hypersync\\.xyz$", var.hypersync_url))
+    error_message = "hypersync_url must be an https://<chain>.hypersync.xyz origin."
+  }
+}
+
 # Commitment level every chain reader waits for before treating a read as settled.
 variable "finality_tag" {
   type    = string

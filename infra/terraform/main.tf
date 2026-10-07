@@ -54,6 +54,8 @@ locals {
     "sponsor-signer", "financial-signer", "faucet-signer",
     "checkout-manifest", "checkout-capability", "integration-mapping", "time-authority",
     "venue-relay-key", "venue-relay-settlement-signer", "terminal-snapshot",
+    # Envio HyperSync token: the indexer's finalized log source (heads and balances stay on the RPC).
+    "envio-api-token",
   ])
 
   secret_directory = "/run/secrets"
@@ -88,7 +90,7 @@ locals {
     relayer                = ["database-url", "operational-rpc-url", "account-manifest", "event-manifest", "sponsor-signer"]
     web                    = []
     venue-relay            = ["venue-relay-key", "terminal-snapshot"]
-    indexer                = ["database-url", "operational-rpc-url"]
+    indexer                = ["database-url", "operational-rpc-url", "envio-api-token"]
     integrations           = ["database-url", "integration-mapping"]
     financial-worker       = ["database-url", "operational-rpc-url", "event-manifest", "financial-signer"]
     venue-relay-settlement = ["operational-rpc-url", "event-manifest", "venue-relay-key", "venue-relay-settlement-signer"]
@@ -206,6 +208,9 @@ locals {
       INDEXER_DEPLOYMENT_BLOCK = var.chain.deployment_block
       INDEXER_ENVIRONMENT      = var.environment
       INDEXER_FINALITY_TAG     = var.finality_tag
+      # Logs come from Envio HyperSync; heads, block hashes and conservation reads stay on the RPC.
+      INDEXER_HYPERSYNC_URL        = var.hypersync_url
+      INDEXER_HYPERSYNC_TOKEN_PATH = local.secret_path["envio-api-token"]
     }
     integrations = {
       METRICS_PORT             = "9468"
