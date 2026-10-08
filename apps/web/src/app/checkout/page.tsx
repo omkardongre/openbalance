@@ -103,7 +103,6 @@ export default function CheckoutPage() {
   const [checkout, setCheckout] = useState<ResolvedCheckoutRequest>();
   const [locator, setLocator] = useState<CheckoutLocator>();
   const [pending, setPending] = useState<PendingCheckout>();
-  const [accountInput, setAccountInput] = useState("");
   const [identity, setIdentity] = useState<PasskeyIdentity>();
   const [operation, setOperation] = useState<Operation>();
   const [payment, setPayment] = useState<PaymentProjection>();
@@ -163,16 +162,16 @@ export default function CheckoutPage() {
     if (!locator || (!pending && !checkout)) return;
     setBusy(true);
     try {
-      const account = checkout
-        ? getAddress(checkout.intent.payerAccount)
-        : getAddress(accountInput);
+      // An approved checkout fixes the payer, so the challenge is bound to that account. Binding a
+      // pending order is a discoverable sign-in: the chosen passkey names the account.
+      const payer = checkout ? getAddress(checkout.intent.payerAccount) : undefined;
       const start = await serviceRequest<{
         challengeToken: string;
         options: Parameters<typeof startAuthentication>[0]["optionsJSON"];
       }>(api, "/v1/accounts/authentication-challenges", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ account }),
+        body: JSON.stringify(payer ? { account: payer } : {}),
       });
       const assertion = await startAuthentication({ optionsJSON: start.options });
       const verified = await serviceRequest<{
@@ -183,7 +182,8 @@ export default function CheckoutPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ challengeToken: start.challengeToken, response: assertion }),
       });
-      if (getAddress(verified.account) !== account)
+      const account = getAddress(verified.account);
+      if (payer && account !== payer)
         throw new Error("The authenticated account does not match this checkout.");
       setIdentity({ account, credentialId: assertion.id, sessionToken: verified.sessionToken });
       if (pending) {
@@ -476,20 +476,9 @@ export default function CheckoutPage() {
                 </small>
               </div>
               {!identity ? (
-                <>
-                  {pending && (
-                    <label>
-                      My OpenBalance account
-                      <input
-                        value={accountInput}
-                        onChange={(event) => setAccountInput(event.target.value)}
-                      />
-                    </label>
-                  )}
-                  <button type="button" disabled={busy} onClick={signIn}>
-                    {pending ? "Verify and bind my passkey account" : "Verify my passkey account"}
-                  </button>
-                </>
+                <button type="button" disabled={busy} onClick={signIn}>
+                  {pending ? "Verify and bind my passkey account" : "Verify my passkey account"}
+                </button>
               ) : !checkout ? (
                 <button type="button" disabled={busy} onClick={refreshCheckout}>
                   Check terminal approval

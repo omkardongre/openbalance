@@ -2,6 +2,7 @@
 
 import { accountFactoryAbi } from "@openbalance/protocol";
 import { startAuthentication, startRegistration } from "@simplewebauthn/browser";
+import Link from "next/link";
 import { useState } from "react";
 import {
   type Address,
@@ -12,6 +13,8 @@ import {
   zeroAddress,
   zeroHash,
 } from "viem";
+import { passkeyErrorMessage, shortAddress } from "../../lib/account-display";
+import { BrandMark } from "../brand-mark";
 
 type Enrollment = { publicKey: { x: Hex; y: Hex }; rpId: string; origin: string };
 type Deployment = {
@@ -40,24 +43,75 @@ async function post(path: string, body: unknown, headers?: Record<string, string
   return response.json();
 }
 
+type Tone = "info" | "success" | "error";
+
+const STEPS = ["Passkey", "Account", "Done"] as const;
+
+function KeyIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+      <circle cx="8" cy="15" r="4" />
+      <path d="m10.85 12.15 8.65-8.65M18 5l2 2M15 8l2 2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function ChainIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+      <rect x="3" y="7" width="18" height="13" rx="3" />
+      <path d="M8 7V5a4 4 0 0 1 8 0v2M12 12v3" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function CheckIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" aria-hidden="true">
+      <path d="m5 12.5 4.5 4.5L19 7.5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
 export default function EnrollPage() {
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("");
+  const [tone, setTone] = useState<Tone>("info");
   const [record, setRecord] = useState<string>();
   const [token, setToken] = useState<string>();
   const [verifiedKey, setVerifiedKey] = useState<Enrollment>();
-  const [deployment, setDeployment] = useState<Deployment>();
+  const [, setDeployment] = useState<Deployment>();
+  // Sponsorship answers with the account address; keep it even before a prepared deployment exists.
+  const [accountAddress, setAccountAddress] = useState<Address>();
+  const [confirmed, setConfirmed] = useState(false);
   const [submitted, setSubmitted] = useState(false);
   const [sponsorshipKey, setSponsorshipKey] = useState<string>();
+  const [copied, setCopied] = useState(false);
+  const step = !token ? 0 : confirmed ? 2 : 1;
+
+  function report(message: string, nextTone: Tone = "info") {
+    setStatus(message);
+    setTone(nextTone);
+  }
+
+  async function copyAddress() {
+    if (!accountAddress) return;
+    await navigator.clipboard.writeText(accountAddress);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2_000);
+  }
+
   async function enroll() {
     setBusy(true);
     setRecord(undefined);
     setToken(undefined);
     setVerifiedKey(undefined);
     setDeployment(undefined);
+    setAccountAddress(undefined);
+    setConfirmed(false);
     setSubmitted(false);
     setSponsorshipKey(undefined);
-    setStatus("Create your passkey, then confirm it.");
+    report("Create your passkey, then confirm it once more.");
     try {
       const start = await post("/v1/accounts/enrollment-challenges", {});
       const registered = await startRegistration({ optionsJSON: start.options });
@@ -74,11 +128,9 @@ export default function EnrollPage() {
       setRecord(JSON.stringify(verified, null, 2));
       setToken(start.token);
       setVerifiedKey(verified);
-      setStatus(
-        "Passkey verified. Account deployment is the next step; no account has been funded.",
-      );
+      report("Passkey verified.", "success");
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Enrollment failed.");
+      report(passkeyErrorMessage(error, "Passkey creation failed. Try again."), "error");
     } finally {
       setBusy(false);
     }
@@ -101,6 +153,7 @@ export default function EnrollPage() {
       if (!response.ok)
         throw new Error("Sponsorship is unavailable. Retry the same request later.");
       const result = await response.json();
+      setAccountAddress(result.account);
       setDeployment((current) =>
         current
           ? {
@@ -110,16 +163,22 @@ export default function EnrollPage() {
             }
           : current,
       );
-      setStatus(
-        result.status === "confirmed"
-          ? "Account verified onchain. Set up recovery before adding funds."
-          : "Deployment submitted with bounded sponsorship. Check again for finality.",
-      );
+      if (result.status === "confirmed") {
+        setConfirmed(true);
+        report("Your account is live on Monad testnet.", "success");
+      } else {
+        report(
+          "Account submitted. The network is finalizing it; check again in a few seconds.",
+          "info",
+        );
+      }
     } catch (error) {
-      setStatus(
-        error instanceof Error
-          ? error.message
-          : "Sponsorship is unavailable. Your passkey and account parameters are unchanged.",
+      report(
+        passkeyErrorMessage(
+          error,
+          "Sponsorship is unavailable. Your passkey and account parameters are unchanged.",
+        ),
+        "error",
       );
     } finally {
       setBusy(false);
@@ -155,8 +214,10 @@ export default function EnrollPage() {
       )
         throw new Error("Deployment parameters do not match your verified passkey.");
       setDeployment(result);
+      setAccountAddress(result.account);
       if (result.status === "confirmed") {
-        setStatus("Account verified onchain. Set up recovery before adding funds.");
+        setConfirmed(true);
+        report("Your account is live on Monad testnet.", "success");
         return;
       }
       if (submit) {
@@ -180,73 +241,152 @@ export default function EnrollPage() {
       }
       const observation: Deployment = await post("/v1/accounts/deployments/confirm", { token });
       setDeployment(observation);
-      setStatus(
-        observation.status === "confirmed"
-          ? "Account verified onchain. Set up recovery before adding funds."
-          : "Waiting for finalized account state. Use Check account to refresh.",
-      );
+      setAccountAddress(observation.account);
+      if (observation.status === "confirmed") {
+        setConfirmed(true);
+        report("Your account is live on Monad testnet.", "success");
+      } else {
+        report("Still finalizing on the network. Check again in a few seconds.", "info");
+      }
     } catch (error) {
-      setStatus(
-        error instanceof Error
-          ? error.message
-          : "Deployment could not be verified. Check the same account before retrying.",
+      report(
+        passkeyErrorMessage(
+          error,
+          "Deployment could not be verified. Check the same account before retrying.",
+        ),
+        "error",
       );
     } finally {
       setBusy(false);
     }
   }
+  // An account was submitted but is not final yet: offer a status check instead of another submit.
+  const awaitingFinality = !confirmed && (Boolean(accountAddress) || submitted);
   return (
     <main>
-      <section className="shell">
-        <h1>Create your passkey</h1>
-        <p>Your device protects the key. Confirm it twice to verify that it works.</p>
-        <button type="button" disabled={busy} onClick={enroll}>
-          {busy ? "Verifying…" : "Create passkey"}
-        </button>
-        <p role="status">{status}</p>
-        {token && (
-          <section aria-label="Account deployment">
-            <p>
-              Your passkey owns the account. Sponsorship pays only the bounded account-creation
-              network fee. Backup and recovery are not enrolled yet.
-            </p>
-            <button
-              type="button"
-              disabled={busy || deployment?.status === "confirmed"}
-              onClick={sponsor}
+      <section className="shell narrow">
+        <div className="brand-bar">
+          <BrandMark />
+          <Link className="text-button" href="/account">
+            Sign in
+          </Link>
+        </div>
+        <ol className="steps" aria-label="Account setup progress">
+          {STEPS.map((label, index) => (
+            <li
+              key={label}
+              data-state={index < step ? "done" : index === step ? "current" : "upcoming"}
+              aria-current={index === step ? "step" : undefined}
             >
-              Deploy account
+              {index + 1}. {label}
+            </li>
+          ))}
+        </ol>
+
+        {step === 0 && (
+          <section aria-labelledby="step-passkey">
+            <div className="step-icon">
+              <KeyIcon />
+            </div>
+            <h1 id="step-passkey">Create your account</h1>
+            <p className="summary">
+              Your device&apos;s passkey is your key. No seed phrase, no password. Confirm with your
+              fingerprint or face, then once more to prove it works.
+            </p>
+            <button type="button" className="block-button" disabled={busy} onClick={enroll}>
+              {busy ? "Waiting for your passkey…" : "Create passkey"}
             </button>
-            <details>
-              <summary>Pay deployment gas from a test wallet</summary>
-              <button
-                type="button"
-                disabled={busy || submitted || deployment?.status === "confirmed"}
-                onClick={() => deploy(true)}
-              >
-                Deploy test account
-              </button>
-            </details>
-            <button type="button" disabled={busy} onClick={() => deploy(false)}>
-              Check account
-            </button>
-            {submitted && deployment?.status !== "confirmed" && (
-              <button
-                type="button"
-                disabled={busy}
-                onClick={() => {
-                  setSubmitted(false);
-                  setStatus(
-                    "Retry uses the same account and may incur another network fee. Check your wallet activity first.",
-                  );
-                }}
-              >
-                Enable retry for the same account
-              </button>
-            )}
-            {deployment && <p>Account: {deployment.account}</p>}
+            <p className="fine-print">
+              Already have one? <Link href="/account">Sign in</Link>
+            </p>
           </section>
         )}
+
+        {step === 1 && (
+          <section aria-labelledby="step-account">
+            <div className="step-icon">
+              <ChainIcon />
+            </div>
+            <h1 id="step-account">Set up your account</h1>
+            <p className="summary">
+              We create your smart account on Monad testnet and pay the one-time network fee. Only
+              your passkey can control it.
+            </p>
+            {awaitingFinality ? (
+              <button
+                type="button"
+                className="block-button"
+                disabled={busy}
+                onClick={() => deploy(false)}
+              >
+                {busy ? "Checking…" : "Check status"}
+              </button>
+            ) : (
+              <button type="button" className="block-button" disabled={busy} onClick={sponsor}>
+                {busy ? "Creating your account…" : "Create my account"}
+              </button>
+            )}
+            <details>
+              <summary>Advanced: pay the fee from your own test wallet</summary>
+              <p className="fine-print">
+                Uses a connected browser wallet on Monad testnet instead of sponsorship.
+              </p>
+              <button
+                type="button"
+                className="secondary-button"
+                disabled={busy || submitted}
+                onClick={() => deploy(true)}
+              >
+                Deploy with my wallet
+              </button>
+              {submitted && (
+                <button
+                  type="button"
+                  className="secondary-button"
+                  disabled={busy}
+                  onClick={() => {
+                    setSubmitted(false);
+                    report(
+                      "Retry uses the same account and may incur another network fee. Check your wallet activity first.",
+                    );
+                  }}
+                >
+                  Enable retry for the same account
+                </button>
+              )}
+            </details>
+          </section>
+        )}
+
+        {step === 2 && accountAddress && (
+          <section aria-labelledby="step-done">
+            <div className="step-icon">
+              <CheckIcon />
+            </div>
+            <h1 id="step-done">You&apos;re all set</h1>
+            <p className="summary">Your account is live. Add test money and start paying.</p>
+            <div className="card">
+              <p className="eyebrow">Your account</p>
+              <div className="section-heading">
+                <code title={accountAddress}>{shortAddress(accountAddress)}</code>
+                <button type="button" className="text-button" onClick={copyAddress}>
+                  {copied ? "Copied" : "Copy"}
+                </button>
+              </div>
+            </div>
+            <Link className="primary-action block-button" href="/account">
+              Go to my account
+            </Link>
+            <p className="fine-print">
+              Backup and recovery are not set up yet, so keep the passkey on this device.
+            </p>
+          </section>
+        )}
+
+        <p role="status" aria-live="polite" className={`notice ${tone === "info" ? "" : tone}`}>
+          {status}
+        </p>
+
         {record && (
           <details>
             <summary>Public enrollment record</summary>

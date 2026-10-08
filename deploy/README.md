@@ -34,8 +34,9 @@ for local operations, but is not the release default.
 
 Build `deploy/Dockerfile.web` separately for the public interface. It copies only the Next.js
 standalone server, static assets, and public assets into its runtime stage.
-Supply `NEXT_PUBLIC_API_URL`, `NEXT_PUBLIC_RELAYER_URL`, `NEXT_PUBLIC_FINANCIAL_RPC_URL` and
-`NEXT_PUBLIC_WEBAUTHN_RP_ID` as public build arguments for a configured release. Never use private
+Supply `NEXT_PUBLIC_API_URL`, `NEXT_PUBLIC_RELAYER_URL`, `NEXT_PUBLIC_FINANCIAL_RPC_URL`,
+`NEXT_PUBLIC_WEBAUTHN_RP_ID` and `NEXT_PUBLIC_SETTLEMENT_ASSET` (the event's settlement token, read
+for the balance on `/account`) as public build arguments for a configured release. Never use private
 RPC credentials in these browser-visible values. An image built without them is a build check only.
 
 The Node base is pinned by digest; review/image-scan and record the final application image digest before publishing.

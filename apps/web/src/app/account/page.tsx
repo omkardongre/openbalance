@@ -1,10 +1,18 @@
 "use client";
 
 import { startAuthentication } from "@simplewebauthn/browser";
+import Link from "next/link";
 import { useEffect, useState } from "react";
+import { getAddress } from "viem";
+import {
+  formatAmount,
+  passkeyErrorMessage,
+  readSettlementBalance,
+  SETTLEMENT_ASSET,
+  shortAddress,
+} from "../../lib/account-display";
+import { BrandMark } from "../brand-mark";
 import { type ReserveBalance, ReserveBalances, type ReturnOperation } from "./reserve-balances";
-
-const accountPattern = /^0x[0-9a-fA-F]{40}$/;
 
 type ActivityItem = {
   transitionId: string;
@@ -46,7 +54,31 @@ export default function AccountPage() {
   const [nowSeconds, setNowSeconds] = useState(() => Math.floor(Date.now() / 1_000));
   const [fundAmount, setFundAmount] = useState("5");
   const [funding, setFunding] = useState<string>();
+  const [balance, setBalance] = useState<bigint>();
+  const [balanceUnavailable, setBalanceUnavailable] = useState(false);
+  const [tone, setTone] = useState<"info" | "success" | "error">("info");
+  const [copied, setCopied] = useState(false);
   const api = process.env.NEXT_PUBLIC_API_URL;
+
+  function report(message: string, nextTone: "info" | "success" | "error" = "info") {
+    setStatus(message);
+    setTone(nextTone);
+  }
+
+  async function loadBalance(address: string) {
+    try {
+      setBalance(await readSettlementBalance(getAddress(address)));
+      setBalanceUnavailable(false);
+    } catch {
+      setBalanceUnavailable(true);
+    }
+  }
+
+  async function copyAddress() {
+    await navigator.clipboard.writeText(account);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2_000);
+  }
 
   async function request(path: string, init: RequestInit) {
     if (!api) throw new Error("Account service is not configured.");
@@ -145,17 +177,15 @@ export default function AccountPage() {
   }
 
   async function signIn() {
-    if (!accountPattern.test(account)) {
-      setStatus("Enter a valid account address.");
-      return;
-    }
     setBusy(true);
     setSession(undefined);
     try {
+      // Discoverable sign-in: the browser offers this site's passkeys and the one chosen names the
+      // account, so nothing has to be typed first.
       const start = await request("/v1/accounts/authentication-challenges", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ account }),
+        body: JSON.stringify({}),
       });
       const assertion = await startAuthentication({ optionsJSON: start.options });
       const verified = await request("/v1/accounts/authentications", {
@@ -165,14 +195,17 @@ export default function AccountPage() {
       });
       setAccount(verified.account);
       setSession(verified.sessionToken);
-      try {
-        await loadActivity(verified.sessionToken);
-        setStatus("Account access verified. Activity is finalized onchain data.");
-      } catch {
-        setStatus("Account access verified. Finalized activity is temporarily unavailable.");
-      }
+      report("");
+      const [, loaded] = await Promise.all([
+        loadBalance(verified.account),
+        loadActivity(verified.sessionToken).then(
+          () => true,
+          () => false,
+        ),
+      ]);
+      if (!loaded) report("Signed in. Activity is temporarily unavailable.", "error");
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Authentication failed.");
+      report(passkeyErrorMessage(error, "Sign-in failed. Try again."), "error");
     } finally {
       setBusy(false);
     }
@@ -182,10 +215,10 @@ export default function AccountPage() {
     if (!session) return;
     setBusy(true);
     try {
-      await loadActivity(session);
-      setStatus("Finalized activity refreshed.");
+      await Promise.all([loadActivity(session), loadBalance(account)]);
+      report("Up to date.", "success");
     } catch {
-      setStatus("Finalized activity is temporarily unavailable. Your account is unchanged.");
+      report("Activity is temporarily unavailable. Your account is unchanged.", "error");
     } finally {
       setBusy(false);
     }
@@ -203,9 +236,11 @@ export default function AccountPage() {
       setActivity(undefined);
       setReserves([]);
       setReturns({});
-      setStatus("Session revoked.");
+      setBalance(undefined);
+      setFunding(undefined);
+      report("Signed out.");
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Sign out failed.");
+      report(error instanceof Error ? error.message : "Sign out failed.", "error");
     } finally {
       setBusy(false);
     }
@@ -214,16 +249,16 @@ export default function AccountPage() {
   /** Looks up an older offline balance that is no longer in the recent activity window. */
   async function lookUpReserve() {
     if (!session || !/^0x[0-9a-fA-F]{64}$/.test(channelId)) {
-      setStatus("Enter a valid balance identifier.");
+      report("Enter a valid balance identifier.", "error");
       return;
     }
     setBusy(true);
     try {
       await loadReserve(session, channelId.toLowerCase() as `0x${string}`);
       setChannelId("");
-      setStatus("Balance loaded.");
+      report("Balance loaded.", "success");
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "That balance is unavailable.");
+      report(error instanceof Error ? error.message : "That balance is unavailable.", "error");
     } finally {
       setBusy(false);
     }
@@ -240,9 +275,9 @@ export default function AccountPage() {
         body: JSON.stringify({ eventId: reserve.eventId }),
       })) as ReturnOperation;
       setReturns((current) => ({ ...current, [reserve.channelId]: result }));
-      setStatus("Return started.");
+      report("Return started.", "success");
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "The return was not accepted.");
+      report(error instanceof Error ? error.message : "The return was not accepted.", "error");
     } finally {
       setBusy(false);
     }
@@ -252,7 +287,7 @@ export default function AccountPage() {
     if (!session || !api) return;
     const units = toBaseUnits(fundAmount, 6);
     if (!units) {
-      setStatus("Enter a valid test amount with up to six decimals.");
+      report("Enter a valid test amount with up to six decimals.", "error");
       return;
     }
     setBusy(true);
@@ -276,45 +311,130 @@ export default function AccountPage() {
       }
       const result = (await response.json()) as { transactionHash: string };
       setFunding(result.transactionHash);
-      setStatus("Test balance funded. This is test money, not card funding.");
+      await loadBalance(account);
+      report(`Added ${fundAmount} test USDC to your balance.`, "success");
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Test funding is unavailable.");
+      report(error instanceof Error ? error.message : "Test funding is unavailable.", "error");
     } finally {
       setBusy(false);
     }
   }
 
+  const notice = (
+    <p role="status" aria-live="polite" className={`notice ${tone === "info" ? "" : tone}`}>
+      {status}
+    </p>
+  );
+
+  if (!session)
+    return (
+      <main>
+        <section className="shell narrow">
+          <div className="brand-bar">
+            <BrandMark />
+          </div>
+          <h1>Welcome back</h1>
+          <p className="summary">
+            Sign in with the passkey on this device. Nothing to type, no seed phrase.
+          </p>
+          <button type="button" className="block-button" disabled={busy} onClick={signIn}>
+            {busy ? "Waiting for your passkey…" : "Sign in with passkey"}
+          </button>
+          {notice}
+          <p className="fine-print">
+            New here? <Link href="/enroll">Create an account</Link>
+          </p>
+        </section>
+      </main>
+    );
+
   return (
     <main>
-      <section className="shell account-shell">
-        <p className="eyebrow">OpenBalance account</p>
-        <h1>Use your passkey.</h1>
-        <p className="summary">Authenticate without a seed phrase or shared account password.</p>
-        <label htmlFor="account-address">Account address</label>
-        <input
-          id="account-address"
-          autoComplete="off"
-          spellCheck={false}
-          value={account}
-          disabled={busy || Boolean(session)}
-          onChange={(event) => setAccount(event.target.value)}
-        />
-        {session ? (
+      <section className="shell narrow account-shell">
+        <div className="account-header">
+          <div className="identity">
+            <span className="avatar" aria-hidden="true">
+              {account.slice(2, 4).toUpperCase()}
+            </span>
+            <div>
+              <small>Monad testnet</small>
+              <span className="address-chip" title={account}>
+                {shortAddress(account)}
+                <button
+                  type="button"
+                  className="text-button"
+                  onClick={copyAddress}
+                  aria-label="Copy account address"
+                >
+                  {copied ? "Copied" : "Copy"}
+                </button>
+              </span>
+            </div>
+          </div>
+          <button
+            type="button"
+            className="secondary-button sign-out"
+            disabled={busy}
+            onClick={signOut}
+          >
+            Sign out
+          </button>
+        </div>
+
+        <div className="balance-card">
+          <span>Available balance</span>
+          <strong>
+            {balance !== undefined
+              ? `${formatAmount(balance)} ${SETTLEMENT_ASSET.symbol}`
+              : balanceUnavailable
+                ? "Unavailable"
+                : "…"}
+          </strong>
+          <small>Test USDC, read directly from the chain.</small>
           <div className="actions">
             <button type="button" disabled={busy} onClick={refreshActivity}>
-              Refresh finalized activity
-            </button>
-            <button type="button" className="secondary-button" disabled={busy} onClick={signOut}>
-              Sign out
+              {busy ? "Refreshing…" : "Refresh"}
             </button>
           </div>
-        ) : (
-          <button type="button" disabled={busy} onClick={signIn}>
-            {busy ? "Verifying…" : "Continue with passkey"}
+        </div>
+
+        {notice}
+
+        <section className="card" aria-labelledby="funding-heading">
+          <div className="section-heading">
+            <h2 id="funding-heading">Add test money</h2>
+            <p>Test asset only</p>
+          </div>
+          <p className="muted">
+            Free test USDC on Monad testnet. It is not real money and cannot be withdrawn.
+          </p>
+          <fieldset className="amount-row">
+            <legend className="visually-hidden">Test amount</legend>
+            {["1", "2", "5"].map((value) => (
+              <button
+                key={value}
+                type="button"
+                className="secondary-button"
+                aria-pressed={fundAmount === value}
+                disabled={busy}
+                onClick={() => setFundAmount(value)}
+              >
+                {value} USDC
+              </button>
+            ))}
+          </fieldset>
+          <button type="button" className="block-button" disabled={busy} onClick={fundTestBalance}>
+            {busy ? "Working…" : `Add ${fundAmount} USDC`}
           </button>
-        )}
-        <p role="status">{status}</p>
-        {session && activity && (
+          {funding && (
+            <div className="inline-proof">
+              <span>Finalized on chain</span>
+              <code title={funding}>{short(funding)}</code>
+            </div>
+          )}
+        </section>
+
+        {activity && (
           <section className="activity" aria-labelledby="balances-heading">
             <div className="section-heading">
               <div>
@@ -340,29 +460,35 @@ export default function AccountPage() {
                   onChange={(event) => setChannelId(event.target.value)}
                 />
               </label>
-              <button type="button" disabled={busy} onClick={lookUpReserve}>
+              <button
+                type="button"
+                className="secondary-button"
+                disabled={busy}
+                onClick={lookUpReserve}
+              >
                 Look up balance
               </button>
             </details>
           </section>
         )}
-        {session && activity && (
+
+        {activity && (
           <section className="activity" aria-labelledby="activity-heading">
             <div className="section-heading">
               <div>
-                <p className="eyebrow">Finalized history</p>
-                <h2 id="activity-heading">Account activity</h2>
+                <p className="eyebrow">Finalized on chain</p>
+                <h2 id="activity-heading">Activity</h2>
               </div>
-              <p>{activity.items.length} recent transitions</p>
+              <p>{activity.items.length} recent</p>
             </div>
             {activity.items.length === 0 ? (
-              <p className="empty-state">No finalized payments or reserve transitions yet.</p>
+              <p className="empty-state">No payments or offline balances yet.</p>
             ) : (
               <ol className="activity-list">
                 {activity.items.map((item) => (
                   <li key={item.transitionId}>
                     <div>
-                      <strong>{item.kind.replaceAll("_", " ")}</strong>
+                      <strong>{item.kind.replaceAll("_", " ").toLowerCase()}</strong>
                       <span>
                         {item.aggregateKind.toLowerCase()} {short(item.aggregateId)}
                       </span>
@@ -374,39 +500,6 @@ export default function AccountPage() {
                   </li>
                 ))}
               </ol>
-            )}
-          </section>
-        )}
-        {session && (
-          <section className="activity" aria-labelledby="funding-heading">
-            <div className="section-heading">
-              <div>
-                <p className="eyebrow">Test money</p>
-                <h2 id="funding-heading">Fund a test balance</h2>
-              </div>
-              <p>Test asset only</p>
-            </div>
-            <p className="summary">
-              This faucet grants a clearly labelled test asset on the test network. It is not card
-              funding and cannot be withdrawn as real money.
-            </p>
-            <label>
-              Test amount
-              <input
-                inputMode="decimal"
-                value={fundAmount}
-                disabled={busy}
-                onChange={(event) => setFundAmount(event.target.value)}
-              />
-            </label>
-            <button type="button" disabled={busy} onClick={fundTestBalance}>
-              Fund test balance
-            </button>
-            {funding && (
-              <div className="proof-ref">
-                <span>Test funding finalized</span>
-                <code title={funding}>{short(funding)}</code>
-              </div>
             )}
           </section>
         )}

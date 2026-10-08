@@ -41,9 +41,9 @@ chain = {
   deployment_block = "65010301"
 }
 
-api_image         = "us-central1-docker.pkg.dev/openbalance-hackathon/openbalance-testnet/api@sha256:bf3aeb01e45e2228519277809c3a05bc38327e472ad7204cb6d7372a7429a4d9"
-relayer_image     = "us-central1-docker.pkg.dev/openbalance-hackathon/openbalance-testnet/relayer@sha256:9b74f35009d0916bb96ca703554ace2e725064e96418549e20d406aefd4cc678"
-web_image         = "us-central1-docker.pkg.dev/openbalance-hackathon/openbalance-testnet/web@sha256:072767036eca35343f0d95f47573d93d311bc70f6459eefb310cd887b5f40cdc"
+api_image         = "us-central1-docker.pkg.dev/openbalance-hackathon/openbalance-testnet/api@sha256:e2c5e08250de6291247643e71c2cdd9a07536c23b5f210e5229adab4436ff9ed"
+relayer_image     = "us-central1-docker.pkg.dev/openbalance-hackathon/openbalance-testnet/relayer@sha256:8d64c222391acbe188a4f151c2c402ea190f37491fb64acebb4f611610c791f0"
+web_image         = "us-central1-docker.pkg.dev/openbalance-hackathon/openbalance-testnet/web@sha256:818c29da6e00d4de771ac23e44519e5dfd097e56fde6cbf994e217b83bc39e85"
 venue_relay_image = "us-central1-docker.pkg.dev/openbalance-hackathon/openbalance-testnet/venue-relay@sha256:a7df25bf83146b46297aa465c59b430e24239a7c456f93ed28f92914d569726d"
 
 worker_images = {

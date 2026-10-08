@@ -107,6 +107,7 @@ async function build(name, tag) {
       "NEXT_PUBLIC_RELAYER_URL",
       "NEXT_PUBLIC_FINANCIAL_RPC_URL",
       "NEXT_PUBLIC_WEBAUTHN_RP_ID",
+      "NEXT_PUBLIC_SETTLEMENT_ASSET",
     ]) {
       const value = process.env[variable];
       // A browser bundle compiled against a missing URL fails at runtime in the user's browser, far
