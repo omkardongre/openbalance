@@ -11,6 +11,7 @@ import Image from "next/image";
 import QRCode from "qrcode";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { formatUnits } from "viem";
+import { readSettlementStatuses, type SettlementStatus } from "../../lib/offline-settlement";
 import {
   authorizeOfflineRequest,
   listOfflineAuthorizations,
@@ -18,6 +19,9 @@ import {
   type StoredAuthorization,
   storeTerminalReceipt,
 } from "../../lib/offline-wallet";
+
+/** How often to recheck finalized settlement while a payment is still open and the device is online. */
+const SETTLEMENT_POLL_MS = 10_000;
 
 function short(value: string) {
   return `${value.slice(0, 8)}…${value.slice(-6)}`;
@@ -35,6 +39,7 @@ export default function OfflineWalletPage() {
   const [busy, setBusy] = useState(false);
   const [offlineReady, setOfflineReady] = useState(false);
   const [status, setStatus] = useState("Load an active reserve, then scan the terminal request.");
+  const [settlement, setSettlement] = useState<Map<string, SettlementStatus>>(new Map());
 
   const refresh = useCallback(async () => {
     const [nextChannels, nextAuthorizations] = await Promise.all([
@@ -50,6 +55,36 @@ export default function OfflineWalletPage() {
       setStatus(error instanceof Error ? error.message : "Offline storage is unavailable."),
     );
   }, [refresh]);
+
+  // Receipts move from "stored" to "settled" by themselves: while any payment is still open, recheck
+  // the vault at the finalized block, and immediately when the device comes back online. A failed
+  // read (offline, RPC down) keeps the last known status rather than guessing.
+  const open = authorizations.some(
+    (authorization) =>
+      !authorization.supersededBy &&
+      settlement.get(authorization.paymentId) !== "SETTLED" &&
+      settlement.get(authorization.paymentId) !== "RETURNED",
+  );
+  useEffect(() => {
+    if (!open) return;
+    let active = true;
+    const check = () => {
+      if (!navigator.onLine) return;
+      readSettlementStatuses(channels, authorizations)
+        .then((next) => {
+          if (active) setSettlement((previous) => new Map([...previous, ...next]));
+        })
+        .catch(() => undefined);
+    };
+    check();
+    const timer = window.setInterval(check, SETTLEMENT_POLL_MS);
+    window.addEventListener("online", check);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+      window.removeEventListener("online", check);
+    };
+  }, [open, channels, authorizations]);
 
   useEffect(() => {
     if (!("serviceWorker" in navigator) || !window.isSecureContext) return;
@@ -264,11 +299,17 @@ export default function OfflineWalletPage() {
                   </div>
                   <div className="proof-ref">
                     <span>
-                      {authorization.receipt
-                        ? "TERMINAL RECEIPT STORED"
-                        : authorization.supersededBy
-                          ? "EXPIRED, REPLACED BY A NEWER REQUEST"
-                          : "AWAITING TERMINAL RECEIPT"}
+                      {authorization.supersededBy
+                        ? "EXPIRED, REPLACED BY A NEWER REQUEST"
+                        : settlement.get(authorization.paymentId) === "SETTLED"
+                          ? "SETTLED ON MONAD"
+                          : settlement.get(authorization.paymentId) === "RETURNED"
+                            ? "NOT UPLOADED IN TIME · RETURNED TO YOU"
+                            : settlement.get(authorization.paymentId) === "MISSED"
+                              ? "NOT UPLOADED IN TIME · COMES BACK TO YOU"
+                              : authorization.receipt
+                                ? "TERMINAL RECEIPT STORED · SETTLING"
+                                : "AWAITING TERMINAL RECEIPT"}
                     </span>
                     <small>{new Date(authorization.createdAt).toLocaleString()}</small>
                   </div>
