@@ -72,7 +72,10 @@ export async function buildRelayerApp(
   },
   readiness: ReadinessCheck[] = [],
 ) {
-  const app = Fastify({ logger: false, bodyLimit: 300_000 });
+  // Cloud Run's front end connects from a link-local address and appends the real client to
+  // X-Forwarded-For. Trusting only that range gives the rate limiter one key per client instead
+  // of one shared key, while forwarded values from any other peer are ignored.
+  const app = Fastify({ logger: false, bodyLimit: 300_000, trustProxy: "169.254.0.0/16" });
   await app.register(cors, {
     allowedHeaders: ["Content-Type", "Authorization", "Idempotency-Key"],
     methods: ["GET", "POST"],

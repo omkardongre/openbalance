@@ -155,6 +155,12 @@ describe.skipIf(!process.env.ENROLLMENT_TEST_DATABASE_URL)(
           "utf8",
         ),
       );
+      await pool.query(
+        await readFile(
+          new URL("../migrations/010_discoverable_sign_in.sql", import.meta.url),
+          "utf8",
+        ),
+      );
     });
     afterAll(async () => {
       if (pool) {
@@ -313,6 +319,15 @@ describe.skipIf(!process.env.ENROLLMENT_TEST_DATABASE_URL)(
             })
           ).statusCode,
         ).toBe(401);
+        // Discoverable sign-in: no account up front, no credential list, and the returned passkey
+        // names the account.
+        const discoverable = await access.begin();
+        expect(discoverable.options).not.toHaveProperty("allowCredentials");
+        const signedIn = await access.verify(
+          discoverable.challengeToken,
+          f.proof(discoverable.options.challenge),
+        );
+        expect(signedIn.account).toBe(confirmed.account);
         await authenticatedApp.close();
 
         const sponsoredStart = await service.begin();

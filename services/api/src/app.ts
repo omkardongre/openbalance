@@ -62,7 +62,10 @@ export async function buildApp(
   timeAuthority?: TimeAuthority,
   readiness: ReadinessCheck[] = [],
 ) {
-  const app = Fastify({ logger: false, bodyLimit: 32_768 });
+  // Cloud Run's front end connects from a link-local address and appends the real client to
+  // X-Forwarded-For. Trusting only that range gives the rate limiter one key per client instead
+  // of one shared key, while forwarded values from any other peer are ignored.
+  const app = Fastify({ logger: false, bodyLimit: 32_768, trustProxy: "169.254.0.0/16" });
 
   await app.register(cors, {
     allowedHeaders: ["Content-Type", "Authorization", "Idempotency-Key"],
@@ -126,9 +129,15 @@ export async function buildApp(
     if (access) {
       app.post("/v1/accounts/authentication-challenges", async (request, reply) => {
         const parsed = z
-          .object({ account: z.string().regex(/^0x[0-9a-fA-F]{40}$/) })
+          // Without an account the challenge is a discoverable passkey sign-in.
+          .object({
+            account: z
+              .string()
+              .regex(/^0x[0-9a-fA-F]{40}$/)
+              .optional(),
+          })
           .strict()
-          .safeParse(request.body);
+          .safeParse(request.body ?? {});
         if (!parsed.success)
           return reply.code(400).send({ error: "invalid_authentication_request" });
         try {

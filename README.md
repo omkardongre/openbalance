@@ -24,7 +24,8 @@ Use a browser with a platform passkey (Chrome, Safari, or Edge on a phone or lap
 1. **Create an account** — open `/enroll`, choose *Create passkey* and confirm it twice, then
    *Deploy account*. Sponsorship pays the deployment; *Check account* shows the address once the
    contract is on chain.
-2. **Get test money** — open `/account`, *Continue with passkey*, then *Fund test balance*
+2. **Get test money** — open `/account`, *Sign in with passkey* (nothing to type; pick the passkey
+   you just created), then *Fund test balance*
    (5 USDC per request). Each account may draw at most 10 USDC in total and the faucet has a shared
    daily budget; the page says which limit refused a request.
 3. **See it on chain** — *Refresh finalized activity* lists only finalized transitions, each with
@@ -43,7 +44,8 @@ can trigger the return, from `/account` or with no account at all (see *Reserve 
 An organizer credential on `/operations` also shows the event's offline reserves from
 `GET /v1/events/:eventId/reserves`: reserved, spent offline, still open, due back and returned. The
 five figures must add up to the reserved total or the API refuses to answer. Offline sales a
-terminal has not uploaded yet are only visible on that terminal.
+terminal has not uploaded yet are only visible on that terminal. Organizer credentials are issued
+with `services/api/src/provision-operations-access.ts`; the API stores only the token's SHA-256 hash.
 
 ## Layout
 
@@ -211,6 +213,24 @@ neither lands in `cre/.env` or `project.yaml`, and it redacts the RPC URL from t
 workflow uses TypeScript 5.9 because the CRE compiler drives the TypeScript compiler API, which
 TypeScript 7 no longer exposes. It sits outside the pnpm workspace because CRE builds each workflow
 from its own Bun-managed directory.
+
+#### Envio HyperSync indexer
+
+The deployed indexer reads finalized contract logs from Envio HyperSync
+(`services/indexer/src/hypersync.ts`). These logs feed the projections behind `/account` offline
+balances and the organizer reserves view. HyperSync is never the only source of financial truth.
+The finalized head, block hashes and the ledger/vault balance checks stay on the RPC, and every
+batch is reconciled against contract state at the exact block. If HyperSync cannot answer a batch,
+that batch is read with `eth_getLogs` and counted in `openbalance_indexer_log_batches{source="rpc_fallback"}`.
+
+| Evidence (Monad testnet) | Value |
+|---|---|
+| Live since 7 Oct 2026 | indexer logs `logSource: envio-hypersync`, no fallbacks, zero reconciliation differences |
+| Fresh backfill, deployment block to head (3.9M blocks) | about 18 s in 4 batches of up to 1M blocks |
+| Parity with the RPC-built history (`pnpm --filter @openbalance/indexer hypersync:parity`) | 63/63 transitions match |
+
+The token is the `envio-api-token` secret, mounted as a file (`INDEXER_HYPERSYNC_TOKEN_PATH`).
+Configuration is in [`services/indexer/README.md`](services/indexer/README.md).
 
 ### Event provisioning
 
@@ -450,7 +470,9 @@ Load Balancer (`infra/terraform/lb.tf`) with a Certificate Manager certificate i
 authorization. Cloud Run's own domain mapping is a preview feature and is not used. Once the origin
 moves there, the web service accepts traffic only from the load balancer, so its run.app host returns
 404 rather than serving a second origin whose passkeys cannot work. Build the web image with
-`NEXT_PUBLIC_WEBAUTHN_RP_ID=openbalance.countersign.site`; `terraform output configured_web_origin`
+`NEXT_PUBLIC_WEBAUTHN_RP_ID=openbalance.countersign.site` and
+`NEXT_PUBLIC_SETTLEMENT_ASSET` set to the `asset` in `deployments/testnet/financial-manifest.json`
+(the `/account` balance reads it from the chain); `terraform output configured_web_origin`
 is the authoritative origin and the build bakes it in irreversibly.
 
 Moving to a new domain is two applies: set `web_domain`, publish the A and `_acme-challenge` CNAME
@@ -462,6 +484,10 @@ every passkey enrolled on the old one.
 so passing the operational provider's authenticated endpoint would publish its key to every visitor.
 The verifier is designed around a caller-selected public RPC for exactly this reason. Grep the built
 bundle for provider hostnames afterwards; intent is not evidence.
+
+Rate limits are per client. Cloud Run's front end connects from a link-local address and appends
+the client to `X-Forwarded-For`, so the API and relayer set Fastify `trustProxy` to `169.254.0.0/16`
+only. A request that reaches the process from any other peer is keyed on its socket address.
 
 Runtime secret material is delivered as files at `/run/secrets/<name>/<name>` (mode 0400), matching
 the file paths the services already accept; each identity is granted access only to the secrets its

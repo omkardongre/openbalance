@@ -21,36 +21,48 @@ export class AccountAccessService {
     private readonly sessionTtlMinutes = 15,
   ) {}
 
-  async begin(accountInput: string) {
-    let account: string;
-    try {
-      account = getAddress(accountInput);
-    } catch {
-      throw new AccountAccessRejected();
+  /**
+   * Issues a sign-in challenge. With an account, the challenge is bound to that account's passkey
+   * (used where the payer is already fixed, such as an approved checkout). Without one, it is a
+   * discoverable sign-in: the browser offers the passkeys it holds for this site and the returned
+   * credential identifies the account at verification.
+   */
+  async begin(accountInput?: string) {
+    let bound: { id: string; credentialId: string } | undefined;
+    if (accountInput !== undefined) {
+      let account: string;
+      try {
+        account = getAddress(accountInput);
+      } catch {
+        throw new AccountAccessRejected();
+      }
+      const result = await this.pool.query(
+        `SELECT e.id, e.credential
+         FROM account_deployments d JOIN account_enrollments e ON e.id=d.enrollment_id
+         WHERE d.account_address=$1 AND d.verified_block IS NOT NULL
+           AND e.status='verified' AND e.rp_id=$2 AND e.origin=$3`,
+        [account, this.policy.rpId, this.policy.origin],
+      );
+      const row = result.rows[0];
+      if (!row?.credential?.id) throw new AccountAccessRejected();
+      bound = { id: row.id, credentialId: row.credential.id };
     }
-    const result = await this.pool.query(
-      `SELECT e.id, e.credential
-       FROM account_deployments d JOIN account_enrollments e ON e.id=d.enrollment_id
-       WHERE d.account_address=$1 AND d.verified_block IS NOT NULL
-         AND e.status='verified' AND e.rp_id=$2 AND e.origin=$3`,
-      [account, this.policy.rpId, this.policy.origin],
-    );
-    const row = result.rows[0];
-    if (!row?.credential?.id) throw new AccountAccessRejected();
     const challenge = randomBytes(32).toString("base64url");
     const challengeToken = randomBytes(32).toString("base64url");
     await this.pool.query(
       `INSERT INTO account_authentication_challenges
        (id,enrollment_id,challenge_hash,challenge,expires_at)
        VALUES ($1,$2,$3,$4,now()+interval '5 minutes')`,
-      [randomUUID(), row.id, digest(challengeToken), challenge],
+      [randomUUID(), bound?.id ?? null, digest(challengeToken), challenge],
     );
     return {
       challengeToken,
       options: {
         challenge,
         rpId: this.policy.rpId,
-        allowCredentials: [{ id: row.credential.id, type: "public-key" as const }],
+        ...(bound
+          ? { allowCredentials: [{ id: bound.credentialId, type: "public-key" as const }] }
+          : {}),
         userVerification: "required" as const,
         timeout: 120_000,
       },
@@ -62,20 +74,33 @@ export class AccountAccessService {
     const db = await this.pool.connect();
     try {
       await db.query("BEGIN");
-      const result = await db.query(
-        `SELECT c.id AS challenge_id,c.challenge,e.id AS enrollment_id,e.credential,e.rp_id,e.origin,
-                d.account_address
-         FROM account_authentication_challenges c
-         JOIN account_enrollments e ON e.id=c.enrollment_id
-         JOIN account_deployments d ON d.enrollment_id=e.id
-         WHERE c.challenge_hash=$1 AND c.consumed_at IS NULL
-           AND c.expires_at > clock_timestamp() AND d.verified_block IS NOT NULL
-         FOR UPDATE OF c,e`,
+      const challengeResult = await db.query(
+        `SELECT id,challenge,enrollment_id FROM account_authentication_challenges
+         WHERE challenge_hash=$1 AND consumed_at IS NULL AND expires_at > clock_timestamp()
+         FOR UPDATE`,
         [digest(challengeToken)],
       );
-      const row = result.rows[0];
-      if (!row || row.rp_id !== this.policy.rpId || row.origin !== this.policy.origin)
+      const pending = challengeResult.rows[0];
+      if (!pending) throw new AccountAccessRejected();
+      // A bound challenge accepts only its account's passkey; a discoverable one resolves the
+      // enrollment from the returned credential id, which is unique across enrollments. Either way
+      // the signature is then checked against that enrollment's stored public key.
+      const enrollmentResult = await db.query(
+        `SELECT e.id AS enrollment_id,e.credential,e.rp_id,e.origin,d.account_address
+         FROM account_enrollments e JOIN account_deployments d ON d.enrollment_id=e.id
+         WHERE ${pending.enrollment_id ? "e.id=$1" : "e.credential->>'id'=$1"}
+           AND e.status='verified' AND d.verified_block IS NOT NULL
+         FOR UPDATE OF e`,
+        [pending.enrollment_id ?? response.id],
+      );
+      const enrollment = enrollmentResult.rows[0];
+      if (
+        !enrollment ||
+        enrollment.rp_id !== this.policy.rpId ||
+        enrollment.origin !== this.policy.origin
+      )
         throw new AccountAccessRejected();
+      const row = { ...enrollment, challenge_id: pending.id, challenge: pending.challenge };
       let newCounter: number;
       try {
         newCounter = await verifyStrictPasskeyAssertion({

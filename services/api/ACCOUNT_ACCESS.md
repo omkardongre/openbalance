@@ -1,9 +1,19 @@
 # Passkey-authenticated account access
 
-Apply `003_account_access.sql` after the enrollment and deployment migrations. Runtime database
-access requires SELECT, INSERT, and UPDATE on the two access tables. The service issues a
-five-minute, single-use authentication challenge only for an account whose initial deployment has
-been verified at a finalized block.
+Apply `003_account_access.sql` and `010_discoverable_sign_in.sql` after the enrollment and
+deployment migrations. Runtime database access requires SELECT, INSERT, and UPDATE on the two access
+tables. `POST /v1/accounts/authentication-challenges` issues a five-minute, single-use challenge in
+one of two modes:
+
+- **Discoverable** (`{}`): no account and no `allowCredentials`. The browser offers the passkeys it
+  holds for this RP ID (enrollment requires `residentKey: "required"`), and verification resolves
+  the enrollment from the returned credential id. This is what `/account` and checkout binding use.
+- **Bound** (`{"account":"0x…"}`): only for an account whose initial deployment has been verified at
+  a finalized block, with that account's credential as the only allowed one. Used where the payer is
+  already fixed, such as an approved checkout.
+
+In both modes the enrollment must be verified, deployed at a finalized block, and match the
+configured RP ID and origin; an unknown credential is rejected exactly like a bad signature.
 
 The assertion must use the account's enrolled ES256 credential, configured RP ID and exact origin,
 user presence and user verification. The verifier also enforces the restricted authenticator-data
