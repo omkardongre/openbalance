@@ -4,7 +4,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Shapes
 import androidx.compose.material3.Typography
-import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
@@ -14,46 +14,52 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
 /** Semantic colors the Material scheme has no slot for: money states need their own, fixed meaning. */
+// Light palette shared with the web app. Status colors are the darker shades so text and icons in
+// them keep at least 4.5:1 contrast on white, not just the tinted backgrounds.
 object TerminalColors {
-    val Mint = Color(0xFF5EEAD4)
+    /** Brand teal: primary actions and settled / positive money states. */
+    val Mint = Color(0xFF0D9488)
     val MintDeep = Color(0xFF0F766E)
-    val Amber = Color(0xFFFBBF24)
-    val Coral = Color(0xFFFB7185)
-    val Ink = Color(0xFF070B10)
-    val Surface1 = Color(0xFF0F151C)
-    val Surface2 = Color(0xFF151D26)
-    val Surface3 = Color(0xFF1C2631)
-    val Outline = Color(0xFF263241)
-    val Muted = Color(0xFF8A99AB)
+    /** Content placed on a Mint fill (buttons, brand mark). */
+    val OnMint = Color(0xFFFFFFFF)
+    val Amber = Color(0xFFB45309)
+    val Coral = Color(0xFFBE123C)
+    val Paper = Color(0xFFF5F7FA)
+    val Surface1 = Color(0xFFFFFFFF)
+    val Surface2 = Color(0xFFF1F5F9)
+    val Surface3 = Color(0xFFE8EDF3)
+    val Outline = Color(0xFFCBD5E1)
+    val Muted = Color(0xFF5B6676)
+    val Ink = Color(0xFF0B1220)
 }
 
 // A fixed brand scheme rather than dynamic color: a payment terminal must look the same on every
 // device so staff and attendees recognise it, and status colors must never be re-tinted by wallpaper.
-private val scheme = darkColorScheme(
+private val scheme = lightColorScheme(
     primary = TerminalColors.Mint,
-    onPrimary = Color(0xFF032621),
-    primaryContainer = Color(0xFF0B3B35),
-    onPrimaryContainer = Color(0xFFB9F6EA),
-    secondary = Color(0xFF93C5FD),
-    onSecondary = Color(0xFF0B2545),
+    onPrimary = TerminalColors.OnMint,
+    primaryContainer = Color(0xFFE6F6F4),
+    onPrimaryContainer = TerminalColors.MintDeep,
+    secondary = TerminalColors.MintDeep,
+    onSecondary = Color(0xFFFFFFFF),
     secondaryContainer = TerminalColors.Surface3,
-    onSecondaryContainer = Color(0xFFE2E8F0),
+    onSecondaryContainer = TerminalColors.Ink,
     tertiary = TerminalColors.Amber,
-    background = TerminalColors.Ink,
-    onBackground = Color(0xFFF1F5F9),
-    surface = TerminalColors.Ink,
-    onSurface = Color(0xFFF1F5F9),
+    background = TerminalColors.Paper,
+    onBackground = TerminalColors.Ink,
+    surface = TerminalColors.Paper,
+    onSurface = TerminalColors.Ink,
     surfaceVariant = TerminalColors.Surface2,
     onSurfaceVariant = TerminalColors.Muted,
-    surfaceContainerLowest = TerminalColors.Ink,
+    surfaceContainerLowest = Color(0xFFFFFFFF),
     surfaceContainerLow = TerminalColors.Surface1,
     surfaceContainer = TerminalColors.Surface1,
     surfaceContainerHigh = TerminalColors.Surface2,
     surfaceContainerHighest = TerminalColors.Surface3,
     outline = TerminalColors.Outline,
-    outlineVariant = Color(0xFF1A232E),
+    outlineVariant = Color(0xFFE3E8EF),
     error = TerminalColors.Coral,
-    onError = Color(0xFF3B0712),
+    onError = Color(0xFFFFFFFF),
 )
 
 // Expressive scale: heavier display weights and tighter tracking for headline numbers, calmer body.

@@ -12,11 +12,11 @@ import android.graphics.Color as AndroidColor
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
-        // Edge-to-edge with light system-bar icons over the app's dark surface; Scaffold and the
+        // Edge-to-edge with dark system-bar icons over the app's light surface; Scaffold and the
         // scanner apply the insets so content never sits under the status or navigation bar.
         enableEdgeToEdge(
-            statusBarStyle = SystemBarStyle.dark(AndroidColor.TRANSPARENT),
-            navigationBarStyle = SystemBarStyle.dark(AndroidColor.TRANSPARENT),
+            statusBarStyle = SystemBarStyle.light(AndroidColor.TRANSPARENT, AndroidColor.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.light(AndroidColor.TRANSPARENT, AndroidColor.TRANSPARENT),
         )
         super.onCreate(savedInstanceState)
         // Release builds keep payment screens out of screenshots, recordings and the recents preview.

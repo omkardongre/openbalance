@@ -187,7 +187,11 @@ private fun HomeScreen(state: TerminalUiState, model: TerminalViewModel) {
                             }
                         },
                         label = { Text(entry.label) },
-                        colors = NavigationBarItemDefaults.colors(indicatorColor = TerminalColors.Mint.copy(alpha = 0.18f)),
+                        colors = NavigationBarItemDefaults.colors(
+                            selectedIconColor = TerminalColors.MintDeep,
+                            selectedTextColor = TerminalColors.MintDeep,
+                            indicatorColor = TerminalColors.Mint.copy(alpha = 0.18f),
+                        ),
                     )
                 }
             }
@@ -581,8 +585,8 @@ private fun BrandMark() {
         Canvas(Modifier.size(22.dp)) {
             // Two offset rings: a balance held and a balance settled.
             val stroke = Stroke(width = size.minDimension * 0.16f)
-            drawCircle(Color(0xFF032621), radius = size.minDimension * 0.30f, center = Offset(size.width * 0.38f, size.height / 2), style = stroke)
-            drawCircle(Color(0xFF032621), radius = size.minDimension * 0.30f, center = Offset(size.width * 0.62f, size.height / 2), style = stroke)
+            drawCircle(TerminalColors.OnMint, radius = size.minDimension * 0.30f, center = Offset(size.width * 0.38f, size.height / 2), style = stroke)
+            drawCircle(TerminalColors.OnMint, radius = size.minDimension * 0.30f, center = Offset(size.width * 0.62f, size.height / 2), style = stroke)
         }
     }
 }
@@ -757,12 +761,12 @@ private fun PrimaryAction(label: String, icon: ImageVector?, enabled: Boolean, o
         contentPadding = PaddingValues(horizontal = 24.dp, vertical = 18.dp),
         colors = ButtonDefaults.buttonColors(
             containerColor = TerminalColors.Mint,
-            contentColor = Color(0xFF032621),
+            contentColor = TerminalColors.OnMint,
             disabledContainerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
         ),
         modifier = Modifier.fillMaxWidth().heightIn(min = 64.dp).scale(pressScale(source)),
     ) {
-        if (icon != null) Icon(icon, null, modifier = Modifier.size(22.dp)) else ScanGlyph(22.dp, Color(0xFF032621))
+        if (icon != null) Icon(icon, null, modifier = Modifier.size(22.dp)) else ScanGlyph(22.dp, TerminalColors.OnMint)
         Spacer(Modifier.width(10.dp))
         Text(label, style = MaterialTheme.typography.titleMedium)
     }
@@ -892,7 +896,7 @@ private fun OrderRow(order: OrderView, state: TerminalUiState, model: TerminalVi
                 enabled = canCharge,
                 interactionSource = source,
                 shape = MaterialTheme.shapes.medium,
-                colors = ButtonDefaults.buttonColors(containerColor = TerminalColors.Mint, contentColor = Color(0xFF032621)),
+                colors = ButtonDefaults.buttonColors(containerColor = TerminalColors.Mint, contentColor = TerminalColors.OnMint),
                 contentPadding = PaddingValues(horizontal = 20.dp, vertical = 14.dp),
                 modifier = Modifier.heightIn(min = 52.dp).scale(pressScale(source))
                     .semantics { contentDescription = "Charge ${order.description} ${formatUnits(order.grossUnits, order.assetDecimals)} ${order.assetSymbol}" },
@@ -1064,11 +1068,11 @@ private fun PaymentScreen(sale: SaleView, state: TerminalUiState, model: Termina
                 enabled = !state.busy && (accepted || expired || state.trustedTime != null),
                 interactionSource = source,
                 shape = MaterialTheme.shapes.large,
-                colors = ButtonDefaults.buttonColors(containerColor = TerminalColors.Mint, contentColor = Color(0xFF032621)),
+                colors = ButtonDefaults.buttonColors(containerColor = TerminalColors.Mint, contentColor = TerminalColors.OnMint),
                 contentPadding = PaddingValues(vertical = 18.dp),
                 modifier = Modifier.fillMaxWidth().heightIn(min = 60.dp).scale(pressScale(source)),
             ) {
-                if (sale.state == "PREPARED" && !expired) { ScanGlyph(20.dp, Color(0xFF032621)); Spacer(Modifier.width(10.dp)) }
+                if (sale.state == "PREPARED" && !expired) { ScanGlyph(20.dp, TerminalColors.OnMint); Spacer(Modifier.width(10.dp)) }
                 Text(label, style = MaterialTheme.typography.titleMedium)
             }
         }
@@ -1148,7 +1152,7 @@ private fun ScannerScreen(state: TerminalUiState, model: TerminalViewModel) {
                 Button(
                     onClick = { cameraPermission.launch(Manifest.permission.CAMERA) },
                     shape = MaterialTheme.shapes.medium,
-                    colors = ButtonDefaults.buttonColors(containerColor = TerminalColors.Mint, contentColor = Color(0xFF032621)),
+                    colors = ButtonDefaults.buttonColors(containerColor = TerminalColors.Mint, contentColor = TerminalColors.OnMint),
                     contentPadding = PaddingValues(horizontal = 28.dp, vertical = 16.dp),
                 ) { Text("Allow camera", style = MaterialTheme.typography.titleMedium) }
             }
