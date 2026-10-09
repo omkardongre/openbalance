@@ -41,14 +41,14 @@ chain = {
   deployment_block = "65010301"
 }
 
-api_image         = "us-central1-docker.pkg.dev/openbalance-hackathon/openbalance-testnet/api@sha256:e2c5e08250de6291247643e71c2cdd9a07536c23b5f210e5229adab4436ff9ed"
-relayer_image     = "us-central1-docker.pkg.dev/openbalance-hackathon/openbalance-testnet/relayer@sha256:8d64c222391acbe188a4f151c2c402ea190f37491fb64acebb4f611610c791f0"
-web_image         = "us-central1-docker.pkg.dev/openbalance-hackathon/openbalance-testnet/web@sha256:818c29da6e00d4de771ac23e44519e5dfd097e56fde6cbf994e217b83bc39e85"
+api_image         = "us-central1-docker.pkg.dev/openbalance-hackathon/openbalance-testnet/api@sha256:f0a4a37022e4b14c0c4e1646b7c3d0e6abf620ab2ad0fa673b7c5b3722488fad"
+relayer_image     = "us-central1-docker.pkg.dev/openbalance-hackathon/openbalance-testnet/relayer@sha256:5782bdaf76030688822e5df568b0b67e724f625ab4dc360623d10379209a6865"
+web_image         = "us-central1-docker.pkg.dev/openbalance-hackathon/openbalance-testnet/web@sha256:bf1848fe99de764503f395e84ac2abbf0ca964b4a59c60a4f2540b1290128c5f"
 venue_relay_image = "us-central1-docker.pkg.dev/openbalance-hackathon/openbalance-testnet/venue-relay@sha256:a7df25bf83146b46297aa465c59b430e24239a7c456f93ed28f92914d569726d"
 
 worker_images = {
   indexer                = "us-central1-docker.pkg.dev/openbalance-hackathon/openbalance-testnet/indexer@sha256:9cbc105aedca8c2cadb4b36a52a1250d6b7e9bc0164aab7ee04f5dcda761ac11"
   integrations           = "us-central1-docker.pkg.dev/openbalance-hackathon/openbalance-testnet/integrations@sha256:4f1b9a1377638cca981784cb3c8fab3f653ab2ade95959552b7ffd4eeff1bd4e"
-  financial-worker       = "us-central1-docker.pkg.dev/openbalance-hackathon/openbalance-testnet/financial-worker@sha256:ca8b99141e5b2ca9c327384517730350ca7dca29a43738c33ade3ade5b6d38c6"
+  financial-worker       = "us-central1-docker.pkg.dev/openbalance-hackathon/openbalance-testnet/financial-worker@sha256:5e92fd614c0fb9b753bd0e8a4dbc0539550266544edaa3430816ddc6e4841b0c"
   venue-relay-settlement = "us-central1-docker.pkg.dev/openbalance-hackathon/openbalance-testnet/venue-relay-settlement@sha256:b3f60d95b81cebb9b655b15a1aea0a9d0c993a031309601cca428396a18e0d60"
 }

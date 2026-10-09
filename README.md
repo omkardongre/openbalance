@@ -12,8 +12,11 @@ and locally tested (`pnpm check`, `pnpm test`). The account and event contract s
 verified on Monad testnet. The API, relayer, indexer, financial worker and web app run against that
 manifest on the testnet project, and the attendee journey — passkey enrollment, sponsored account
 deployment, sign-in, test funding, reserve channel, voucher settlement, reclaim, refund and vendor
-withdrawal — is proven against those deployed services on chain. The venue relay and the integration
-worker are not deployed; see the root checklist for why each is withheld rather than pending.
+withdrawal — is proven against those deployed services on chain. On 9 Oct 2026 a full offline sale
+was proven between two real phones: an attendee phone on the web wallet and the Android terminal,
+with the terminal uploading straight to the cloud relayer (no laptop, no CLI). The integration worker
+is not deployed. The venue relay is optional on-site fallback rather than a required component; see
+the root checklist.
 
 ## Try it on Monad testnet (about 5 minutes)
 
@@ -22,24 +25,33 @@ No wallet, seed phrase, or gas is needed; every transaction is sponsored and use
 Use a browser with a platform passkey (Chrome, Safari, or Edge on a phone or laptop).
 
 1. **Create an account** — open `/enroll`, choose *Create passkey* and confirm it twice, then
-   *Deploy account*. Sponsorship pays the deployment; *Check account* shows the address once the
-   contract is on chain.
-2. **Get test money** — open `/account`, *Sign in with passkey* (nothing to type; pick the passkey
-   you just created), then *Fund test balance*
-   (5 USDC per request). Each account may draw at most 10 USDC in total and the faucet has a shared
-   daily budget; the page says which limit refused a request.
-3. **See it on chain** — *Refresh finalized activity* lists only finalized transitions, each with
-   its transaction hash for the Monad testnet explorer.
+   *Create my account*. Sponsorship pays the deployment and the page moves on by itself once the
+   account contract is on chain.
+2. **Get test money** — open `/account` (*Wallet* tab), *Sign in with passkey* (nothing to type;
+   pick the passkey you just created), choose 1, 2 or 5 USDC and tap *Add*. Each account may draw
+   at most 10 USDC in total and the faucet has a shared daily budget; the page says which limit
+   refused a request.
+3. **See it on chain** — *Activity* lists finalized payments, reserves and returns with amount,
+   stall and time, 10 per page; each row links to its transaction on the Monad testnet explorer.
 4. **Check it without us** — open `/verify`, keep the public RPC or paste your own, paste
    `deployments/testnet/verifier-manifest.json`, then *Verify deployment* and the custody check.
    The page reads the chain directly and never calls our API.
 
-Paying at a stall and opening an outage reserve need a registered vendor terminal, which signs each
-intent with its own key; that step is shown in the demo video. Demo reserves use short windows:
-offline acceptance for 10 minutes, then 5 minutes to upload, so an unspent reserve becomes
-returnable 15 minutes after it is opened. After sign-in, `/account` lists each offline balance with
-when it can be spent and when the rest comes back, and offers *Return now* once it is due. Anyone
-can trigger the return, from `/account` or with no account at all (see *Reserve return* below).
+**Set aside for outages** on `/account` opens a reserve for one stall: pick the stall (from the
+public `GET /v1/reserve-terms`) and 1, 2 or 5 USDC, then approve with the passkey. *Pay offline*
+(`/offline`) then pays that stall by scanning the terminal's code, even with no signal. Paying needs
+the registered stall terminal (the Android app), so that step is shown in the demo video. Demo
+reserves accept payments for 60 minutes and give the stall 30 more minutes to upload, so unspent
+money is returnable 90 minutes after the reserve opens. `/account` lists each offline balance, 5 per
+page from `GET /v1/accounts/me/reserves` (cursor paginated), with when it can be spent and when the
+rest comes back, and offers *Return now* once it is due. Anyone can trigger the return, from
+`/account` or with no account at all (see *Reserve return* below).
+
+The attendee pages and the terminal use plain words only: no addresses, hashes, "channel",
+"voucher" or "testnet" in the main flow. Errors pass through one translator (`friendlyError` in
+`apps/web/src/lib/account-display.ts`, `friendlyMessage` on the terminal) so an internal message is
+never shown as-is. `/operations`, `/verify` and `/cashier` are organizer and auditor tools and keep
+technical detail on purpose.
 
 An organizer credential on `/operations` also shows the event's offline reserves from
 `GET /v1/events/:eventId/reserves`: reserved, spent offline, still open, due back and returned. The
@@ -272,7 +284,7 @@ the contract will actually enforce.
 Reserve windows default to the event config's on-chain ceilings. A demo event can offer shorter
 ones with `CHECKOUT_RESERVE_ACCEPTANCE_SECONDS` and `CHECKOUT_RESERVE_SUBMISSION_SECONDS`; the
 script refuses anything under 60 seconds or above the ceiling, since the contract would reject it.
-The testnet manifest uses 600 and 300.
+The testnet manifest uses 3600 and 1800.
 
 The capability key is a MAC key rather than an identity — rotating it invalidates outstanding order
 capabilities and nothing else — so it is created once, written to the gitignored `secrets/` tree as raw
@@ -357,8 +369,20 @@ node scripts/attendee-sign.mjs --adb            # payment request shown on the t
 node scripts/attendee-sign.mjs --adb            # terminal receipt, after the terminal accepts
 ```
 
-The terminal uploads receipts to a venue relay, which runs on venue hardware rather than in the
-cloud. To run it on this machine for the physical phone:
+The terminal keeps every offline sale in its encrypted journal and uploads it as soon as it is
+online, signing each upload with its terminal key. By default the upload goes straight to the cloud
+relayer (`POST /v1/vouchers`, `services/relayer/src/terminal-vouchers.ts`), which checks the
+terminal signature against the signer the vault recorded for that channel before queuing a
+sponsored `VOUCHER_SETTLE`. Enroll the terminal for this with the QR from
+`node scripts/terminal-cloud-enrollment.mjs` (`secrets/testnet/terminal-cloud-enrollment-qr.png`).
+
+Sales are taken on the terminal's keypad (*Checkout* tab: type the amount, *Charge*); POS orders
+pushed by a connected point of sale are listed under it when there are any. The *Sales* tab filters
+by Pending, Settled and Not paid and loads older sales 25 at a time; the *Terminal* tab lists Open
+and Closed reserves 10 at a time.
+
+A venue relay on site hardware remains an optional fallback for an event whose internet stays down
+past a reserve's upload deadline. To run it on this machine for the physical phone:
 
 ```bash
 node scripts/venue-relay-local.mjs setup   # keys, TLS, registry-bound terminal snapshot, enrollment QR
@@ -366,7 +390,8 @@ node scripts/venue-relay-local.mjs setup   # keys, TLS, registry-bound terminal 
 node scripts/venue-relay-local.mjs start   # HTTPS relay + settlement worker + adb reverse tcp:3003
 ```
 
-Re-enroll the terminal from `secrets/testnet/venue-relay/enrollment-qr.png` ("Re-enroll" chip);
+Set the terminal up again from `secrets/testnet/venue-relay/enrollment-qr.png` (*Terminal* tab,
+*Set up again with a new code*);
 this replaces only the stored endpoints, not the terminal key or its journal. The phone reaches the
 relay at `https://localhost:3003` over USB, so it keeps working with Wi-Fi off. TLS uses a local CA
 name-constrained to `localhost`; `setup` writes its certificate into a gitignored debug resource
@@ -391,6 +416,11 @@ receipt, is the channel tip, and has expired; the old approval is kept and marke
 its receipt is refused. The vault settles each sequence once, so even a terminal that countersigned
 both answers collects only one, within `maxPerVoucher`. The input is an `obqr1:` payload, a receipt JSON, a PNG, or
 `--adb` for a screenshot of the connected device.
+
+On a real attendee phone, `/offline` scans with a full-screen viewfinder. It decodes with the
+browser's native `BarcodeDetector` where it supports QR (Chrome on Android), and otherwise with
+ZXing. The rear camera runs at up to 1920×1080 with continuous focus and, where the camera allows
+it, 1.5× zoom, so the phone can stay about 20 cm from the terminal screen and still focus.
 
 The scenario package doubles as the driver for a deployed environment. `SCENARIO_KIND=api-enroll`
 enrolls a passkey and deploys the account, `api-fund` signs in and takes a faucet grant in a separate
