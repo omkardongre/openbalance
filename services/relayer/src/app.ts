@@ -10,6 +10,7 @@ import {
   SponsorshipUnavailable,
 } from "@openbalance/api/sponsorship";
 import { attachHttpOperations, type ReadinessCheck } from "@openbalance/observability";
+import type { VoucherReceipt } from "@openbalance/protocol";
 import Fastify, { type FastifyReply } from "fastify";
 import { z } from "zod";
 import {
@@ -24,6 +25,10 @@ import {
   type ReserveReclaimService,
 } from "./reserve-reclaims.js";
 import {
+  TerminalIngressRejected,
+  type TerminalVoucherIngressService,
+} from "./terminal-vouchers.js";
+import {
   VendorCommandNotFound,
   VendorCommandRejected,
   type VendorFinancialCommandService,
@@ -35,7 +40,35 @@ import {
 import { type VendorVoucherSettlementService, VoucherChannelNotFound } from "./vendor-vouchers.js";
 
 const reserveReturnRoute = "/v1/reserve-channels/:id/reclaims";
+const terminalIngressRoute = "/v1/vouchers";
 const bytes32Param = z.string().regex(/^0x[0-9a-fA-F]{64}$/);
+const hex32 = z.string().regex(/^0x[0-9a-fA-F]{64}$/);
+const hexBytes = z.string().regex(/^0x(?:[0-9a-fA-F]{2})+$/);
+// Same wire format as the venue relay's ingress, so a terminal can upload to either.
+const terminalIngressSchema = z
+  .object({
+    receipt: z
+      .object({
+        receiptId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9:_-]{0,127}$/),
+        terminalId: hex32,
+        channelId: hex32,
+        sequence: z.number().int().min(1).max(0xffff_ffff),
+        paymentId: hex32,
+        voucher: hexBytes.max(4_098),
+        attendeeSignature: z.string().regex(/^0x[0-9a-fA-F]{130}$/),
+        terminalSignature: z.string().regex(/^0x[0-9a-fA-F]{130}$/),
+      })
+      .strict(),
+    authorization: z
+      .object({
+        keyVersion: z.string().regex(/^[1-9][0-9]*$/),
+        sentAt: z.number().int().nonnegative(),
+        nonce: hex32,
+        signature: z.string().regex(/^0x[0-9a-fA-F]{130}$/),
+      })
+      .strict(),
+  })
+  .strict();
 
 function reclaimError(reply: FastifyReply, error: unknown) {
   if (error instanceof ReserveReclaimRejected) {
@@ -69,6 +102,7 @@ export async function buildRelayerApp(
     treasuryAccess?: VendorTreasuryAccessService;
     treasuryCommands?: VendorFinancialCommandService;
     voucherSettlements?: VendorVoucherSettlementService;
+    terminalVouchers?: TerminalVoucherIngressService;
   },
   readiness: ReadinessCheck[] = [],
 ) {
@@ -87,11 +121,13 @@ export async function buildRelayerApp(
     reply.header("Cache-Control", "no-store");
     // The origin check protects requests that carry a session or credential. A reserve return
     // carries neither and always pays the original account, so any caller, browser or not, may
-    // submit it.
+    // submit it. Terminal ingress is a device, not a browser, and is authenticated by a signature
+    // from the channel's terminal key rather than by anything a browser could attach.
     if (
       request.method === "POST" &&
       request.headers.origin !== origin &&
-      request.routeOptions.url !== reserveReturnRoute
+      request.routeOptions.url !== reserveReturnRoute &&
+      request.routeOptions.url !== terminalIngressRoute
     )
       return reply.code(403).send({ error: "origin_denied" });
   });
@@ -356,6 +392,45 @@ export async function buildRelayerApp(
           return vendorCommandError(reply, error);
         }
       });
+    }
+    const terminalVouchers = financial.terminalVouchers;
+    if (terminalVouchers) {
+      // A reconnecting terminal uploads its whole offline backlog and then polls each receipt, so it
+      // gets the venue relay's budget rather than the 10-per-minute budget for browser commands.
+      app.post(
+        terminalIngressRoute,
+        { config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
+        async (request, reply) => {
+          reply.header("Cache-Control", "no-store");
+          const parsed = terminalIngressSchema.safeParse(request.body);
+          if (!parsed.success) return reply.code(400).send({ error: "invalid_voucher_request" });
+          try {
+            const result = await terminalVouchers.accept({
+              receipt: parsed.data.receipt as VoucherReceipt,
+              authorization: {
+                keyVersion: BigInt(parsed.data.authorization.keyVersion),
+                sentAt: parsed.data.authorization.sentAt,
+                nonce: parsed.data.authorization.nonce as `0x${string}`,
+                signature: parsed.data.authorization.signature as `0x${string}`,
+              },
+            });
+            return reply.code(result.duplicate ? 200 : 201).send(result);
+          } catch (error) {
+            if (error instanceof TerminalIngressRejected)
+              return reply.code(401).send({ error: "terminal_authentication_failed" });
+            if (error instanceof VoucherChannelNotFound)
+              return reply.code(404).send({ error: "channel_not_found", retryable: true });
+            if (
+              error instanceof VendorCommandRejected ||
+              error instanceof FinancialOperationRejected
+            )
+              return reply.code(422).send({ error: "voucher_rejected" });
+            if (error instanceof FinancialOperationConflict)
+              return reply.code(409).send({ error: "voucher_conflict" });
+            throw error;
+          }
+        },
+      );
     }
   }
   app.get("/health", { config: { rateLimit: false } }, async () => ({

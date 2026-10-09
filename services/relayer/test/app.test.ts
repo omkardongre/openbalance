@@ -66,3 +66,46 @@ it("rate-limits per client behind the Cloud Run front end without trusting other
   expect(await remaining("203.0.113.50", "198.51.100.3")).toBe("9");
   expect(await remaining("203.0.113.50", "198.51.100.4")).toBe("8");
 });
+
+it("accepts terminal ingress without a browser origin and on its own rate budget", async () => {
+  const accept = vi.fn(async () => ({
+    receiptId: "receipt:1",
+    state: "PENDING" as const,
+    transactionHash: null,
+    duplicate: false,
+  }));
+  const app = await buildRelayerApp({} as DeploymentSponsorshipService, origin, {
+    access: {} as never,
+    commands: {} as never,
+    terminalVouchers: { accept } as never,
+  });
+  openApps.push(app);
+  const malformed = await app.inject({ method: "POST", url: "/v1/vouchers", payload: {} });
+  expect(malformed.statusCode).toBe(400);
+  expect(malformed.headers["x-ratelimit-remaining"]).toBe("119");
+  const hex = (byte: string) => `0x${byte.repeat(32)}`;
+  const uploaded = await app.inject({
+    method: "POST",
+    url: "/v1/vouchers",
+    payload: {
+      receipt: {
+        receiptId: "receipt:1",
+        terminalId: hex("01"),
+        channelId: hex("02"),
+        sequence: 1,
+        paymentId: hex("03"),
+        voucher: "0x00",
+        attendeeSignature: `0x${"11".repeat(65)}`,
+        terminalSignature: `0x${"22".repeat(65)}`,
+      },
+      authorization: {
+        keyVersion: "1",
+        sentAt: 1,
+        nonce: hex("04"),
+        signature: `0x${"33".repeat(65)}`,
+      },
+    },
+  });
+  expect(uploaded.statusCode).toBe(201);
+  expect(accept).toHaveBeenCalledOnce();
+});

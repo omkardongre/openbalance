@@ -277,6 +277,22 @@ export class FinancialOperationJournal {
     return { created: false, operation: operation(prior.rows[0]) };
   }
 
+  /** The operation an actor already holds under an idempotency key, if any. */
+  async findByIdempotency(
+    actorId: string,
+    kind: FinancialOperationKind,
+    key: string,
+  ): Promise<FinancialOperation | null> {
+    if (!actorIdPattern.test(actorId) || !operationKind.has(kind) || !idempotencyKey.test(key))
+      throw new FinancialOperationRejected("Invalid operation lookup");
+    const result = await this.pool.query<OperationRow>(
+      `SELECT * FROM financial_operations
+       WHERE actor_id=$1 AND operation_kind=$2 AND idempotency_key=$3`,
+      [actorId, kind, key],
+    );
+    return result.rows[0] ? operation(result.rows[0]) : null;
+  }
+
   async get(operationId: string): Promise<FinancialOperation | null> {
     if (!uuid.test(operationId)) throw new FinancialOperationRejected("Invalid operation ID");
     const result = await this.pool.query<OperationRow>(

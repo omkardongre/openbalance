@@ -116,10 +116,14 @@ export class DatabaseFinancialCommandPolicy implements FinancialCommandPolicy {
         throw new PermanentFinancialOperationFailure("account_not_verified");
       return;
     }
+    // A terminal may only sponsor settlement of its own vouchers; the ingress has already checked its
+    // key against the channel, and the vault re-verifies both signatures.
     const sponsoredActor =
       operation.kind === "RESERVE_RECLAIM"
         ? operation.actorId === RESERVE_RETURN_ACTOR
-        : operation.actorId.startsWith("vendor-treasury:");
+        : operation.actorId.startsWith("vendor-treasury:") ||
+          (operation.kind === "VOUCHER_SETTLE" &&
+            /^terminal:0x[0-9a-f]{64}$/.test(operation.actorId));
     if (!sponsoredActor) throw new PermanentFinancialOperationFailure("actor_not_sponsored");
     if (
       operation.kind === "REFUND" &&

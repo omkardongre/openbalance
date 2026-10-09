@@ -54,10 +54,23 @@ const schema = z
     SPONSOR_MAX_COST_WEI: positiveInteger,
     FINANCIAL_EVENT_MANIFEST_PATH: z.string().min(1).optional(),
     FINANCIAL_COMMAND_MAX_LIFETIME_SECONDS: positiveInteger.default("3600"),
+    // Public URL of this service's terminal receipt ingress, exactly as terminals are enrolled with
+    // it: terminals sign over it, so a request meant for another relay cannot be replayed here.
+    TERMINAL_INGRESS_AUDIENCE: z
+      .string()
+      .regex(/^https:\/\/[^/?#\s]+\/v1\/vouchers$/)
+      .optional(),
   })
   .strict();
 
-const CONFIGURATION_PREFIXES = ["ACCOUNT_", "DATABASE_", "FINANCIAL_", "SPONSOR_", "WEBAUTHN_"];
+const CONFIGURATION_PREFIXES = [
+  "ACCOUNT_",
+  "DATABASE_",
+  "FINANCIAL_",
+  "SPONSOR_",
+  "TERMINAL_",
+  "WEBAUTHN_",
+];
 
 export function loadRelayerEnvironment(environment: NodeJS.ProcessEnv) {
   const parsed = schema.parse(

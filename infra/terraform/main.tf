@@ -183,6 +183,9 @@ locals {
       SPONSOR_MAX_COST_WEI                   = var.sponsorship.max_cost_wei
       FINANCIAL_EVENT_MANIFEST_PATH          = local.secret_path["event-manifest"]
       FINANCIAL_COMMAND_MAX_LIFETIME_SECONDS = "3600"
+      # Terminals enrolled with this exact endpoint upload offline sales straight to the cloud once
+      # they reconnect; a venue relay on site stays an optional fallback with the same contract.
+      TERMINAL_INGRESS_AUDIENCE = "${local.process_url["relayer"]}/v1/vouchers"
     }
     # Next.js reads HOSTNAME rather than HOST. Its NEXT_PUBLIC_* values are compiled into browser
     # bundles at build time, so they are build inputs and do not appear here.

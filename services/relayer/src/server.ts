@@ -13,6 +13,7 @@ import { loadFinancialEventManifest } from "./financial-manifest.js";
 import { ViemFinancialManifestVerifier } from "./financial-manifest-chain.js";
 import { FinancialOperationJournal } from "./financial-operations.js";
 import { ReserveReclaimService } from "./reserve-reclaims.js";
+import { chainChannelTerminalReader, TerminalVoucherIngressService } from "./terminal-vouchers.js";
 import { VendorFinancialCommandService } from "./vendor-commands.js";
 import { VendorTreasuryAccessService } from "./vendor-treasury-access.js";
 import { finalizedChannelReader, VendorVoucherSettlementService } from "./vendor-vouchers.js";
@@ -59,6 +60,7 @@ let financial:
       treasuryAccess: VendorTreasuryAccessService;
       treasuryCommands: VendorFinancialCommandService;
       voucherSettlements: VendorVoucherSettlementService;
+      terminalVouchers?: TerminalVoucherIngressService;
     }
   | undefined;
 /**
@@ -110,6 +112,21 @@ if (environment.FINANCIAL_EVENT_MANIFEST_PATH) {
       maximumLifetimeSeconds: BigInt(environment.FINANCIAL_COMMAND_MAX_LIFETIME_SECONDS),
       chainSeconds: settlementChainSeconds,
     }),
+    ...(environment.TERMINAL_INGRESS_AUDIENCE
+      ? {
+          terminalVouchers: new TerminalVoucherIngressService({
+            journal,
+            manifest,
+            channel: finalizedChannelReader(pool),
+            terminal: chainChannelTerminalReader(
+              environment.ACCOUNT_RPC_URL,
+              environment.ACCOUNT_FINALITY_TAG,
+            ),
+            chainSeconds: settlementChainSeconds,
+            audience: environment.TERMINAL_INGRESS_AUDIENCE,
+          }),
+        }
+      : {}),
   };
 }
 const app = await buildRelayerApp(sponsorship, environment.WEBAUTHN_ORIGIN, financial, [
