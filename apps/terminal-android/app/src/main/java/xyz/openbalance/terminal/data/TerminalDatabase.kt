@@ -107,7 +107,7 @@ interface TerminalDao {
     @Query("SELECT * FROM sales WHERE state='ACCEPTED' AND relayState IN ('PENDING','RETRY','UPLOADING','RELAYED','QUARANTINED') ORDER BY createdAt")
     suspend fun unsettledSales(): List<SaleEntity>
     @Query("SELECT * FROM orders WHERE orderId = :orderId") suspend fun order(orderId: String): OrderEntity?
-    @Query("SELECT * FROM orders ORDER BY importedAt,orderId LIMIT :limit") suspend fun orders(limit: Int = 100): List<OrderEntity>
+    @Query("SELECT * FROM orders ORDER BY importedAt DESC,orderId LIMIT :limit") suspend fun orders(limit: Int = 100): List<OrderEntity>
     @Insert(onConflict = OnConflictStrategy.IGNORE) suspend fun insertOrder(order: OrderEntity): Long
     @Query("UPDATE orders SET state='REQUESTED',requestId=:requestId,updatedAt=:now WHERE orderId=:orderId AND state='IMPORTED' AND expiresAt>:nowSeconds")
     suspend fun markOrderRequested(orderId: String, requestId: String, nowSeconds: Long, now: Long): Int

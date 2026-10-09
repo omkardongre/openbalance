@@ -27,10 +27,14 @@ data class PosOrder(
     val assetSymbol: String,
     val assetDecimals: Int,
 )
+/** What the terminal needs to open a sale itself: the committed receipt display for this vendor. */
+data class VendorProfile(val vendorName: String, val assetSymbol: String, val assetDecimals: Int)
 data class ProvisioningBatch(
     val deployment: DeploymentPin,
     val terminal: TerminalPin,
     val projection: ProjectionPin,
     val channelIds: List<String>,
     val orders: List<PosOrder>,
+    /** Absent from servers that predate terminal-created sales. */
+    val vendor: VendorProfile? = null,
 )

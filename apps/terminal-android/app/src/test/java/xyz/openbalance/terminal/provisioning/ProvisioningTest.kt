@@ -17,6 +17,11 @@ class ProvisioningTest {
         val orderId = UUID.randomUUID()
         val json = """{"schemaVersion":1,"deployment":{"chainId":10143,"eventId":"${h('1')}","asset":"${a('2')}","registry":{"address":"${a('3')}","runtimeCodeHash":"${h('4')}"},"ledger":{"address":"${a('5')}","runtimeCodeHash":"${h('6')}"},"router":{"address":"${a('7')}","runtimeCodeHash":"${h('8')}"},"vault":{"address":"${a('9')}","runtimeCodeHash":"${h('a')}"}},"terminal":{"terminalInstanceId":"${h('b')}","terminalKeyVersion":"1","terminalSigner":"${a('c')}"},"projection":{"finalizedBlockNumber":"42","finalizedBlockHash":"${h('d')}"},"channelIds":["${h('e')}"],"orders":[{"orderId":"$orderId","state":"OFFLINE_IMPORTED","orderRefHash":"${h('f')}","orderVersion":"1","grossUnits":"12500000","receiptCommitment":"${h('1')}","expiresAt":"2026-09-14T12:00:00Z","display":{"vendorName":"North Gate Coffee","orderReference":"ORDER-1042","orderVersion":"1","description":"Two coffees","assetSymbol":"USDC","assetDecimals":6}}]}"""
         val batch = ConnectedProvisioningClient().decode(json)
+        assertEquals(null, batch.vendor)
+        val withVendor = ConnectedProvisioningClient().decode(
+            json.removeSuffix("}") + ""","vendor":{"vendorName":"North Gate Coffee","assetSymbol":"USDC","assetDecimals":6}}""",
+        )
+        assertEquals(VendorProfile("North Gate Coffee", "USDC", 6), withVendor.vendor)
         assertEquals(BigInteger("10143"), batch.deployment.chainId)
         assertEquals(orderId.toString(), batch.orders.single().orderId)
         assertEquals(Instant.parse("2026-09-14T12:00:00Z").epochSecond, batch.orders.single().expiresAt)

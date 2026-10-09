@@ -80,7 +80,8 @@ class ConnectedProvisioningClient(private val timeoutMs: Int = 10_000) {
 
     internal fun decode(value: String): ProvisioningBatch {
         val root = JSONObject(value)
-        require(root.length() == 6 && root.getInt("schemaVersion") == 1) { "Invalid provisioning response" }
+        val hasVendor = root.has("vendor")
+        require(root.length() == (if (hasVendor) 7 else 6) && root.getInt("schemaVersion") == 1) { "Invalid provisioning response" }
         val deployment = root.getJSONObject("deployment").also { require(it.length() == 7) }
         val terminal = root.getJSONObject("terminal").also { require(it.length() == 3) }
         val projection = root.getJSONObject("projection").also { require(it.length() == 2) }
@@ -105,6 +106,16 @@ class ConnectedProvisioningClient(private val timeoutMs: Int = 10_000) {
             ),
             channelIds = root.getJSONArray("channelIds").strings(100).map(::bytes32),
             orders = root.getJSONArray("orders").objects(100).map(::order),
+            vendor = if (hasVendor) vendor(root.getJSONObject("vendor")) else null,
+        )
+    }
+
+    private fun vendor(json: JSONObject): VendorProfile {
+        require(json.length() == 3) { "Invalid vendor profile" }
+        return VendorProfile(
+            vendorName = label(json.getString("vendorName")),
+            assetSymbol = json.getString("assetSymbol").also { require(it.matches(Regex("^[A-Z0-9]{2,12}$"))) },
+            assetDecimals = json.getInt("assetDecimals").also { require(it in 0..36) },
         )
     }
 

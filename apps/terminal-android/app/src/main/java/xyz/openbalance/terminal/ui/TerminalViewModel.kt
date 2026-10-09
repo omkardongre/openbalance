@@ -21,6 +21,8 @@ import xyz.openbalance.terminal.data.OfflineLimits
 import xyz.openbalance.terminal.data.OrderView
 import xyz.openbalance.terminal.provisioning.ConnectedProvisioningClient
 import xyz.openbalance.terminal.provisioning.FinalizedChannelVerifier
+import xyz.openbalance.terminal.provisioning.VendorProfile
+import java.math.BigInteger
 import xyz.openbalance.terminal.time.SignedTimeSource
 import xyz.openbalance.terminal.time.TrustedTime
 
@@ -36,7 +38,7 @@ data class TerminalUiState(
     val scanOpen: Boolean = false,
     val scanPurpose: String? = null,
     val busy: Boolean = false,
-    val message: String = "Loading durable terminal state",
+    val message: String = "Loading",
     /** Whether [message] reports a failure, so the UI can style it as an error rather than progress. */
     val error: Boolean = false,
     /** Whether provisioning has succeeded at least once this session. */
@@ -49,7 +51,25 @@ data class TerminalUiState(
     val focusedSaleId: String? = null,
     /** Offline sales not settled yet, across the whole journal. */
     val pending: OfflineLimits.PendingUploads = OfflineLimits.PendingUploads(),
+    /** The vendor this terminal sells for, from the last sync; null until the first sync. */
+    val vendor: VendorProfile? = null,
+    /** Amount keyed on the keypad, in cents. Owned here so it clears only once a charge succeeds. */
+    val keypadCents: Long = 0L,
+    /** How many recent sales the Sales list shows; grows with "Show more". */
+    val salesLimit: Int = SALES_PAGE_SIZE,
 )
+
+const val SALES_PAGE_SIZE = 25
+
+/** A reserve the terminal can charge right now: inside its accept window with money and sales left. */
+fun ChannelView.isChargeable(nowSeconds: Long) =
+    acceptUntil > nowSeconds && salesLeft > 0 && runCatching { BigInteger(remainingUnits) > BigInteger.ZERO }.getOrDefault(false)
+
+/** Keeps the current choice while it can still be charged; otherwise the chargeable reserve that closes last. */
+fun pickReserve(channels: List<ChannelView>, current: String?, nowSeconds: Long = System.currentTimeMillis() / 1000): String? {
+    val open = channels.filter { it.isChargeable(nowSeconds) }
+    return current?.takeIf { id -> open.any { it.channelId == id } } ?: open.maxByOrNull { it.acceptUntil }?.channelId
+}
 
 class TerminalViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application as TerminalApplication
@@ -66,19 +86,21 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
                 _state.value = _state.value.copy(
                     signer = identity.signer,
                     configured = timeSource != null && config != null,
-                    sales = app.repository.recoverSales(), pending = app.repository.pendingUploads(),
+                    sales = app.repository.recoverSales(SALES_PAGE_SIZE), pending = app.repository.pendingUploads(),
                     channels = app.repository.channelViews(),
                     orders = app.repository.orderViews(),
+                    vendor = runCatching { app.provisioning.vendor() }.getOrNull(),
                     message = when {
-                        timeSource == null -> "Trusted-time configuration required"
-                        config == null -> "Scan the operator-issued terminal enrollment QR"
-                        else -> "Synchronize while connected, then refresh trusted time"
+                        timeSource == null -> "This build is missing its clock setting"
+                        config == null -> "Scan the setup code from the organizer"
+                        else -> "Tap Refresh, then Check clock, while online"
                     },
                 )
+                _state.update { it.copy(selectedChannelId = pickReserve(it.channels, it.selectedChannelId)) }
                 if (config != null) {
                     val summary = app.relay.runBatch(config)
                     _state.value = _state.value.copy(
-                        sales = app.repository.recoverSales(), pending = app.repository.pendingUploads(),
+                        sales = app.repository.recoverSales(_state.value.salesLimit), pending = app.repository.pendingUploads(),
                         message = relayMessage("Restart recovery", summary.uploaded, summary.settled, summary.retried, summary.quarantined),
                     )
                 }
@@ -97,9 +119,14 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
                 delay(JOURNAL_REFRESH_MS)
                 if (_state.value.busy) continue
                 runCatching {
-                    val sales = app.repository.recoverSales()
+                    val sales = app.repository.recoverSales(_state.value.salesLimit)
                     val pending = app.repository.pendingUploads()
-                    _state.update { if (it.busy) it else it.copy(sales = sales, pending = pending) }
+                    _state.update {
+                        if (it.busy) it else it.copy(
+                            sales = sales, pending = pending,
+                            selectedChannelId = pickReserve(it.channels, it.selectedChannelId, it.nowSeconds),
+                        )
+                    }
                 }
             }
         }
@@ -124,8 +151,8 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
                 nowSeconds = System.currentTimeMillis() / 1000,
                 trustedTime = if (expired) null else it.trustedTime,
                 timeValidSeconds = if (expired) null else validFor,
-                message = if (expired && !it.busy) "Trusted time expired; refresh while connected" else it.message,
-                error = if (expired && !it.busy) true else it.error,
+                message = if (expired && !it.busy) "Check the clock before the next sale" else it.message,
+                error = if (expired && !it.busy) false else it.error,
             )
         }
     }
@@ -142,57 +169,59 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun refreshTime() = viewModelScope.launch(Dispatchers.IO) {
-        runBusy("Refreshing authenticated time") {
+        runBusy("Checking the clock") {
             val source = requireNotNull(timeSource) { "Trusted-time endpoint and pinned key are not configured" }
             val sample = source.sample()
             _state.value.copy(
                 trustedTime = sample, timeValidSeconds = SignedTimeSource.MAX_SAMPLE_AGE_MS / 1_000,
-                message = "Authenticated time ready", busy = false,
+                message = "Clock checked", busy = false,
             )
         }
     }
 
     fun beginScan(requestId: String) {
-        _state.value = _state.value.copy(activeRequestId = requestId, scanOpen = true, scanPurpose = "ATTENDEE", message = "Scan attendee response")
+        _state.value = _state.value.copy(activeRequestId = requestId, scanOpen = true, scanPurpose = "ATTENDEE", message = "Scan the customer's code")
     }
 
     fun beginEnrollmentScan() {
-        _state.value = _state.value.copy(activeRequestId = null, scanOpen = true, scanPurpose = "ENROLLMENT", message = "Scan terminal enrollment")
+        _state.value = _state.value.copy(activeRequestId = null, scanOpen = true, scanPurpose = "ENROLLMENT", message = "Scan the setup code")
     }
 
     fun cancelScan() {
-        _state.value = _state.value.copy(scanOpen = false, scanPurpose = null, activeRequestId = null, error = false, message = "Scan cancelled")
+        _state.value = _state.value.copy(scanOpen = false, scanPurpose = null, activeRequestId = null, error = false, message = "")
     }
 
     fun scanned(value: String) = viewModelScope.launch(Dispatchers.IO) {
         if (_state.value.scanPurpose == "ENROLLMENT") {
-            runBusy("Installing protected terminal enrollment") {
+            runBusy("Setting up this terminal") {
                 app.provisioning.installQr(value)
                 app.scheduleRelay()
-                _state.value.copy(configured = timeSource != null, scanOpen = false, scanPurpose = null, message = "Enrollment installed; synchronize terminal", busy = false)
+                _state.value.copy(configured = timeSource != null, scanOpen = false, scanPurpose = null, message = "Set up. Tap Refresh to load reserves", busy = false)
             }
             return@launch
         }
-        runBusy("Verifying attendee authorization") {
+        runBusy("Checking the customer's approval") {
             val requestId = requireNotNull(_state.value.activeRequestId)
             val source = requireNotNull(timeSource) { "Trusted-time source is unavailable" }
-            val sample = requireNotNull(_state.value.trustedTime) { "Refresh authenticated time first" }
+            val sample = requireNotNull(_state.value.trustedTime) { "Check the clock first" }
             val window = source.current(sample)
             val accepted = app.repository.recordAttendeeResponse(requestId, value, (window.second + 999) / 1000, System.currentTimeMillis())
             val current = source.current(sample)
             val completed = app.repository.accept(accepted.requestId, (current.second + 999) / 1000, System.currentTimeMillis()) { source.current(sample) }
             app.scheduleRelay()
+            val channels = app.repository.channelViews()
             _state.value.copy(
-                sales = app.repository.recoverSales(), pending = app.repository.pendingUploads(),
-                channels = app.repository.channelViews(), activeRequestId = null, scanOpen = false, scanPurpose = null,
+                sales = app.repository.recoverSales(_state.value.salesLimit), pending = app.repository.pendingUploads(),
+                channels = channels, activeRequestId = null, scanOpen = false, scanPurpose = null,
+                selectedChannelId = pickReserve(channels, _state.value.selectedChannelId),
                 focusedSaleId = completed.requestId,
-                message = "Receipt ${completed.requestId} durably accepted pending settlement", busy = false,
+                message = "Payment accepted. It is paid once uploaded and settled", busy = false,
             )
         }
     }
 
     fun synchronize() = viewModelScope.launch(Dispatchers.IO) {
-        runBusy("Verifying finalized channels and importing POS orders") {
+        runBusy("Refreshing") {
             val config = requireNotNull(app.provisioning.current()) { "Terminal enrollment is not installed" }
             val identity = app.keys.getOrCreate()
             val batch = ConnectedProvisioningClient().fetch(config, identity.signer, app.keys::signDigest)
@@ -204,21 +233,18 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
                 if (app.repository.installVerifiedChannel(proof.snapshot, proof.proofHash, System.currentTimeMillis())) installed++
             }
             val imported = app.repository.importOrders(batch.orders, System.currentTimeMillis())
+            batch.vendor?.let(app.provisioning::saveVendor)
             val channels = app.repository.channelViews()
             _state.value.copy(
                 configured = timeSource != null,
+                vendor = batch.vendor ?: _state.value.vendor,
                 channels = channels,
                 orders = app.repository.orderViews(),
-                sales = app.repository.recoverSales(), pending = app.repository.pendingUploads(),
+                sales = app.repository.recoverSales(_state.value.salesLimit), pending = app.repository.pendingUploads(),
                 // Keep the cashier's choice while it still accepts payments; otherwise default to the
                 // open reserve that closes last.
-                selectedChannelId = run {
-                    val nowSeconds = System.currentTimeMillis() / 1000
-                    val open = channels.filter { it.acceptUntil > nowSeconds }
-                    _state.value.selectedChannelId?.takeIf { selected -> open.any { it.channelId == selected } }
-                        ?: open.maxByOrNull { it.acceptUntil }?.channelId
-                },
-                message = "Verified $installed new channels; imported $imported new POS orders",
+                selectedChannelId = pickReserve(channels, _state.value.selectedChannelId),
+                message = syncMessage(installed, imported),
                 synced = true,
                 busy = false,
             )
@@ -226,11 +252,11 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun synchronizeReceipts() = viewModelScope.launch(Dispatchers.IO) {
-        runBusy("Uploading ordered receipts and checking finality") {
+        runBusy("Uploading sales") {
             val config = requireNotNull(app.provisioning.current()) { "Terminal enrollment is not installed" }
             val summary = app.relay.runBatch(config)
             _state.value.copy(
-                sales = app.repository.recoverSales(), pending = app.repository.pendingUploads(),
+                sales = app.repository.recoverSales(_state.value.salesLimit), pending = app.repository.pendingUploads(),
                 message = relayMessage("Relay sync", summary.uploaded, summary.settled, summary.retried, summary.quarantined),
                 busy = false,
             )
@@ -238,39 +264,72 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun selectChannel(channelId: String) {
-        _state.value = _state.value.copy(selectedChannelId = channelId, error = false, message = "Channel selected")
+        _state.value = _state.value.copy(selectedChannelId = channelId, error = false, message = "Reserve selected")
     }
 
     fun createOfflineRequest(orderId: String) = viewModelScope.launch(Dispatchers.IO) {
-        runBusy("Creating durable offline payment request") {
-            val channelId = requireNotNull(_state.value.selectedChannelId) { "Select a verified channel" }
+        runBusy("Creating payment") {
+            val channelId = requireNotNull(_state.value.selectedChannelId) { "Choose a reserve first" }
             val source = requireNotNull(timeSource) { "Trusted-time source is unavailable" }
-            val sample = requireNotNull(_state.value.trustedTime) { "Refresh authenticated time first" }
+            val sample = requireNotNull(_state.value.trustedTime) { "Check the clock first" }
             val window = source.current(sample)
             val earliest = Math.addExact(window.first, 999) / 1_000
             val latest = Math.addExact(window.second, 999) / 1_000
             val sale = app.repository.prepareOrderSale(orderId, channelId, earliest, latest, latest, System.currentTimeMillis())
             _state.value.copy(
-                orders = app.repository.orderViews(), sales = app.repository.recoverSales(), pending = app.repository.pendingUploads(),
+                orders = app.repository.orderViews(), sales = app.repository.recoverSales(_state.value.salesLimit), pending = app.repository.pendingUploads(),
                 focusedSaleId = sale.requestId,
-                message = "Payment request ${sale.requestId} durably prepared", busy = false,
+                message = "Show the code to the customer", busy = false,
             )
+        }
+    }
+
+    /** Charges an amount keyed in on the terminal; works offline once the terminal has synced once. */
+    fun chargeAmount(grossUnits: BigInteger) = viewModelScope.launch(Dispatchers.IO) {
+        runBusy("Creating payment") {
+            val vendor = requireNotNull(_state.value.vendor) { "Tap Refresh once while online to load this stall" }
+            val channelId = requireNotNull(_state.value.selectedChannelId) { "Choose a reserve first" }
+            val source = requireNotNull(timeSource) { "Trusted-time source is unavailable" }
+            val sample = requireNotNull(_state.value.trustedTime) { "Check the clock first" }
+            val window = source.current(sample)
+            val earliest = Math.addExact(window.first, 999) / 1_000
+            val latest = Math.addExact(window.second, 999) / 1_000
+            val sale = app.repository.prepareKeypadSale(
+                vendor, KEYPAD_DESCRIPTION, grossUnits, channelId, earliest, latest, latest, System.currentTimeMillis(),
+            )
+            _state.value.copy(
+                orders = app.repository.orderViews(), sales = app.repository.recoverSales(_state.value.salesLimit), pending = app.repository.pendingUploads(),
+                focusedSaleId = sale.requestId, keypadCents = 0L,
+                message = "Show the code to the customer", busy = false,
+            )
+        }
+    }
+
+    fun setKeypadCents(cents: Long) {
+        _state.update { it.copy(keypadCents = cents) }
+    }
+
+    /** Loads the next page of recent sales from the journal. */
+    fun showMoreSales() = viewModelScope.launch(Dispatchers.IO) {
+        val limit = _state.value.salesLimit + SALES_PAGE_SIZE
+        runCatching { app.repository.recoverSales(limit) }.onSuccess { sales ->
+            _state.update { it.copy(salesLimit = limit, sales = sales) }
         }
     }
 
     fun cameraError(error: Throwable) = fail(error)
 
     fun resumeAcceptance(requestId: String) = viewModelScope.launch(Dispatchers.IO) {
-        runBusy("Recovering stored authorization") {
+        runBusy("Finishing payment") {
             val source = requireNotNull(timeSource) { "Trusted-time source is unavailable" }
-            val sample = requireNotNull(_state.value.trustedTime) { "Refresh authenticated time first" }
+            val sample = requireNotNull(_state.value.trustedTime) { "Check the clock first" }
             val current = source.current(sample)
             app.repository.accept(requestId, (current.second + 999) / 1000, System.currentTimeMillis()) { source.current(sample) }
             app.scheduleRelay()
             _state.value.copy(
-                sales = app.repository.recoverSales(), pending = app.repository.pendingUploads(),
+                sales = app.repository.recoverSales(_state.value.salesLimit), pending = app.repository.pendingUploads(),
                 channels = app.repository.channelViews(), focusedSaleId = requestId,
-                busy = false, message = "Receipt recovered; settlement pending",
+                busy = false, message = "Payment recovered. It is paid once uploaded and settled",
             )
         }
     }
@@ -283,14 +342,32 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
     private fun fail(error: Throwable) {
         _state.value = _state.value.copy(
             busy = false, scanOpen = false, scanPurpose = null, error = true,
-            message = error.message ?: "Terminal operation failed",
+            message = error.message ?: "That did not work. Try again",
         )
     }
 
-    private fun relayMessage(prefix: String, uploaded: Int, settled: Int, retried: Int, quarantined: Int) =
-        "$prefix: $uploaded stored, $settled finalized, $retried retrying, $quarantined quarantined"
+    /** Plain summary of a relay run; silent counters are left out. */
+    private fun relayMessage(prefix: String, uploaded: Int, settled: Int, retried: Int, quarantined: Int): String {
+        val parts = listOfNotNull(
+            uploaded.takeIf { it > 0 }?.let { "$it uploaded" },
+            settled.takeIf { it > 0 }?.let { "$it settled" },
+            retried.takeIf { it > 0 }?.let { "$it will retry" },
+            quarantined.takeIf { it > 0 }?.let { "$it need attention" },
+        )
+        val what = if (prefix == "Restart recovery") "Sales checked" else "Receipts synced"
+        return if (parts.isEmpty()) "$what. Nothing waiting" else "$what: ${parts.joinToString(", ")}"
+    }
+
+    private fun syncMessage(installed: Int, imported: Int): String {
+        val parts = listOfNotNull(
+            installed.takeIf { it > 0 }?.let { "$it new reserve${if (it == 1) "" else "s"}" },
+            imported.takeIf { it > 0 }?.let { "$it new POS order${if (it == 1) "" else "s"}" },
+        )
+        return if (parts.isEmpty()) "Up to date. No new reserves" else "Updated: ${parts.joinToString(", ")}"
+    }
 
     private companion object {
         const val JOURNAL_REFRESH_MS = 20_000L
+        const val KEYPAD_DESCRIPTION = "Custom amount"
     }
 }

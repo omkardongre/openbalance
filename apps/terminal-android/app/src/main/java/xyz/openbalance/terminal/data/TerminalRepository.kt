@@ -10,7 +10,9 @@ import xyz.openbalance.terminal.protocol.VoucherReceipt
 import xyz.openbalance.terminal.security.EncryptedJournalPayloads
 import xyz.openbalance.terminal.security.TerminalKeyStore
 import xyz.openbalance.terminal.security.Keccak
+import xyz.openbalance.terminal.protocol.CheckoutCommitments
 import xyz.openbalance.terminal.provisioning.PosOrder
+import xyz.openbalance.terminal.provisioning.VendorProfile
 import java.math.BigInteger
 import java.security.SecureRandom
 import java.util.UUID
@@ -152,6 +154,46 @@ class TerminalRepository(
             view(requireNotNull(dao.sale(requestId)))
         }
 
+    /**
+     * A sale the cashier keys in on the terminal, the way card terminals take a custom amount. It
+     * needs no connection: the terminal records its own order with the same order-reference hash and
+     * receipt commitment the protocol defines for POS orders, then charges it like an imported one.
+     */
+    suspend fun prepareKeypadSale(
+        vendor: VendorProfile,
+        description: String,
+        grossUnits: BigInteger,
+        channelId: String,
+        acceptedAt: Long,
+        latestTrustedAt: Long,
+        nowSeconds: Long,
+        now: Long,
+    ): SaleView = database.withTransaction {
+        require(grossUnits > BigInteger.ZERO) { "Enter an amount" }
+        val suffix = ByteArray(3).also(SecureRandom()::nextBytes).toHex()
+        val reference = "KP-" + keypadReferenceFormat.format(java.time.Instant.ofEpochSecond(nowSeconds)) + "-" + suffix
+        val version = BigInteger.ONE
+        val display = CheckoutCommitments.Display(
+            vendor.vendorName, reference, version, description, vendor.assetSymbol, vendor.assetDecimals,
+        )
+        val order = PosOrder(
+            orderId = UUID.randomUUID().toString(),
+            orderRefHash = CheckoutCommitments.orderReferenceHash(reference, version),
+            orderVersion = version,
+            grossUnits = grossUnits,
+            receiptCommitment = CheckoutCommitments.receiptCommitment(display, grossUnits),
+            // Only bounds the order row; the request itself expires within two minutes.
+            expiresAt = Math.addExact(nowSeconds, KEYPAD_ORDER_SECONDS),
+            vendorName = vendor.vendorName,
+            orderReference = reference,
+            description = description,
+            assetSymbol = vendor.assetSymbol,
+            assetDecimals = vendor.assetDecimals,
+        )
+        check(importOrders(listOf(order), now) == 1) { "Keypad order conflict" }
+        prepareOrderSale(order.orderId, channelId, acceptedAt, latestTrustedAt, nowSeconds, now)
+    }
+
     suspend fun prepareSale(
         channelId: String,
         requestId: String,
@@ -275,7 +317,7 @@ class TerminalRepository(
         ) { "Relay upload lease was lost" }
     }
 
-    suspend fun recoverSales(): List<SaleView> = dao.sales().map(::view)
+    suspend fun recoverSales(limit: Int = 100): List<SaleView> = dao.sales(limit).map(::view)
     suspend fun pendingRelayCount(): Int = dao.pendingRelayCount()
     suspend fun channels(): List<ChannelEntity> = dao.channels()
     suspend fun channelViews(): List<ChannelView> = dao.channels().map { row ->
@@ -430,4 +472,10 @@ class TerminalRepository(
     }.toString()
 
     private fun ByteArray.toHex() = joinToString("") { "%02x".format(it.toInt() and 0xff) }
+
+    private companion object {
+        const val KEYPAD_ORDER_SECONDS = 600L
+        val keypadReferenceFormat: java.time.format.DateTimeFormatter =
+            java.time.format.DateTimeFormatter.ofPattern("yyMMdd-HHmmss").withZone(java.time.ZoneOffset.UTC)
+    }
 }

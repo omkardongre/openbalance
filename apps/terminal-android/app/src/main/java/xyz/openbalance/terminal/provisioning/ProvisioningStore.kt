@@ -47,10 +47,40 @@ class ProvisioningStore(context: Context) {
             preferences.edit()
                 .putString("nonce", Base64.encodeToString(sealed.first, Base64.NO_WRAP))
                 .putString("ciphertext", Base64.encodeToString(sealed.second, Base64.NO_WRAP))
+                // A new enrollment may belong to another vendor; its profile arrives on the next sync.
+                .remove("vendorNonce")
+                .remove("vendorCiphertext")
                 .commit(),
         ) { "Terminal enrollment was not durably stored" }
         return config
     }
+
+    /** The vendor display from the last successful sync, kept so keypad sales work offline. */
+    fun vendor(): VendorProfile? {
+        val nonce = preferences.getString("vendorNonce", null) ?: return null
+        val ciphertext = preferences.getString("vendorCiphertext", null) ?: return null
+        val json = JSONObject(
+            String(payloads.open(Base64.decode(nonce, Base64.NO_WRAP), Base64.decode(ciphertext, Base64.NO_WRAP), vendorAad)),
+        )
+        return VendorProfile(json.getString("vendorName"), json.getString("assetSymbol"), json.getInt("assetDecimals"))
+    }
+
+    fun saveVendor(value: VendorProfile) {
+        val json = JSONObject()
+            .put("vendorName", value.vendorName)
+            .put("assetSymbol", value.assetSymbol)
+            .put("assetDecimals", value.assetDecimals)
+            .toString()
+        val sealed = payloads.seal(json.toByteArray(), vendorAad)
+        check(
+            preferences.edit()
+                .putString("vendorNonce", Base64.encodeToString(sealed.first, Base64.NO_WRAP))
+                .putString("vendorCiphertext", Base64.encodeToString(sealed.second, Base64.NO_WRAP))
+                .commit(),
+        ) { "Vendor profile was not durably stored" }
+    }
+
+    private val vendorAad = "openbalance:terminal-vendor:v1".toByteArray()
 
     private fun decode(value: String): ProvisioningConfig {
         val json = JSONObject(value)
