@@ -36,8 +36,8 @@
             "maximumReserveUnits": "50000000",
             "maximumPerVoucherUnits": "15000000",
             "maximumVoucherCount": 8,
-            "acceptanceDurationSeconds": 600,
-            "submissionDelaySeconds": 300
+            "acceptanceDurationSeconds": 3600,
+            "submissionDelaySeconds": 1800
           }
         },
         {
@@ -53,8 +53,8 @@
             "maximumReserveUnits": "50000000",
             "maximumPerVoucherUnits": "15000000",
             "maximumVoucherCount": 8,
-            "acceptanceDurationSeconds": 600,
-            "submissionDelaySeconds": 300
+            "acceptanceDurationSeconds": 3600,
+            "submissionDelaySeconds": 1800
           }
         }
       ]

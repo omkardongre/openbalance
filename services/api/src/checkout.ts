@@ -275,6 +275,13 @@ export class CheckoutService {
           terminalKeyVersion: vendor.terminal.keyVersion.toString(),
           terminalSigner: vendor.terminal.signer,
         },
+        // Lets the terminal open a sale itself, offline, with the same receipt commitment a
+        // POS-created order carries (vendor name and asset are part of the committed display).
+        vendor: {
+          vendorName: vendor.vendorName,
+          assetSymbol: event.assetSymbol,
+          assetDecimals: event.assetDecimals,
+        },
         projection: {
           finalizedBlockNumber: cursor.rows[0].block_number.toString(),
           finalizedBlockHash: cursor.rows[0].block_hash as Hex,
@@ -624,6 +631,45 @@ export class CheckoutService {
     };
   }
 
+  /**
+   * Public reserve terms for every configured stall, so an attendee can open an outage reserve
+   * from their own device before any sale. Every value is public on chain: the vault re-resolves
+   * the terminal signer and payout destinations from the registry when the reserve opens, so a
+   * wrong value here can only make the open revert, never redirect money.
+   */
+  reserveTerms() {
+    return {
+      schemaVersion: 1 as const,
+      chainId: this.#chainId,
+      events: this.#events.map((event) => ({
+        eventId: event.eventId,
+        vault: event.vault,
+        asset: event.asset,
+        assetSymbol: event.assetSymbol,
+        assetDecimals: event.assetDecimals,
+        configVersion: event.configVersion.toString(),
+        organizerFeeBps: event.organizerFeeBps,
+        platformFeeBps: event.platformFeeBps,
+        vendors: event.vendors.map((vendor) => ({
+          vendorId: vendor.vendorId,
+          vendorName: vendor.vendorName,
+          destinationVersion: vendor.destinationVersion.toString(),
+          terminal: {
+            instanceId: vendor.terminal.instanceId,
+            keyVersion: vendor.terminal.keyVersion.toString(),
+            signer: vendor.terminal.signer,
+          },
+          reservePolicy: {
+            maximumReserveUnits: vendor.reservePolicy.maximumReserveUnits.toString(),
+            maximumPerVoucherUnits: vendor.reservePolicy.maximumPerVoucherUnits.toString(),
+            maximumVoucherCount: vendor.reservePolicy.maximumVoucherCount,
+            acceptanceDurationSeconds: vendor.reservePolicy.acceptanceDurationSeconds,
+            submissionDelaySeconds: vendor.reservePolicy.submissionDelaySeconds,
+          },
+        })),
+      })),
+    };
+  }
   private vendorPolicy(identity: OperationsIdentity) {
     const event = this.#events.find(
       (candidate) =>

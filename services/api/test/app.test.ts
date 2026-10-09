@@ -57,6 +57,13 @@ describe("authenticated projection reads", () => {
         calls.push("activity");
         return { items: [], nextCursor: null };
       },
+      reserves: async (owner: string, limit: number, cursor: unknown) => {
+        expect(owner).toBe(account);
+        expect(limit).toBe(5);
+        expect(cursor).toEqual({ openedBlock: 7n, channelId });
+        calls.push("reserves");
+        return { items: [], nextCursor: null };
+      },
     } as unknown as OperationalReadService;
     const app = await buildApp(enrollment, "https://app.example", undefined, access, operations);
     openApps.push(app);
@@ -70,12 +77,21 @@ describe("authenticated projection reads", () => {
         url: "/v1/accounts/me/activity?limit=10&beforeBlock=42&beforeTransitionId=transition",
         headers,
       }),
+      app.inject({
+        method: "GET",
+        url: `/v1/accounts/me/reserves?limit=5&beforeOpenedBlock=7&beforeChannelId=${channelId}`,
+        headers,
+      }),
+      // Half a cursor is refused rather than silently restarting from the newest page.
+      app.inject({ method: "GET", url: "/v1/accounts/me/reserves?beforeOpenedBlock=7", headers }),
     ]);
 
-    expect(responses.map((response) => response.statusCode)).toEqual([200, 200, 200]);
-    expect(calls.sort()).toEqual(["activity", "channel", "payment"]);
+    expect(responses.map((response) => response.statusCode)).toEqual([200, 200, 200, 200, 400]);
+    expect(calls.sort()).toEqual(["activity", "channel", "payment", "reserves"]);
     expect(
-      responses.every((response) => response.headers["cache-control"] === "private, no-store"),
+      responses
+        .slice(0, 4)
+        .every((response) => response.headers["cache-control"] === "private, no-store"),
     ).toBe(true);
   });
 

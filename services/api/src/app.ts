@@ -260,6 +260,42 @@ export async function buildApp(
           }
         });
 
+        app.get("/v1/accounts/me/reserves", async (request, reply) => {
+          reply.header("Cache-Control", "private, no-store");
+          const parsed = z
+            .object({
+              limit: z.coerce.number().int().min(1).max(50).default(10),
+              beforeOpenedBlock: z.coerce.bigint().nonnegative().optional(),
+              beforeChannelId: z
+                .string()
+                .regex(/^0x[0-9a-fA-F]{64}$/)
+                .optional(),
+            })
+            .strict()
+            .superRefine((value, context) => {
+              if (
+                Boolean(value.beforeOpenedBlock === undefined) !==
+                Boolean(value.beforeChannelId === undefined)
+              )
+                context.addIssue({ code: "custom", message: "Both cursor fields are required" });
+            })
+            .safeParse(request.query);
+          if (!parsed.success)
+            return reply.code(400).send({ error: "invalid_reserves_query", retryable: false });
+          try {
+            const identity = await access.authenticate(request.headers.authorization);
+            const cursor =
+              parsed.data.beforeOpenedBlock === undefined || !parsed.data.beforeChannelId
+                ? undefined
+                : {
+                    openedBlock: parsed.data.beforeOpenedBlock,
+                    channelId: parsed.data.beforeChannelId,
+                  };
+            return await operations.reserves(identity.account, parsed.data.limit, cursor);
+          } catch (error) {
+            return projectionError(reply, error);
+          }
+        });
         app.get("/v1/accounts/me/activity", async (request, reply) => {
           reply.header("Cache-Control", "private, no-store");
           const parsed = z
@@ -494,6 +530,11 @@ export async function buildApp(
 
     if (control.checkout) {
       const checkout = control.checkout;
+      // Public and identical for every caller: the stalls an attendee can reserve for.
+      app.get("/v1/reserve-terms", async (_request, reply) => {
+        reply.header("Cache-Control", "public, max-age=60");
+        return checkout.reserveTerms();
+      });
       const orderId = z.object({ id: z.string().uuid() }).strict();
       app.post("/v1/checkout-orders", async (request, reply) => {
         const parsed = z

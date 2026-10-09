@@ -8,6 +8,11 @@ type ActivityCursor = {
   transitionId: string;
 };
 
+type ReserveCursor = {
+  openedBlock: bigint;
+  channelId: string;
+};
+
 type Queryable = Pick<PoolClient, "query">;
 
 const lower = (value: string) => value.toLowerCase();
@@ -186,31 +191,84 @@ export class OperationalReadService {
     };
   }
 
+  /**
+   * The account's offline reserves, newest first, a page at a time. Keyset pagination on the
+   * opening block keeps pages stable while new reserves are opened at the head.
+   */
+  async reserves(account: Address, limit: number, cursor?: ReserveCursor) {
+    const result = await this.pool.query(
+      `SELECT ch.channel_id,ch.vendor_id,ch.reserve_units,ch.spent_units,ch.returned_units,
+              ch.accept_until,ch.submit_until,ch.reclaimed,o.event_id,o.block_number AS opened_block
+       FROM channel_projections ch
+       JOIN finalized_chain_logs o ON o.transition_id=ch.opened_transition_id
+       WHERE ch.original_account=$1
+         AND ($2::bigint IS NULL OR (o.block_number,ch.channel_id) < ($2,$3))
+       ORDER BY o.block_number DESC,ch.channel_id DESC
+       LIMIT $4`,
+      [
+        lower(account),
+        cursor?.openedBlock.toString() ?? null,
+        cursor ? lower(cursor.channelId) : null,
+        limit + 1,
+      ],
+    );
+    const hasMore = result.rows.length > limit;
+    const rows = result.rows.slice(0, limit);
+    const last = rows.at(-1);
+    return {
+      items: rows.map((row) => {
+        const reserveUnits = BigInt(row.reserve_units);
+        const spentUnits = BigInt(row.spent_units);
+        const returnedUnits = BigInt(row.returned_units);
+        return {
+          channelId: row.channel_id as Hex,
+          eventId: row.event_id as Hex,
+          vendorId: row.vendor_id as Hex,
+          status: row.reclaimed ? ("RECLAIMED" as const) : ("ACTIVE" as const),
+          reserveUnits: reserveUnits.toString(),
+          spentUnits: spentUnits.toString(),
+          returnedUnits: returnedUnits.toString(),
+          remainingUnits: (reserveUnits - spentUnits - returnedUnits).toString(),
+          acceptUntil: row.accept_until.toString(),
+          submitUntil: row.submit_until.toString(),
+        };
+      }),
+      nextCursor:
+        hasMore && last
+          ? { openedBlock: last.opened_block.toString(), channelId: last.channel_id as Hex }
+          : null,
+    };
+  }
+
   async activity(account: Address, limit: number, cursor?: ActivityCursor) {
     const result = await this.pool.query(
       `WITH owned_transitions AS (
          SELECT p.transition_id,p.block_number,p.payment_id AS aggregate_id,
-                'PAYMENT'::text AS aggregate_kind
+                'PAYMENT'::text AS aggregate_kind,p.gross_units AS amount_units,p.vendor_id
          FROM payment_projections p WHERE p.payer=$1
          UNION ALL
-         SELECT x.transition_id,x.block_number,x.payment_id,'PAYMENT'
+         SELECT x.transition_id,x.block_number,x.payment_id,'PAYMENT',NULL::numeric,NULL::text
          FROM payment_cancellations x WHERE x.payer=$1
          UNION ALL
-         SELECT ch.opened_transition_id,l.block_number,ch.channel_id,'CHANNEL'
+         SELECT ch.opened_transition_id,l.block_number,ch.channel_id,'CHANNEL',ch.reserve_units,
+                ch.vendor_id
          FROM channel_projections ch
          JOIN finalized_chain_logs l ON l.transition_id=ch.opened_transition_id
          WHERE ch.original_account=$1
          UNION ALL
-         SELECT ch.last_transition_id,l.block_number,ch.channel_id,'CHANNEL'
+         SELECT ch.last_transition_id,l.block_number,ch.channel_id,'CHANNEL',ch.returned_units,
+                ch.vendor_id
          FROM channel_projections ch
          JOIN finalized_chain_logs l ON l.transition_id=ch.last_transition_id
          WHERE ch.original_account=$1 AND ch.reclaimed=true
          UNION ALL
-         SELECT r.transition_id,r.block_number,r.payment_id,'PAYMENT'
-         FROM refund_projections r WHERE r.payer=$1
+         SELECT r.transition_id,r.block_number,r.payment_id,'PAYMENT',r.amount_units,p.vendor_id
+         FROM refund_projections r
+         JOIN payment_projections p ON p.stream_id=r.stream_id AND p.payment_id=r.payment_id
+         WHERE r.payer=$1
        )
-       SELECT o.transition_id,o.block_number,o.aggregate_id,o.aggregate_kind,
-              l.transition_kind,l.transaction_hash,l.block_hash
+       SELECT o.transition_id,o.block_number,o.aggregate_id,o.aggregate_kind,o.amount_units,
+              o.vendor_id,l.event_id,l.indexed_at,l.transition_kind,l.transaction_hash,l.block_hash
        FROM owned_transitions o
        JOIN finalized_chain_logs l ON l.transition_id=o.transition_id
        WHERE ($2::bigint IS NULL OR (o.block_number,o.transition_id) < ($2,$3))
@@ -235,6 +293,14 @@ export class OperationalReadService {
         transactionHash: row.transaction_hash as Hex,
         blockNumber: row.block_number.toString(),
         blockHash: row.block_hash as Hex,
+        eventId: row.event_id as Hex,
+        // What the attendee sees per row: the amount paid, set aside, returned or refunded, and the
+        // stall it concerns. A cancellation moves no money, so it has neither.
+        amountUnits: row.amount_units === null ? null : row.amount_units.toString(),
+        vendorId: (row.vendor_id as Hex | null) ?? null,
+        // When the finalized transition was recorded; within seconds of the block for a live
+        // indexer, and the only per-row time the projection keeps.
+        recordedAt: new Date(row.indexed_at).toISOString(),
       })),
       nextCursor:
         hasMore && last

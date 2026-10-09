@@ -125,6 +125,32 @@ paths:
               schema: { type: object, additionalProperties: true }
         "401":
           $ref: "#/components/responses/Unauthorized"
+  /v1/accounts/me/reserves:
+    get:
+      tags: [accounts]
+      operationId: listAccountReserves
+      description: The caller's offline reserves, newest first, keyset-paginated by opening block.
+      security: [{ bearerSession: [] }]
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 50, default: 10 }
+        - name: beforeOpenedBlock
+          in: query
+          schema: { type: string }
+        - name: beforeChannelId
+          in: query
+          schema: { type: string, pattern: "^0x[0-9a-fA-F]{64}$" }
+      responses:
+        "200":
+          description: One page of finalized reserves
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReservePage" }
+        "400":
+          description: Invalid limit, or only one of the two cursor fields
+        "401":
+          $ref: "#/components/responses/Unauthorized"
   /v1/accounts/me/activity:
     get:
       tags: [accounts]
@@ -340,6 +366,37 @@ components:
         transactionHash: { type: string }
         blockNumber: { type: string }
         blockHash: { type: string }
+        eventId: { type: string }
+        amountUnits:
+          type: [string, "null"]
+          description: Paid, set aside, returned or refunded amount in base units; null for a cancellation.
+        vendorId: { type: [string, "null"] }
+        recordedAt: { type: string, format: date-time }
+    ReservePage:
+      type: object
+      required: [items, nextCursor]
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            required: [channelId, eventId, vendorId, status, reserveUnits, spentUnits, returnedUnits, remainingUnits, acceptUntil, submitUntil]
+            properties:
+              channelId: { type: string }
+              eventId: { type: string }
+              vendorId: { type: string }
+              status: { type: string, enum: [ACTIVE, RECLAIMED] }
+              reserveUnits: { type: string }
+              spentUnits: { type: string }
+              returnedUnits: { type: string }
+              remainingUnits: { type: string }
+              acceptUntil: { type: string }
+              submitUntil: { type: string }
+        nextCursor:
+          type: [object, "null"]
+          properties:
+            openedBlock: { type: string }
+            channelId: { type: string }
     Activity:
       type: object
       required: [items]

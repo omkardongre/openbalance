@@ -45,7 +45,10 @@ export class EnrollmentService {
     const options = await generateRegistrationOptions({
       rpName: "OpenBalance",
       rpID: this.policy.rpId,
-      userName: id,
+      // Shown in the device's passkey picker, so it must read as a name, not an identifier. The
+      // short suffix tells two accounts on one device apart; the enrollment id stays server-side.
+      userName: `OpenBalance account ${id.slice(0, 4).toUpperCase()}`,
+      userDisplayName: "OpenBalance account",
       userID: randomBytes(32),
       attestationType: "none",
       supportedAlgorithmIDs: [-7],

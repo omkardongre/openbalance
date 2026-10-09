@@ -32,6 +32,28 @@ export type ActivityItem = {
   transactionHash: string;
   blockNumber: string;
   blockHash: string;
+  eventId?: string;
+  amountUnits?: string | null;
+  vendorId?: string | null;
+  recordedAt?: string;
+};
+export type ReservePage = {
+  items: Array<{
+    channelId: string;
+    eventId: string;
+    vendorId: string;
+    status: "ACTIVE" | "RECLAIMED";
+    reserveUnits: string;
+    spentUnits: string;
+    returnedUnits: string;
+    remainingUnits: string;
+    acceptUntil: string;
+    submitUntil: string;
+  }>;
+  nextCursor: {
+    openedBlock?: string;
+    channelId?: string;
+  } | null;
 };
 export type Activity = {
   items: Array<ActivityItem>;
@@ -145,6 +167,21 @@ export type Operations = {
     requestBody: never;
     responses: {
       "200": Record<string, unknown>;
+      "401": Error;
+    };
+  };
+  listAccountReserves: {
+    method: "GET";
+    path: "/v1/accounts/me/reserves";
+    parameters: {
+      "query:limit"?: number;
+      "query:beforeOpenedBlock"?: string;
+      "query:beforeChannelId"?: string;
+    };
+    requestBody: never;
+    responses: {
+      "200": ReservePage;
+      "400": unknown;
       "401": Error;
     };
   };
