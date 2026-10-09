@@ -2,6 +2,9 @@ import type { WebAuthnAuth } from "@openbalance/protocol";
 import { startAuthentication } from "@simplewebauthn/browser";
 import { type Hex, hexToBytes, toHex } from "viem";
 
+const P256_ORDER = 0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551n;
+const P256_HALF_ORDER = P256_ORDER / 2n;
+
 function decodeBase64url(value: string): Uint8Array {
   const normalized = value.replaceAll("-", "+").replaceAll("_", "/");
   const binary = atob(normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "="));
@@ -28,9 +31,12 @@ function integer(bytes: Uint8Array, offset: number): [Hex, number] {
   const [length, start] = readLength(bytes, offset + 1);
   let value = bytes.slice(start, start + length);
   if (value.length !== length) throw new Error("Passkey signature is truncated.");
-  while (value.length > 32 && value[0] === 0) value = value.slice(1);
-  if (value.length < 1 || value.length > 32 || (value[0] ?? 0) >= 0x80)
+  // A DER INTEGER with its top bit set is negative; r and s are positive, so a value of 2^255 or
+  // more carries a 0x00 pad byte. Check the sign on the encoded bytes, then drop the pad.
+  if (value.length < 1 || (value[0] ?? 0) >= 0x80)
     throw new Error("Passkey signature integer is out of range.");
+  while (value.length > 1 && value[0] === 0) value = value.slice(1);
+  if (value.length > 32) throw new Error("Passkey signature integer is out of range.");
   const padded = new Uint8Array(32);
   padded.set(value, 32 - value.length);
   return [toHex(padded), start + length];
@@ -44,7 +50,11 @@ function parseP256Signature(encoded: string): { r: Hex; s: Hex } {
   const [r, next] = integer(bytes, body);
   const [s, end] = integer(bytes, next);
   if (end !== bytes.length) throw new Error("Passkey signature has trailing data.");
-  return { r, s };
+  // Authenticators may return either of the two valid s values; the account's P-256 check accepts
+  // only the lower one (malleability guard), and n - s verifies the same message and key.
+  const value = BigInt(s);
+  const low = value > P256_HALF_ORDER ? P256_ORDER - value : value;
+  return { r, s: toHex(low, { size: 32 }) };
 }
 
 function base64url(bytes: Uint8Array): string {
@@ -66,23 +76,31 @@ export async function signAccountCommand(input: {
   )
     throw new Error("This passkey is not valid for the current site.");
   const challenge = base64url(hexToBytes(input.digest));
-  const assertion = await startAuthentication({
-    optionsJSON: {
-      challenge,
-      rpId: input.rpId,
-      allowCredentials: [{ id: input.credentialId, type: "public-key" }],
-      userVerification: "required",
-      timeout: 120_000,
-    },
-  });
-  const clientDataJSON = new TextDecoder("utf-8", { fatal: true }).decode(
-    decodeBase64url(assertion.response.clientDataJSON),
-  );
   const expected = JSON.stringify({ type: "webauthn.get", challenge, origin: input.origin });
-  if (
-    clientDataJSON !== expected &&
-    clientDataJSON !== `${expected.slice(0, -1)},"crossOrigin":false}`
-  )
+  const accepted = (value: string) =>
+    value === expected || value === `${expected.slice(0, -1)},"crossOrigin":false}`;
+  // Chromium randomly appends an anti-templating member ("other_keys_can_be_added_here") to
+  // clientDataJSON. The on-chain verifier accepts only the standard serialization, so such an
+  // assertion can never verify; asking again yields a standard one. Bounded so a browser that
+  // always deviates still fails clearly.
+  let assertion: Awaited<ReturnType<typeof startAuthentication>> | undefined;
+  let clientDataJSON = "";
+  for (let attempt = 0; attempt < 3; attempt++) {
+    assertion = await startAuthentication({
+      optionsJSON: {
+        challenge,
+        rpId: input.rpId,
+        allowCredentials: [{ id: input.credentialId, type: "public-key" }],
+        userVerification: "required",
+        timeout: 120_000,
+      },
+    });
+    clientDataJSON = new TextDecoder("utf-8", { fatal: true }).decode(
+      decodeBase64url(assertion.response.clientDataJSON),
+    );
+    if (accepted(clientDataJSON) || !clientDataJSON.includes("other_keys_can_be_added_here")) break;
+  }
+  if (!assertion || !accepted(clientDataJSON))
     throw new Error("Passkey client data is outside the supported security profile.");
   const authenticatorData = decodeBase64url(assertion.response.authenticatorData);
   const flags = authenticatorData[32] ?? 0;
