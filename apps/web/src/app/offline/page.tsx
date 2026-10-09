@@ -6,11 +6,12 @@ import {
   decodePaymentRequestQr,
   type TerminalPaymentRequest,
 } from "@openbalance/protocol";
-import { BrowserQRCodeReader } from "@zxing/browser";
 import Image from "next/image";
+import Link from "next/link";
 import QRCode from "qrcode";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { formatUnits } from "viem";
+import { friendlyError } from "../../lib/account-display";
+import { money, when } from "../../lib/format";
 import { readSettlementStatuses, type SettlementStatus } from "../../lib/offline-settlement";
 import {
   authorizeOfflineRequest,
@@ -19,27 +20,68 @@ import {
   type StoredAuthorization,
   storeTerminalReceipt,
 } from "../../lib/offline-wallet";
+import { AttendeeNav } from "../attendee-nav";
+import { QrScanner } from "./qr-scanner";
 
 /** How often to recheck finalized settlement while a payment is still open and the device is online. */
 const SETTLEMENT_POLL_MS = 10_000;
+/** Payments listed per page on this device. */
+const PAGE = 8;
 
-function short(value: string) {
-  return `${value.slice(0, 8)}…${value.slice(-6)}`;
+type Tone = "info" | "success" | "error";
+
+function assetOf(channel: AttendeeChannelState | undefined) {
+  return channel
+    ? { symbol: channel.display.assetSymbol, decimals: channel.display.assetDecimals }
+    : undefined;
+}
+
+/** A reserve can pay right now: inside its window with money and sales left. */
+function spendable(channel: AttendeeChannelState, nowSeconds: number) {
+  return (
+    channel.status === "ACTIVE" &&
+    nowSeconds >= channel.acceptFrom &&
+    nowSeconds < channel.acceptUntil &&
+    channel.reserveUnits > channel.spentUnits &&
+    channel.approvedVoucherCount < channel.maxVoucherCount
+  );
+}
+
+/** Where one approved payment stands, in the attendee's words, with a tone for the status chip. */
+function paymentStatus(
+  authorization: StoredAuthorization,
+  settlement: SettlementStatus | undefined,
+): { label: string; tone: "ok" | "wait" | "muted" } {
+  if (authorization.supersededBy) return { label: "Not charged", tone: "muted" };
+  if (settlement === "SETTLED") return { label: "Paid", tone: "ok" };
+  if (settlement === "RETURNED") return { label: "Refunded to you", tone: "muted" };
+  if (settlement === "MISSED") return { label: "Not charged · coming back", tone: "muted" };
+  if (authorization.receipt) return { label: "Confirming", tone: "wait" };
+  return { label: "Waiting for stall", tone: "wait" };
 }
 
 export default function OfflineWalletPage() {
-  const video = useRef<HTMLVideoElement>(null);
+  const approval = useRef<HTMLElement>(null);
+  const [scanning, setScanning] = useState<"request" | "receipt">();
   const [channels, setChannels] = useState<AttendeeChannelState[]>([]);
   const [authorizations, setAuthorizations] = useState<StoredAuthorization[]>([]);
+  const [loaded, setLoaded] = useState(false);
   const [request, setRequest] = useState<TerminalPaymentRequest>();
-  const [responseQr, setResponseQr] = useState<string>();
   const [responseImage, setResponseImage] = useState<string>();
   const [rawPayload, setRawPayload] = useState("");
-  const [scanMode, setScanMode] = useState<"request" | "receipt">("request");
+  const [pasteMode, setPasteMode] = useState<"request" | "receipt">("request");
   const [busy, setBusy] = useState(false);
   const [offlineReady, setOfflineReady] = useState(false);
-  const [status, setStatus] = useState("Load an active reserve, then scan the terminal request.");
+  const [status, setStatus] = useState("");
+  const [tone, setTone] = useState<Tone>("info");
   const [settlement, setSettlement] = useState<Map<string, SettlementStatus>>(new Map());
+  const [shown, setShown] = useState(PAGE);
+  const [nowSeconds, setNowSeconds] = useState(() => Math.floor(Date.now() / 1_000));
+
+  function report(message: string, nextTone: Tone = "info") {
+    setStatus(message);
+    setTone(nextTone);
+  }
 
   const refresh = useCallback(async () => {
     const [nextChannels, nextAuthorizations] = await Promise.all([
@@ -48,16 +90,24 @@ export default function OfflineWalletPage() {
     ]);
     setChannels(nextChannels);
     setAuthorizations(nextAuthorizations);
+    setLoaded(true);
   }, []);
 
   useEffect(() => {
-    void refresh().catch((error: unknown) =>
-      setStatus(error instanceof Error ? error.message : "Offline storage is unavailable."),
-    );
+    void refresh().catch(() => {
+      setLoaded(true);
+      setStatus("This browser's storage is unavailable, so offline payments cannot work here.");
+      setTone("error");
+    });
   }, [refresh]);
 
-  // Receipts move from "stored" to "settled" by themselves: while any payment is still open, recheck
-  // the vault at the finalized block, and immediately when the device comes back online. A failed
+  useEffect(() => {
+    const timer = setInterval(() => setNowSeconds(Math.floor(Date.now() / 1_000)), 1_000);
+    return () => clearInterval(timer);
+  }, []);
+
+  // Payments move from "confirming" to "paid" by themselves: while any is still open, recheck the
+  // vault at the finalized block, and immediately when the device comes back online. A failed
   // read (offline, RPC down) keeps the last known status rather than guessing.
   const open = authorizations.some(
     (authorization) =>
@@ -103,46 +153,59 @@ export default function OfflineWalletPage() {
     };
   }, []);
 
-  const channel = useMemo(
-    () => channels.find((candidate) => candidate.channelId === request?.channelId),
-    [channels, request],
+  const byChannel = useMemo(
+    () => new Map(channels.map((channel) => [channel.channelId.toLowerCase(), channel])),
+    [channels],
   );
+  const usable = channels.filter((channel) => spendable(channel, nowSeconds));
+  const channel = request ? byChannel.get(request.channelId.toLowerCase()) : undefined;
   const voucher = request ? decodeOfflineVoucher(request.voucher) : undefined;
+  const history = useMemo(
+    () => [...authorizations].sort((left, right) => right.createdAt - left.createdAt),
+    [authorizations],
+  );
 
-  async function consumePayload(payload: string, mode = scanMode) {
+  async function consumePayload(payload: string, mode: "request" | "receipt") {
     if (mode === "request") {
       const decoded = decodePaymentRequestQr(payload.trim());
-      const matching = channels.find((candidate) => candidate.channelId === decoded.channelId);
-      if (!matching)
-        throw new Error("No finalized reserve for this terminal exists on this device.");
+      if (!byChannel.has(decoded.channelId.toLowerCase()))
+        throw new Error(
+          "This stall has no reserve from you on this phone. Set one aside in your wallet first.",
+        );
       setRequest(decoded);
-      setResponseQr(undefined);
       setResponseImage(undefined);
-      setStatus("Verify the vendor, amount, and reserve before approving.");
+      report("");
       return;
     }
     await storeTerminalReceipt(payload.trim());
     await refresh();
-    setStatus("Terminal receipt stored. Settlement is still pending until finalized onchain.");
+    setRequest(undefined);
+    setResponseImage(undefined);
+    report("Receipt saved. The payment finishes confirming in the background.", "success");
   }
 
-  async function scanQr(mode: "request" | "receipt") {
-    if (!video.current) return;
+  async function scanned(text: string) {
+    const mode = scanning ?? "request";
+    setScanning(undefined);
     setBusy(true);
-    setScanMode(mode);
-    setStatus("Camera active. Hold the QR code steady inside the frame.");
     try {
-      const result = await new BrowserQRCodeReader(undefined, {
-        delayBetweenScanAttempts: 100,
-        delayBetweenScanSuccess: 500,
-      }).decodeOnceFromVideoDevice(undefined, video.current);
-      await consumePayload(result.getText(), mode);
+      await consumePayload(text, mode);
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "The QR code could not be read.");
+      report(
+        friendlyError(error, "") ||
+          "That code is not an OpenBalance payment. Scan the code on the stall's screen.",
+        "error",
+      );
     } finally {
       setBusy(false);
     }
   }
+
+  // Bring the approval card into view as soon as a request is read, so the attendee sees what
+  // they are about to approve without scrolling.
+  useEffect(() => {
+    if (request) approval.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, [request]);
 
   async function approve() {
     if (!request || !channel) return;
@@ -152,16 +215,13 @@ export default function OfflineWalletPage() {
       const image = await QRCode.toDataURL(authorization.responseQr, {
         errorCorrectionLevel: "M",
         margin: 2,
-        width: 360,
+        width: 720,
       });
-      setResponseQr(authorization.responseQr);
       setResponseImage(image);
       await refresh();
-      setStatus(
-        "Authorization stored. Let the terminal scan this response; payment remains pending settlement.",
-      );
+      report("");
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Offline approval was rejected.");
+      report(friendlyError(error, "The payment was not approved."), "error");
     } finally {
       setBusy(false);
     }
@@ -170,155 +230,242 @@ export default function OfflineWalletPage() {
   async function importPayload() {
     setBusy(true);
     try {
-      await consumePayload(rawPayload);
+      await consumePayload(rawPayload, pasteMode);
       setRawPayload("");
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "The payload could not be verified.");
+      report(friendlyError(error, "That code could not be read."), "error");
     } finally {
       setBusy(false);
     }
   }
 
+  const asset = assetOf(channel);
+  const secondsLeft = request ? request.expiresAt - nowSeconds : 0;
+
   return (
-    <main>
+    <main className="with-tabbar">
       <div className="page-stack offline-stack">
-        <section className="shell checkout-shell">
-          <p className="eyebrow">Attendee offline wallet</p>
-          <h1>Approve from your reserved balance.</h1>
+        <section className="shell narrow checkout-shell">
+          <p className="eyebrow">Pay offline</p>
+          <h1>Pay a stall without signal.</h1>
           <p className="summary">
-            Requests are checked against a finalized terminal-specific reserve. Every approval and
-            returned terminal receipt stays on this device through a restart.
+            Scan the code on the stall&apos;s screen, check the amount, and approve. It is paid from
+            the reserve you set aside for that stall.
           </p>
+
+          {loaded && usable.length === 0 ? (
+            <div className="empty-state">
+              <p>
+                You have no reserve you can spend right now. Set one aside for a stall while you are
+                online.
+              </p>
+              <Link className="primary-action block-button" href="/account">
+                Set aside a reserve
+              </Link>
+            </div>
+          ) : (
+            <ul className="reserve-chips" aria-label="Reserves you can spend now">
+              {usable.map((item) => (
+                <li key={item.channelId}>
+                  <strong>{item.display.vendorName}</strong>
+                  <span>
+                    {money(item.reserveUnits - item.spentUnits, assetOf(item))} left · until{" "}
+                    {new Date(item.acceptUntil * 1_000).toLocaleTimeString([], {
+                      hour: "2-digit",
+                      minute: "2-digit",
+                    })}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          <button
+            type="button"
+            className="block-button scan-button"
+            disabled={busy || usable.length === 0}
+            onClick={() => setScanning("request")}
+          >
+            Scan to pay
+          </button>
+
+          <p role="status" aria-live="polite" className={`notice ${tone === "info" ? "" : tone}`}>
+            {status}
+          </p>
+
           <p className={offlineReady ? "offline-ready" : "offline-not-ready"}>
             {offlineReady
-              ? "Offline application shell installed on this device."
-              : "Keep this page online until offline installation completes."}
+              ? "Ready to work without signal on this phone."
+              : "Keep this page open online once so it works without signal."}
           </p>
-          <div className="offline-actions">
-            <button
-              type="button"
-              disabled={busy || channels.length === 0}
-              onClick={() => scanQr("request")}
-            >
-              Scan payment request
-            </button>
-            <button
-              className="secondary-button"
-              type="button"
-              disabled={busy}
-              onClick={() => scanQr("receipt")}
-            >
-              Store terminal receipt
-            </button>
-          </div>
-          <video
-            ref={video}
-            className="qr-camera"
-            muted
-            playsInline
-            aria-label="QR scanner camera"
-          />
+
           <details className="payload-import">
-            <summary>Import an exact payload</summary>
+            <summary>Camera not working? Paste the code instead</summary>
+            <fieldset className="amount-row">
+              <legend className="visually-hidden">Code type</legend>
+              <button
+                type="button"
+                className="secondary-button"
+                aria-pressed={pasteMode === "request"}
+                onClick={() => setPasteMode("request")}
+              >
+                Payment code
+              </button>
+              <button
+                type="button"
+                className="secondary-button"
+                aria-pressed={pasteMode === "receipt"}
+                onClick={() => setPasteMode("receipt")}
+              >
+                Receipt code
+              </button>
+            </fieldset>
             <label>
-              {scanMode === "request" ? "Terminal request" : "Terminal receipt"}
+              {pasteMode === "request"
+                ? "Payment code from the stall"
+                : "Receipt code from the stall"}
               <textarea
                 value={rawPayload}
                 onChange={(event) => setRawPayload(event.target.value)}
               />
             </label>
-            <button type="button" disabled={busy || !rawPayload.trim()} onClick={importPayload}>
-              Verify payload
+            <button
+              type="button"
+              className="secondary-button block-button"
+              disabled={busy || !rawPayload.trim()}
+              onClick={importPayload}
+            >
+              Continue
             </button>
           </details>
-          <p role="status">{status}</p>
+
+          {scanning && (
+            <QrScanner
+              title={scanning === "request" ? "Scan to pay" : "Scan the stall's receipt"}
+              hint={
+                scanning === "request"
+                  ? "Point at the code on the stall's screen. Hold about 20 cm away until it reads."
+                  : "Point at the receipt code on the stall's screen."
+              }
+              onResult={(text) => void scanned(text)}
+              onCancel={() => setScanning(undefined)}
+            />
+          )}
         </section>
 
-        {request && channel && voucher && (
-          <section className="shell checkout-shell offline-approval">
-            <p className="eyebrow">Approval request</p>
-            <div className="receipt-card">
-              <span>{channel.display.vendorName}</span>
-              <strong>
-                {formatUnits(voucher.grossUnits, channel.display.assetDecimals)}{" "}
-                {channel.display.assetSymbol}
-              </strong>
-              <small>Terminal {short(request.terminalId)}</small>
-              <small>Sequence {request.sequence}</small>
-              <small>
-                Reserve after approval:{" "}
-                {formatUnits(
-                  channel.reserveUnits - voucher.cumulativeGrossUnits,
-                  channel.display.assetDecimals,
-                )}{" "}
-                {channel.display.assetSymbol}
-              </small>
-              <small>
-                Request expires {new Date(request.expiresAt * 1_000).toLocaleTimeString()}
-              </small>
-            </div>
-            {!responseQr ? (
-              <button type="button" disabled={busy} onClick={approve}>
-                Approve exact offline payment
-              </button>
+        {request && channel && voucher && asset && (
+          <section ref={approval} className="shell narrow checkout-shell offline-approval">
+            {!responseImage ? (
+              <>
+                <p className="eyebrow">Check and approve</p>
+                <div className="receipt-card">
+                  <span>{channel.display.vendorName}</span>
+                  <strong>{money(voucher.grossUnits, asset)}</strong>
+                  <small>
+                    Left in this reserve after:{" "}
+                    {money(channel.reserveUnits - voucher.cumulativeGrossUnits, asset)}
+                  </small>
+                  <small className={secondsLeft <= 30 ? "countdown urgent" : "countdown"}>
+                    {secondsLeft > 0
+                      ? `Request expires in ${Math.floor(secondsLeft / 60)}:${String(secondsLeft % 60).padStart(2, "0")}`
+                      : "This request expired. Ask the stall to charge again."}
+                  </small>
+                </div>
+                <button
+                  type="button"
+                  className="block-button"
+                  disabled={busy || secondsLeft <= 0}
+                  onClick={approve}
+                >
+                  {busy ? "Approving…" : `Approve ${money(voucher.grossUnits, asset)}`}
+                </button>
+                <button
+                  type="button"
+                  className="secondary-button block-button"
+                  disabled={busy}
+                  onClick={() => setRequest(undefined)}
+                >
+                  Cancel
+                </button>
+              </>
             ) : (
               <div className="response-qr">
-                {responseImage && (
-                  <Image
-                    src={responseImage}
-                    alt="Signed attendee response QR"
-                    width={360}
-                    height={360}
-                    unoptimized
-                  />
-                )}
-                <code>{short(responseQr)}</code>
-                <p>Accepted by your device, pending terminal receipt and onchain settlement.</p>
+                <p className="eyebrow">Approved</p>
+                <h2>Show this to the stall</h2>
+                <p className="muted">
+                  {channel.display.vendorName} scans it to finish the{" "}
+                  {money(voucher.grossUnits, asset)} payment.
+                </p>
+                <Image
+                  src={responseImage}
+                  alt={`Payment approval code for ${channel.display.vendorName}`}
+                  width={360}
+                  height={360}
+                  unoptimized
+                />
+                <button
+                  type="button"
+                  className="secondary-button block-button"
+                  onClick={() => setScanning("receipt")}
+                >
+                  Scan the stall&apos;s receipt
+                </button>
+                <button
+                  type="button"
+                  className="text-button"
+                  onClick={() => {
+                    setRequest(undefined);
+                    setResponseImage(undefined);
+                  }}
+                >
+                  Done
+                </button>
               </div>
             )}
           </section>
         )}
 
-        <section className="shell checkout-shell">
+        <section className="shell narrow checkout-shell" aria-labelledby="history-heading">
           <div className="section-heading">
-            <div>
-              <p className="eyebrow">Device records</p>
-              <h2>Offline activity</h2>
-            </div>
-            <span>{channels.length} active reserves</span>
+            <h2 id="history-heading">Payments on this phone</h2>
+            {history.length > 0 && <p>{history.length}</p>}
           </div>
-          {authorizations.length === 0 ? (
-            <p className="empty-state">No offline payments have been authorized on this device.</p>
+          {history.length === 0 ? (
+            <p className="empty-state">No offline payments yet.</p>
           ) : (
-            <ul className="activity-list">
-              {authorizations.map((authorization) => (
-                <li key={authorization.paymentId}>
-                  <div>
-                    <strong>{short(authorization.paymentId)}</strong>
-                    <span>{authorization.grossUnits.toString()} base units</span>
-                  </div>
-                  <div className="proof-ref">
-                    <span>
-                      {authorization.supersededBy
-                        ? "EXPIRED, REPLACED BY A NEWER REQUEST"
-                        : settlement.get(authorization.paymentId) === "SETTLED"
-                          ? "SETTLED ON MONAD"
-                          : settlement.get(authorization.paymentId) === "RETURNED"
-                            ? "NOT UPLOADED IN TIME · RETURNED TO YOU"
-                            : settlement.get(authorization.paymentId) === "MISSED"
-                              ? "NOT UPLOADED IN TIME · COMES BACK TO YOU"
-                              : authorization.receipt
-                                ? "TERMINAL RECEIPT STORED · SETTLING"
-                                : "AWAITING TERMINAL RECEIPT"}
-                    </span>
-                    <small>{new Date(authorization.createdAt).toLocaleString()}</small>
-                  </div>
-                </li>
-              ))}
-            </ul>
+            <ol className="activity-list ledger">
+              {history.slice(0, shown).map((authorization) => {
+                const owner = byChannel.get(authorization.channelId.toLowerCase());
+                const state = paymentStatus(authorization, settlement.get(authorization.paymentId));
+                return (
+                  <li key={authorization.paymentId}>
+                    <div>
+                      <strong>{owner?.display.vendorName ?? "Stall"}</strong>
+                      <span>{when(authorization.createdAt)}</span>
+                    </div>
+                    <div className="ledger-amount">
+                      <strong>{money(authorization.grossUnits, assetOf(owner))}</strong>
+                      <span className="chip" data-tone={state.tone}>
+                        {state.label}
+                      </span>
+                    </div>
+                  </li>
+                );
+              })}
+            </ol>
+          )}
+          {history.length > shown && (
+            <button
+              type="button"
+              className="secondary-button block-button"
+              onClick={() => setShown((count) => count + PAGE)}
+            >
+              Show {Math.min(PAGE, history.length - shown)} more
+            </button>
           )}
         </section>
       </div>
+      <AttendeeNav />
     </main>
   );
 }

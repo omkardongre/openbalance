@@ -3,7 +3,7 @@
 import { accountFactoryAbi } from "@openbalance/protocol";
 import { startAuthentication, startRegistration } from "@simplewebauthn/browser";
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   type Address,
   encodeFunctionData,
@@ -47,6 +47,9 @@ type Tone = "info" | "success" | "error";
 
 const STEPS = ["Passkey", "Account", "Done"] as const;
 
+/** Pause between automatic account status checks while the network finalizes it. */
+const FINALITY_POLL_MS = 3_000;
+
 function KeyIcon() {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
@@ -77,7 +80,6 @@ export default function EnrollPage() {
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("");
   const [tone, setTone] = useState<Tone>("info");
-  const [record, setRecord] = useState<string>();
   const [token, setToken] = useState<string>();
   const [verifiedKey, setVerifiedKey] = useState<Enrollment>();
   const [, setDeployment] = useState<Deployment>();
@@ -103,7 +105,6 @@ export default function EnrollPage() {
 
   async function enroll() {
     setBusy(true);
-    setRecord(undefined);
     setToken(undefined);
     setVerifiedKey(undefined);
     setDeployment(undefined);
@@ -125,7 +126,6 @@ export default function EnrollPage() {
         response: signed,
       });
       if (verified.status !== "verified") throw new Error("Passkey verification incomplete.");
-      setRecord(JSON.stringify(verified, null, 2));
       setToken(start.token);
       setVerifiedKey(verified);
       report("Passkey verified.", "success");
@@ -142,7 +142,7 @@ export default function EnrollPage() {
     setSponsorshipKey(key);
     try {
       const relayer = process.env.NEXT_PUBLIC_RELAYER_URL;
-      if (!relayer) throw new Error("Account sponsorship is not configured.");
+      if (!relayer) throw new Error("Account setup is unavailable right now. Try again later.");
       const response = await fetch(`${relayer}/v1/accounts/deployments/sponsor`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "Idempotency-Key": key },
@@ -150,8 +150,7 @@ export default function EnrollPage() {
         cache: "no-store",
         signal: AbortSignal.timeout(30_000),
       });
-      if (!response.ok)
-        throw new Error("Sponsorship is unavailable. Retry the same request later.");
+      if (!response.ok) throw new Error("Account setup is busy. Try again in a moment.");
       const result = await response.json();
       setAccountAddress(result.account);
       setDeployment((current) =>
@@ -165,18 +164,15 @@ export default function EnrollPage() {
       );
       if (result.status === "confirmed") {
         setConfirmed(true);
-        report("Your account is live on Monad testnet.", "success");
+        report("Your account is ready.", "success");
       } else {
-        report(
-          "Account submitted. The network is finalizing it; check again in a few seconds.",
-          "info",
-        );
+        report("Creating your account. This usually takes a few seconds.", "info");
       }
     } catch (error) {
       report(
         passkeyErrorMessage(
           error,
-          "Sponsorship is unavailable. Your passkey and account parameters are unchanged.",
+          "Account setup is busy. Your passkey is safe; try again in a moment.",
         ),
         "error",
       );
@@ -212,12 +208,12 @@ export default function EnrollPage() {
         expected !== result.transaction.data ||
         verifiedKey.origin !== window.location.origin
       )
-        throw new Error("Deployment parameters do not match your verified passkey.");
+        throw new Error("Something did not match your passkey. Start again.");
       setDeployment(result);
       setAccountAddress(result.account);
       if (result.status === "confirmed") {
         setConfirmed(true);
-        report("Your account is live on Monad testnet.", "success");
+        report("Your account is ready.", "success");
         return;
       }
       if (submit) {
@@ -226,8 +222,7 @@ export default function EnrollPage() {
             ethereum?: { request(input: { method: string; params?: unknown[] }): Promise<unknown> };
           }
         ).ethereum;
-        if (!provider)
-          throw new Error("A connected test wallet is required to pay the deployment network fee.");
+        if (!provider) throw new Error("No browser wallet found.");
         const addresses = await provider.request({ method: "eth_requestAccounts" });
         if (!Array.isArray(addresses) || !/^0x[0-9a-fA-F]{40}$/.test(addresses[0]))
           throw new Error("No wallet account available.");
@@ -244,16 +239,13 @@ export default function EnrollPage() {
       setAccountAddress(observation.account);
       if (observation.status === "confirmed") {
         setConfirmed(true);
-        report("Your account is live on Monad testnet.", "success");
+        report("Your account is ready.", "success");
       } else {
-        report("Still finalizing on the network. Check again in a few seconds.", "info");
+        report("Creating your account. This usually takes a few seconds.", "info");
       }
     } catch (error) {
       report(
-        passkeyErrorMessage(
-          error,
-          "Deployment could not be verified. Check the same account before retrying.",
-        ),
+        passkeyErrorMessage(error, "We could not confirm your account yet. Tap Check now."),
         "error",
       );
     } finally {
@@ -262,6 +254,22 @@ export default function EnrollPage() {
   }
   // An account was submitted but is not final yet: offer a status check instead of another submit.
   const awaitingFinality = !confirmed && (Boolean(accountAddress) || submitted);
+
+  // Finality takes a few seconds on the network; check by itself instead of asking the person to
+  // keep tapping. The button stays as a manual fallback.
+  useEffect(() => {
+    // Stop on an error so a lasting failure is shown, not retried in a loop; "Check now" resumes.
+    if (!awaitingFinality || busy || tone === "error") return;
+    const timer = setTimeout(() => void deploy(false), FINALITY_POLL_MS);
+    return () => clearTimeout(timer);
+  });
+
+  // Each step is a new screen; start it at the top so the header and progress are visible.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: runs on step change only.
+  useEffect(() => {
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }, [step]);
+
   return (
     <main>
       <section className="shell narrow">
@@ -309,8 +317,8 @@ export default function EnrollPage() {
             </div>
             <h1 id="step-account">Set up your account</h1>
             <p className="summary">
-              We create your smart account on Monad testnet and pay the one-time network fee. Only
-              your passkey can control it.
+              We set up your account for free. Only your passkey can use it, so keep it on this
+              phone.
             </p>
             {awaitingFinality ? (
               <button
@@ -319,7 +327,7 @@ export default function EnrollPage() {
                 disabled={busy}
                 onClick={() => deploy(false)}
               >
-                {busy ? "Checking…" : "Check status"}
+                {busy ? "Creating your account…" : "Check now"}
               </button>
             ) : (
               <button type="button" className="block-button" disabled={busy} onClick={sponsor}>
@@ -327,9 +335,9 @@ export default function EnrollPage() {
               </button>
             )}
             <details>
-              <summary>Advanced: pay the fee from your own test wallet</summary>
+              <summary>Advanced: use my own browser wallet</summary>
               <p className="fine-print">
-                Uses a connected browser wallet on Monad testnet instead of sponsorship.
+                For people who already use a crypto wallet. You pay a small test-network fee.
               </p>
               <button
                 type="button"
@@ -337,7 +345,7 @@ export default function EnrollPage() {
                 disabled={busy || submitted}
                 onClick={() => deploy(true)}
               >
-                Deploy with my wallet
+                Set up with my wallet
               </button>
               {submitted && (
                 <button
@@ -346,12 +354,10 @@ export default function EnrollPage() {
                   disabled={busy}
                   onClick={() => {
                     setSubmitted(false);
-                    report(
-                      "Retry uses the same account and may incur another network fee. Check your wallet activity first.",
-                    );
+                    report("Trying again may charge another small fee. Check your wallet first.");
                   }}
                 >
-                  Enable retry for the same account
+                  Try again
                 </button>
               )}
             </details>
@@ -378,7 +384,7 @@ export default function EnrollPage() {
               Go to my account
             </Link>
             <p className="fine-print">
-              Backup and recovery are not set up yet, so keep the passkey on this device.
+              Keep the passkey on this phone. For now it is the only way into your account.
             </p>
           </section>
         )}
@@ -386,13 +392,6 @@ export default function EnrollPage() {
         <p role="status" aria-live="polite" className={`notice ${tone === "info" ? "" : tone}`}>
           {status}
         </p>
-
-        {record && (
-          <details>
-            <summary>Public enrollment record</summary>
-            <pre>{record}</pre>
-          </details>
-        )}
       </section>
     </main>
   );

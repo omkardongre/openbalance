@@ -1,11 +1,9 @@
-import { formatUnits } from "viem";
-
-// Reserves are denominated in the event's settlement asset; the testnet event settles in USDC.
-const ASSET = { symbol: "USDC", decimals: 6 } as const;
+import { money } from "../../lib/format";
 
 export type ReserveBalance = {
   channelId: `0x${string}`;
   eventId: `0x${string}`;
+  vendorId: `0x${string}`;
   status: "ACTIVE" | "RECLAIMED";
   reserveUnits: string;
   spentUnits: string;
@@ -45,9 +43,7 @@ export function reservePhase(reserve: ReserveBalance, nowSeconds: number): Phase
   return { kind: "due" };
 }
 
-function amount(units: string) {
-  return `${formatUnits(BigInt(units), ASSET.decimals)} ${ASSET.symbol}`;
-}
+const amount = (units: string) => money(units);
 
 function time(epochSeconds: number) {
   return new Date(epochSeconds * 1_000).toLocaleTimeString([], {
@@ -67,36 +63,46 @@ function relative(epochSeconds: number, nowSeconds: number) {
 
 export function ReserveBalances({
   reserves,
+  vendors,
   operations,
   nowSeconds,
   busy,
   onReturn,
 }: {
   reserves: ReserveBalance[];
+  vendors: Map<string, string>;
   operations: Record<string, ReturnOperation>;
   nowSeconds: number;
   busy: boolean;
   onReturn: (reserve: ReserveBalance) => void;
 }) {
   if (reserves.length === 0)
-    return <p className="empty-state">No offline balance set aside yet.</p>;
+    return (
+      <p className="empty-state">
+        Nothing set aside yet. Set aside a small amount above to pay a stall when the network drops.
+      </p>
+    );
   return (
     <ol className="activity-list">
       {reserves.map((reserve) => {
         const phase = reservePhase(reserve, nowSeconds);
         const operation = operations[reserve.channelId];
+        const vendor = vendors.get(reserve.vendorId?.toLowerCase() ?? "") ?? "Stall";
         return (
-          <li key={reserve.channelId} className="reserve-readback">
-            <span>
-              {phase.kind === "returned"
-                ? "Returned"
-                : phase.kind === "spent"
-                  ? "Fully spent"
-                  : phase.kind === "spendable"
-                    ? "Spendable offline"
-                    : phase.kind === "settling"
-                      ? "Closed for spending"
-                      : "Ready to come back"}
+          <li key={reserve.channelId} className="reserve-readback" data-phase={phase.kind}>
+            <span className="reserve-title">
+              <b>{vendor}</b>
+              <em>
+                {phase.kind === "returned"
+                  ? "Returned"
+                  : phase.kind === "spent"
+                    ? "Fully spent"
+                    : phase.kind === "spendable"
+                      ? "Spendable offline"
+                      : phase.kind === "settling"
+                        ? "Closed for spending"
+                        : "Ready to come back"}
+              </em>
             </span>
             <strong>
               {phase.kind === "returned" ? amount(phase.units) : amount(reserve.remainingUnits)}{" "}
@@ -109,8 +115,7 @@ export function ReserveBalances({
                 `Spend it at the event until ${time(phase.until)}. Whatever is left comes back to you from ${time(phase.backFrom)} (${relative(phase.backFrom, nowSeconds)}).`}
               {phase.kind === "settling" &&
                 `Vendors are finishing offline sales. What is left comes back to you from ${time(phase.backFrom)} (${relative(phase.backFrom, nowSeconds)}).`}
-              {phase.kind === "due" &&
-                "It can only go back to your account. Anyone can trigger the return, including you, with no signature needed."}
+              {phase.kind === "due" && "It can only go back to your account."}
             </small>
             {phase.kind === "due" && (!operation || operation.state === "FAILED") && (
               <button type="button" disabled={busy} onClick={() => onReturn(reserve)}>

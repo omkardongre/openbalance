@@ -530,6 +530,11 @@ details summary {
   margin-bottom: 0.25rem;
 }
 
+.section-heading > a {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
 .section-heading > p {
   margin: 0;
   color: var(--text-muted);
@@ -869,15 +874,158 @@ fieldset.amount-row {
   margin-top: 1.5rem;
 }
 
-.qr-camera {
+/* Full-screen QR scanner: camera fills the screen, a square viewfinder with corner marks and a
+   sweeping line shows where to aim, everything outside the frame is dimmed. */
+.scanner {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  background: #000;
+  color: #fff;
+}
+
+.scanner-video {
+  position: absolute;
+  inset: 0;
   width: 100%;
-  min-height: 12rem;
-  max-height: 26rem;
-  margin-top: 1rem;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: #0b1220;
+  height: 100%;
   object-fit: cover;
+}
+
+.scanner-top,
+.scanner-bottom {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: max(1rem, env(safe-area-inset-top)) 1.25rem 1rem;
+}
+
+.scanner-top {
+  justify-content: space-between;
+  background: linear-gradient(rgb(0 0 0 / 60%), transparent);
+}
+
+.scanner-top h2 {
+  margin: 0;
+  color: #fff;
+  font-size: 1.1rem;
+}
+
+.scanner-close {
+  display: grid;
+  width: 2.75rem;
+  height: 2.75rem;
+  padding: 0;
+  place-items: center;
+  border: 0;
+  border-radius: 999px;
+  background: rgb(255 255 255 / 18%);
+  color: #fff;
+  font-size: 1.6rem;
+  line-height: 1;
+}
+
+.scanner-frame {
+  position: relative;
+  z-index: 1;
+  width: min(78vw, 22rem);
+  aspect-ratio: 1;
+  align-self: center;
+  justify-self: center;
+  border-radius: 1.25rem;
+  /* Dims everything outside the viewfinder. */
+  box-shadow: 0 0 0 200vmax rgb(0 0 0 / 55%);
+  overflow: hidden;
+}
+
+.scanner-corner {
+  position: absolute;
+  width: 2.5rem;
+  height: 2.5rem;
+  border: 0 solid var(--brand);
+}
+
+.scanner-corner.top-left {
+  top: 0;
+  left: 0;
+  border-top-width: 5px;
+  border-left-width: 5px;
+  border-top-left-radius: 1.25rem;
+}
+
+.scanner-corner.top-right {
+  top: 0;
+  right: 0;
+  border-top-width: 5px;
+  border-right-width: 5px;
+  border-top-right-radius: 1.25rem;
+}
+
+.scanner-corner.bottom-left {
+  bottom: 0;
+  left: 0;
+  border-bottom-width: 5px;
+  border-left-width: 5px;
+  border-bottom-left-radius: 1.25rem;
+}
+
+.scanner-corner.bottom-right {
+  right: 0;
+  bottom: 0;
+  border-right-width: 5px;
+  border-bottom-width: 5px;
+  border-bottom-right-radius: 1.25rem;
+}
+
+.scanner-line {
+  position: absolute;
+  right: 8%;
+  left: 8%;
+  height: 2px;
+  background: var(--brand);
+  box-shadow: 0 0 12px 2px rgb(13 148 136 / 70%);
+  animation: scanner-sweep 2s ease-in-out infinite alternate;
+}
+
+@keyframes scanner-sweep {
+  from {
+    top: 8%;
+  }
+  to {
+    top: 92%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .scanner-line {
+    top: 50%;
+    animation: none;
+  }
+}
+
+.scanner-bottom {
+  flex-direction: column;
+  padding: 1.25rem 1.25rem max(1.5rem, env(safe-area-inset-bottom));
+  background: linear-gradient(transparent, rgb(0 0 0 / 70%));
+  text-align: center;
+}
+
+.scanner-bottom p {
+  max-width: 22rem;
+  margin: 0;
+  color: #fff;
+  font-weight: 600;
+}
+
+.scanner-cancel {
+  min-width: 10rem;
+  border: 1px solid rgb(255 255 255 / 60%);
+  background: transparent;
+  color: #fff;
 }
 
 .payload-import {
@@ -961,4 +1109,288 @@ fieldset.amount-row {
   .secondary-action {
     transition: none;
   }
+}
+
+/* Attendee app shell: a bottom tab bar on phones, a floating pill on wider screens. */
+
+main.with-tabbar {
+  padding-bottom: calc(5.5rem + env(safe-area-inset-bottom));
+}
+
+.tabbar {
+  position: fixed;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 20;
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  padding: 0.35rem 0.75rem calc(0.35rem + env(safe-area-inset-bottom));
+  border-top: 1px solid var(--border);
+  background: rgb(255 255 255 / 92%);
+  backdrop-filter: saturate(1.4) blur(12px);
+}
+
+.tabbar a {
+  display: grid;
+  min-height: 3.25rem;
+  place-items: center;
+  gap: 0.15rem;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  font-weight: 650;
+  text-decoration: none;
+}
+
+.tabbar a svg {
+  width: 1.4rem;
+  height: 1.4rem;
+}
+
+.tabbar a[aria-current="page"] {
+  color: var(--brand-strong);
+}
+
+.tabbar a[aria-current="page"] svg {
+  padding: 0.1rem 0.9rem;
+  box-sizing: content-box;
+  border-radius: 999px;
+  background: var(--brand-soft);
+}
+
+@media (min-width: 701px) {
+  .tabbar {
+    right: auto;
+    bottom: 1.25rem;
+    left: 50%;
+    width: 20rem;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    box-shadow: var(--shadow);
+    transform: translateX(-50%);
+  }
+
+  .tabbar a {
+    grid-auto-flow: column;
+    gap: 0.5rem;
+    border-radius: 999px;
+    font-size: 0.9rem;
+  }
+
+  .tabbar a[aria-current="page"] {
+    background: var(--brand-soft);
+  }
+
+  .tabbar a[aria-current="page"] svg {
+    padding: 0;
+    background: none;
+  }
+}
+
+/* Wallet */
+
+.balance-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.balance-card .icon-button {
+  display: grid;
+  width: 2.5rem;
+  min-height: 2.5rem;
+  height: 2.5rem;
+  margin: 0;
+  padding: 0;
+  place-items: center;
+  border-radius: 999px;
+}
+
+a.inline-proof {
+  color: var(--brand-strong);
+  font-weight: 600;
+}
+
+.reserve-readback > span.reserve-title {
+  display: flex;
+  width: auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0;
+  background: none;
+  color: var(--text);
+  font-size: 1rem;
+}
+
+.reserve-title em {
+  padding: 0.2rem 0.6rem;
+  border-radius: 999px;
+  background: var(--brand-soft);
+  color: var(--brand-strong);
+  font-size: 0.75rem;
+  font-style: normal;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.reserve-readback[data-phase="spent"] .reserve-title em,
+.reserve-readback[data-phase="returned"] .reserve-title em,
+.reserve-readback[data-phase="settling"] .reserve-title em {
+  background: var(--surface);
+  color: var(--text-muted);
+}
+
+.reserve-readback[data-phase="due"] .reserve-title em {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+.reserve-readback button {
+  width: 100%;
+  margin: 0.25rem 0 0;
+}
+
+/* Ledger rows: what, when, and the amount aligned right, like a bank statement. */
+
+.ledger li {
+  flex-direction: row;
+  align-items: center;
+}
+
+.ledger li > div:first-child {
+  min-width: 0;
+}
+
+.ledger li strong {
+  overflow-wrap: anywhere;
+}
+
+.ledger-amount {
+  justify-items: end;
+  text-align: right;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.ledger li[data-direction="in"] .ledger-amount strong {
+  color: var(--brand-strong);
+}
+
+.ledger-amount a {
+  color: var(--brand-strong);
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.chip {
+  width: fit-content;
+  justify-self: end;
+  padding: 0.15rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.activity-list .chip[data-tone="ok"] {
+  background: var(--brand-soft);
+  color: var(--brand-strong);
+}
+
+.activity-list .chip[data-tone="wait"] {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+.activity-list .chip[data-tone="muted"] {
+  background: var(--surface);
+  color: var(--text-muted);
+}
+
+/* Pay offline */
+
+.reserve-chips {
+  display: grid;
+  gap: 0.5rem;
+  margin: 1.25rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.reserve-chips li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.75rem 1rem;
+  border: 1px solid rgb(13 148 136 / 30%);
+  border-radius: var(--radius-sm);
+  background: var(--brand-soft);
+}
+
+.reserve-chips span {
+  color: var(--brand-strong);
+  font-size: 0.85rem;
+  font-weight: 600;
+  text-align: right;
+}
+
+.scan-button {
+  min-height: 3.75rem;
+  font-size: 1.15rem;
+}
+
+.empty-state .block-button {
+  margin-top: 0.75rem;
+}
+
+.offline-approval .block-button + .block-button {
+  margin-top: 0.75rem;
+}
+
+.countdown {
+  font-variant-numeric: tabular-nums;
+}
+
+.countdown.urgent {
+  color: var(--danger);
+  font-weight: 700;
+}
+
+.response-qr h2 {
+  margin: 0;
+}
+
+.response-qr .text-button {
+  margin-top: 0.5rem;
+}
+
+/* Home */
+
+.hero-actions {
+  display: grid;
+  max-width: 24rem;
+  gap: 0.75rem;
+  margin-top: 1.5rem;
+}
+
+.hero-actions > .primary-action,
+.hero-actions > .secondary-action {
+  margin: 0;
+}
+
+.staff-links {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 1.25rem;
+  padding: 0.5rem 0.25rem;
+  color: var(--text-subtle);
+  font-size: 0.85rem;
+}
+
+.staff-links a {
+  color: var(--text-muted);
+  font-weight: 600;
 }

@@ -15,13 +15,16 @@ import {
   getAddress,
   type Hex,
   keccak256,
+  parseUnits,
 } from "viem";
+import { friendlyError } from "../../lib/account-display";
 import {
   financialIdempotencyKey,
   type PasskeyIdentity,
   paymentCommand,
   reserveCommand,
 } from "../../lib/financial-client";
+import { explorerTx } from "../../lib/format";
 import {
   activateOfflineChannel,
   createOfflineChannelKey,
@@ -70,16 +73,12 @@ type PendingCheckout = {
   };
 };
 
-function short(value: string) {
-  return `${value.slice(0, 8)}…${value.slice(-6)}`;
-}
-
 async function serviceRequest<T>(
   base: string | undefined,
   path: string,
   init: RequestInit = {},
 ): Promise<T> {
-  if (!base) throw new Error("Required service is not configured.");
+  if (!base) throw new Error("The service is unavailable right now. Try again later.");
   const response = await fetch(`${base}${path}`, {
     ...init,
     cache: "no-store",
@@ -135,7 +134,7 @@ export default function CheckoutPage() {
             setStatus(
               state.state === "CREATED"
                 ? "Verify the order, then bind your passkey account."
-                : "Account bound. The registered cashier terminal must sign the final intent.",
+                : "Signed in. Waiting for the cashier to confirm.",
             );
           }
         } else {
@@ -144,12 +143,14 @@ export default function CheckoutPage() {
             throw new Error("This checkout has expired. Ask the cashier for a new one.");
           if (active) {
             setCheckout(verified);
-            setStatus("Verify the final signed order, then approve it with your passkey.");
+            setStatus("Check the stall and amount, then pay with your passkey.");
           }
         }
       } catch (error) {
         if (active)
-          setStatus(error instanceof Error ? error.message : "The checkout cannot be verified.");
+          setStatus(
+            friendlyError(error, "This payment link is not valid. Ask the stall for a new one."),
+          );
       }
     }
     void load();
@@ -184,7 +185,9 @@ export default function CheckoutPage() {
       });
       const account = getAddress(verified.account);
       if (payer && account !== payer)
-        throw new Error("The authenticated account does not match this checkout.");
+        throw new Error(
+          "This payment belongs to a different account. Sign in with the passkey you used before.",
+        );
       setIdentity({ account, credentialId: assertion.id, sessionToken: verified.sessionToken });
       if (pending) {
         await serviceRequest(
@@ -200,12 +203,12 @@ export default function CheckoutPage() {
           },
         );
         setPending((current) => (current ? { ...current, state: "BOUND" } : current));
-        setStatus("Account bound. Ask the cashier to verify and sign the exact intent.");
+        setStatus("Signed in. Ask the cashier to confirm the payment on their screen.");
       } else {
-        setStatus("Account verified. Approval will ask for your passkey once more.");
+        setStatus("Signed in. Paying will ask for your passkey once more.");
       }
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Account authentication failed.");
+      setStatus(friendlyError(error, "Sign-in failed. Try again."));
     } finally {
       setBusy(false);
     }
@@ -226,18 +229,18 @@ export default function CheckoutPage() {
         setStatus(
           state.state === "CREATED"
             ? "The attendee account is not bound yet."
-            : "Waiting for the registered cashier terminal signature.",
+            : "Waiting for the cashier to confirm.",
         );
       } else {
         const verified = decodeResolvedCheckoutRequest(resolved);
         if (identity && getAddress(verified.intent.payerAccount) !== identity.account)
-          throw new Error("The signed intent belongs to another account.");
+          throw new Error("This payment belongs to a different account.");
         setCheckout(verified);
         setPending(undefined);
-        setStatus("Terminal signature verified. Approve the exact payment with your passkey.");
+        setStatus("The cashier confirmed. Pay with your passkey.");
       }
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Checkout status is unavailable.");
+      setStatus(friendlyError(error, "Could not check the payment. Try again."));
     } finally {
       setBusy(false);
     }
@@ -264,9 +267,9 @@ export default function CheckoutPage() {
         body: JSON.stringify({ kind, calldata }),
       });
       setOperation(result);
-      setStatus("Authorized. Settlement is pending until the network finalizes it.");
+      setStatus("Payment sent. Confirming, this takes a few seconds.");
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Payment authorization failed.");
+      setStatus(friendlyError(error, "The payment did not go through. You were not charged."));
     } finally {
       setBusy(false);
     }
@@ -313,15 +316,15 @@ export default function CheckoutPage() {
             setChannel(finalizedChannel);
             await activateOfflineChannel(channelId);
           }
-          setStatus("Finalized state verified from the indexed chain record.");
+          setStatus("Paid. Your payment is confirmed.");
         } catch {
-          setStatus("Network finalized. The finalized indexer has not exposed the read-back yet.");
+          setStatus("Paid. Your receipt will appear in a moment.");
         }
       } else {
-        setStatus(`Current operation state: ${next.state.toLowerCase()}.`);
+        setStatus("Still confirming. This takes a few seconds.");
       }
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Operation status is unavailable.");
+      setStatus(friendlyError(error, "Could not check the status. Try again."));
     } finally {
       setBusy(false);
     }
@@ -331,12 +334,14 @@ export default function CheckoutPage() {
     if (!checkout || !identity) return;
     setBusy(true);
     try {
-      if (!channelKey) throw new Error("Create this device's offline key first.");
-      const reserveUnits = reserveDraft?.reserveUnits ?? BigInt(reserveAmount);
+      if (!channelKey) throw new Error("Set up offline payments on this phone first.");
+      const reserveUnits =
+        reserveDraft?.reserveUnits ??
+        parseUnits(reserveAmount.trim() || "0", checkout.display.assetDecimals);
       const maximum = BigInt(checkout.reservePolicy.maximumReserveUnits);
       const maxPerVoucher = BigInt(checkout.reservePolicy.maximumPerVoucherUnits);
       if (reserveUnits < 1n || reserveUnits > maximum)
-        throw new Error("Reserve amount is outside the disclosed event limit.");
+        throw new Error("Choose an amount within the limit shown.");
       const signer = getAddress(channelKey.signer);
       const derivedId = keccak256(
         encodeAbiParameters(
@@ -407,9 +412,11 @@ export default function CheckoutPage() {
       });
       setChannelId(derivedId);
       setChannelOperation(result);
-      setStatus("Reserve opening is pending network finality. No offline spend is final yet.");
+      setStatus("Setting the money aside. This takes a few seconds.");
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Reserve creation failed.");
+      setStatus(
+        friendlyError(error, "The money could not be set aside. Your balance is unchanged."),
+      );
     } finally {
       setBusy(false);
     }
@@ -419,9 +426,9 @@ export default function CheckoutPage() {
     setBusy(true);
     try {
       setChannelKey(await createOfflineChannelKey());
-      setStatus("Offline device key created and encrypted in this browser.");
+      setStatus("Offline payments are set up on this phone.");
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Offline key creation failed.");
+      setStatus(friendlyError(error, "Offline payments could not be set up on this phone."));
     } finally {
       setBusy(false);
     }
@@ -441,9 +448,9 @@ export default function CheckoutPage() {
         },
       );
       setChannelOperation(result);
-      setStatus("Eligible reclaim accepted and pending network finality.");
+      setStatus("Returning the unspent money to you. This takes a few seconds.");
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Reserve reclaim was not accepted.");
+      setStatus(friendlyError(error, "The money could not be returned yet. Try again later."));
     } finally {
       setBusy(false);
     }
@@ -453,8 +460,8 @@ export default function CheckoutPage() {
     <main>
       <div className="page-stack checkout-stack">
         <section className="shell checkout-shell">
-          <p className="eyebrow">Attendee checkout</p>
-          <h1>Approve exactly what you see.</h1>
+          <p className="eyebrow">Checkout</p>
+          <h1>Check the amount, then pay.</h1>
           {checkout || pending ? (
             <>
               <div className="receipt-card">
@@ -477,16 +484,16 @@ export default function CheckoutPage() {
               </div>
               {!identity ? (
                 <button type="button" disabled={busy} onClick={signIn}>
-                  {pending ? "Verify and bind my passkey account" : "Verify my passkey account"}
+                  Sign in with passkey to pay
                 </button>
               ) : !checkout ? (
                 <button type="button" disabled={busy} onClick={refreshCheckout}>
-                  Check terminal approval
+                  Check if the cashier confirmed
                 </button>
               ) : !operation ? (
                 <div className="actions">
                   <button type="button" disabled={busy} onClick={() => submitCommand("PAYMENT")}>
-                    Approve exact payment
+                    Pay now
                   </button>
                   <button
                     type="button"
@@ -494,7 +501,7 @@ export default function CheckoutPage() {
                     disabled={busy}
                     onClick={() => submitCommand("CANCELLATION")}
                   >
-                    Cancel this signed intent
+                    Cancel payment
                   </button>
                 </div>
               ) : (
@@ -507,47 +514,52 @@ export default function CheckoutPage() {
               )}
             </>
           ) : (
-            <p className="empty-state">No verified checkout is available.</p>
+            <p className="empty-state">
+              This payment link is not valid or has expired. Ask the stall for a new one.
+            </p>
           )}
           <p role="status">{status}</p>
         </section>
 
         {checkout && identity && payment?.status === "FINALIZED" && (
           <section className="shell checkout-shell reserve-panel">
-            <p className="eyebrow">Optional outage reserve</p>
-            <h2>Prepare a bounded offline balance.</h2>
+            <p className="eyebrow">Optional</p>
+            <h2>Keep paying if the network goes down.</h2>
             <p>
-              This reserve is locked to this vendor terminal and your separate offline device key.
-              Unspent value becomes reclaimable only after the disclosed submission deadline.
+              Set a small amount aside for this stall. You can pay it from this phone with no
+              signal. Whatever you do not spend comes back to your account after the event.
             </p>
             {!channelOperation ? (
               <>
                 {!channelKey ? (
                   <button type="button" disabled={busy} onClick={createDeviceKey}>
-                    Protect an offline key on this device
+                    Set up offline payments on this phone
                   </button>
                 ) : (
                   <div className="device-key-summary">
-                    <span>Device key ready</span>
-                    <code>{short(channelKey.signer)}</code>
+                    <span>Offline payments ready on this phone</span>
                     <small>
-                      This scoped key cannot move funds outside the reserve and is not recoverable
-                      if this browser's protected storage is cleared.
+                      It can only spend the money you set aside here. Clearing this browser's data
+                      removes it.
                     </small>
                   </div>
                 )}
                 <label>
-                  Reserve amount in base units (maximum {checkout.reservePolicy.maximumReserveUnits}
+                  Amount to set aside, in USDC (up to{" "}
+                  {formatUnits(
+                    BigInt(checkout.reservePolicy.maximumReserveUnits),
+                    checkout.display.assetDecimals,
+                  )}
                   )
                   <input
-                    inputMode="numeric"
+                    inputMode="decimal"
                     value={reserveAmount}
                     disabled={Boolean(reserveDraft)}
                     onChange={(event) => setReserveAmount(event.target.value)}
                   />
                 </label>
                 <button type="button" disabled={busy || !channelKey} onClick={openReserve}>
-                  Create bounded reserve
+                  Set money aside
                 </button>
               </>
             ) : (
@@ -560,23 +572,26 @@ export default function CheckoutPage() {
                 />
                 {channel && (
                   <div className="reserve-readback">
-                    <span>{channel.status}</span>
-                    <strong>{channel.remainingUnits} units remaining</strong>
+                    <span>{channel.status === "ACTIVE" ? "Ready" : "Returned"}</span>
+                    <strong>
+                      {formatUnits(BigInt(channel.remainingUnits), checkout.display.assetDecimals)}{" "}
+                      {checkout.display.assetSymbol} left
+                    </strong>
                     <small>
-                      Reclaim eligible{" "}
+                      Unspent money can come back from{" "}
                       {new Date(Number(channel.submitUntil) * 1_000).toLocaleString()}
                     </small>
                     {channel.status === "ACTIVE" &&
                       Date.now() >= Number(channel.submitUntil) * 1_000 && (
                         <button type="button" disabled={busy} onClick={reclaim}>
-                          Reclaim eligible balance
+                          Return unspent money
                         </button>
                       )}
                   </div>
                 )}
                 {channel?.status === "ACTIVE" && (
                   <a className="primary-action" href="/offline">
-                    Open offline wallet
+                    Pay offline
                   </a>
                 )}
               </>
@@ -588,6 +603,12 @@ export default function CheckoutPage() {
   );
 }
 
+/** Operation states in words a payer understands. */
+function statusLabel(state: string) {
+  if (state === "FINALIZED") return "Done";
+  if (state === "FAILED" || state === "REJECTED") return "Did not go through";
+  return "Confirming";
+}
 function OperationCard(input: {
   operation: Operation;
   proof: { transactionHash: Hex; blockNumber: string; blockHash: Hex } | undefined;
@@ -595,20 +616,24 @@ function OperationCard(input: {
   busy: boolean;
 }) {
   return (
-    <section className="operation-card" aria-label="Settlement status">
+    <section className="operation-card" aria-label="Payment status">
       <div>
-        <span>Settlement</span>
-        <strong>{input.operation.state}</strong>
+        <span>Status</span>
+        <strong>{statusLabel(input.operation.state)}</strong>
       </div>
-      {input.operation.transactionHash && <code>{short(input.operation.transactionHash)}</code>}
-      {input.proof && (
-        <small>
-          Finalized in block {input.proof.blockNumber} · {short(input.proof.blockHash)}
-        </small>
+      {input.operation.transactionHash && (
+        <a
+          className="text-button"
+          href={explorerTx(input.operation.transactionHash)}
+          target="_blank"
+          rel="noreferrer"
+        >
+          View receipt
+        </a>
       )}
-      {input.operation.failureCode && <small>Failure: {input.operation.failureCode}</small>}
+      {input.operation.failureCode && <small>It did not go through. You were not charged.</small>}
       <button type="button" disabled={input.busy} onClick={input.onRefresh}>
-        Refresh verified status
+        Check status
       </button>
     </section>
   );

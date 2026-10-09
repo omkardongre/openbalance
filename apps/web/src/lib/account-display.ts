@@ -45,7 +45,36 @@ export function passkeyErrorMessage(error: unknown, fallback: string) {
       return "The service took too long to answer. Try again.";
     if (error.name === "TypeError")
       return "The service could not be reached. Check your connection.";
-    return error.message;
+    return friendlyError(error, fallback);
   }
   return fallback;
+}
+
+/** Known failures, keyed by a fragment of the API error code or library message. */
+const KNOWN_ERRORS: [RegExp, string][] = [
+  [/faucet_account_limit/i, "You have already received the most test money one account can get."],
+  [/faucet_(depleted|daily|budget)/i, "Test money has run out for today. Try again later."],
+  [/rate.?limit|too many|\b429\b/i, "Too many tries in a row. Wait a minute and try again."],
+  [/changed while/i, "Something changed during approval. Scan the stall's code again."],
+  [/already authorized|already stored/i, "This payment was already approved on this phone."],
+  [/receipt does not match/i, "That receipt is not for a payment made on this phone."],
+  [/not finalized and active/i, "This reserve is not ready yet. Try again in a minute."],
+  [/insufficient|exceeds/i, "Not enough money for this. Add funds and try again."],
+  [/expired/i, "This code has expired. Ask the stall to show a new one."],
+  [/session|unauthori[sz]ed|401/i, "Your session ended. Sign in again to continue."],
+];
+
+/** Words a person paying at a stall should never have to read. */
+const TECHNICAL =
+  /\b(rpc|channel|voucher|vault|nonce|payload|signature|signer|sequence|finaliz\w*|indexer|relay\w*|sponsor\w*|deploy\w*|contract|hash|block|identifier|credential|binding|intent|DER|integer|configured|parameters|origin|chain)\b|0x[0-9a-f]|_[a-z]/i;
+
+/**
+ * Turns any thrown error into a sentence a non-technical person can act on. Known failures get a
+ * specific message; anything else that reads like an internal detail falls back to `fallback`.
+ */
+export function friendlyError(error: unknown, fallback: string) {
+  const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  if (!message) return fallback;
+  for (const [pattern, text] of KNOWN_ERRORS) if (pattern.test(message)) return text;
+  return TECHNICAL.test(message) || message.length > 140 ? fallback : message;
 }

@@ -8,48 +8,46 @@ export default function HomePage() {
           <p className="eyebrow">OpenBalance for events</p>
           <h1>Pay exactly. Keep what is yours.</h1>
           <p className="summary">
-            Buy from independent event vendors with a passkey. Optionally reserve a small amount for
-            an outage, then recover whatever was not spent under rules the organizer cannot change.
+            Pay event stalls with a passkey. Set a little aside in case the network drops, and get
+            back whatever you do not spend, under rules the organizer cannot change.
           </p>
-          <div className="actions">
-            <Link className="primary-action" href="/enroll">
+          <div className="hero-actions">
+            <Link className="primary-action block-button" href="/enroll">
               Create an account
             </Link>
-            <Link className="secondary-action" href="/account">
-              Open my account
-            </Link>
-            <Link className="secondary-action" href="/cashier">
-              Open cashier
-            </Link>
-            <Link className="secondary-action" href="/operations">
-              Open operations desk
-            </Link>
-            <Link className="secondary-action" href="/verify">
-              Verify independently
+            <Link className="secondary-action block-button" href="/account">
+              Sign in
             </Link>
           </div>
         </section>
         <section className="feature-grid" aria-label="OpenBalance guarantees">
           <article>
             <p className="feature-number">01</p>
-            <h2>Exact purchase</h2>
-            <p>Approve the vendor and total you see. A payment cannot silently change either.</p>
+            <h2>Pay the exact amount</h2>
+            <p>Approve the stall and total you see. No top-up float, nothing left stranded.</p>
           </article>
           <article>
             <p className="feature-number">02</p>
-            <h2>Bounded outage reserve</h2>
+            <h2>Works without signal</h2>
             <p>
-              Choose the amount and terminal before disconnection. Offline acceptance stays pending.
+              Set a small amount aside for a stall. Pay there by scanning a code, even with no
+              network.
             </p>
           </article>
           <article>
             <p className="feature-number">03</p>
-            <h2>Verifiable settlement</h2>
+            <h2>Unspent money comes back</h2>
             <p>
-              Receipts retain finalized block and transaction references for independent checking.
+              Whatever you do not spend returns to your account after the event. No form, no fee.
             </p>
           </article>
         </section>
+        <nav className="staff-links" aria-label="For stalls and organizers">
+          <span>For stalls and organizers</span>
+          <Link href="/cashier">Cashier</Link>
+          <Link href="/operations">Operations desk</Link>
+          <Link href="/verify">Independent verifier</Link>
+        </nav>
       </div>
     </main>
   );
