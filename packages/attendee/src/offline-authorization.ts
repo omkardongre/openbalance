@@ -1,11 +1,16 @@
 import {
   decodeOfflineVoucher,
+  encodeOfflineVoucher,
+  type OpenPaymentRequest,
   offlineVoucherDigest,
+  openRequestHash,
   paymentRequestHash,
   type ReserveChannelConfig,
+  requestCursor,
   type TerminalPaymentRequest,
   type VoucherReceipt,
   validateReserveChannelConfig,
+  voucherForOpenRequest,
 } from "@openbalance/protocol";
 import { type Address, getAddress, type Hex, isAddress, recoverAddress } from "viem";
 
@@ -241,9 +246,15 @@ export function prepareAttendeeAuthorization(input: {
   };
 }
 
+/** What a terminal receipt must match: the voucher this phone signed and where it sits. */
+export type ReceiptExpectation = Pick<
+  TerminalPaymentRequest,
+  "terminalId" | "channelId" | "paymentId" | "sequence" | "voucher"
+>;
+
 export async function verifyTerminalReceiptForAuthorization(input: {
   state: AttendeeChannelState;
-  request: TerminalPaymentRequest;
+  request: ReceiptExpectation;
   attendeeSignature: Hex;
   receipt: VoucherReceipt;
 }): Promise<void> {
@@ -274,4 +285,157 @@ export async function verifyTerminalReceiptForAuthorization(input: {
   }
   if (getAddress(attendee) !== state.signer || getAddress(terminal) !== state.terminalSigner)
     throw new OfflineAuthorizationRejected("Terminal receipt signature authority does not match");
+}
+
+/** The newest local approval on a reserve, in the form both request versions share. */
+export type TipApproval = {
+  paymentId: Hex;
+  /** The encoded voucher this phone signed for it. */
+  voucher: Hex;
+  /** When the terminal's request for it stopped being answerable. */
+  expiresAt: number;
+  receipt: VoucherReceipt | null;
+};
+
+export type PreparedOpenAuthorization = {
+  requestHash: Hex;
+  voucher: Hex;
+  voucherDigest: Hex;
+  sequence: number;
+  grossUnits: bigint;
+  cumulativeGrossUnits: bigint;
+  supersededPaymentId: Hex | null;
+  nextState: AttendeeChannelState;
+};
+
+/**
+ * Whether this reserve can pay a version 2 request at all, without signing anything: the right
+ * stall, listed by the terminal, open now, and with enough money and sales left. The phone uses it
+ * to offer only reserves that will work.
+ */
+export function canPayOpenRequest(
+  state: AttendeeChannelState,
+  request: OpenPaymentRequest,
+  nowSeconds: number,
+): boolean {
+  const gross = BigInt(request.grossUnits);
+  return (
+    state.status === "ACTIVE" &&
+    sameHex(state.terminalId, request.terminalId) &&
+    requestCursor(request, state.channelId) !== undefined &&
+    nowSeconds >= state.acceptFrom &&
+    nowSeconds < state.acceptUntil &&
+    nowSeconds <= request.expiresAt &&
+    request.acceptedAt >= state.acceptFrom &&
+    request.acceptedAt < state.acceptUntil &&
+    gross <= state.maxPerVoucher &&
+    state.spentUnits + gross <= state.reserveUnits &&
+    state.approvedVoucherCount < state.maxVoucherCount
+  );
+}
+
+/**
+ * Signs a version 2 request from a reserve the customer chose. The phone builds the voucher at
+ * the position the terminal listed for this reserve:
+ * - at this phone's own next position, the normal case;
+ * - one step back, only to replace this phone's newest approval when the terminal never
+ *   countersigned it (no receipt) and that approval's request has expired. The terminal still
+ *   being at that position is the proof it never accepted it. Same bound as version 1: the vault
+ *   settles each position once.
+ * Any other position means the two sides disagree, and nothing is signed.
+ */
+export function prepareOpenAuthorization(input: {
+  state: AttendeeChannelState;
+  request: OpenPaymentRequest;
+  nowSeconds: number;
+  paymentAlreadyAuthorized: boolean;
+  tip?: TipApproval | undefined;
+}): PreparedOpenAuthorization {
+  const { request, nowSeconds } = input;
+  const reject = () => {
+    throw new OfflineAuthorizationRejected(
+      "Offline request is expired, duplicated, or outside the activated channel",
+    );
+  };
+  const base = input.state;
+  if (
+    base.schemaVersion !== 1 ||
+    base.status !== "ACTIVE" ||
+    !Number.isSafeInteger(nowSeconds) ||
+    input.paymentAlreadyAuthorized ||
+    !sameHex(base.terminalId, request.terminalId) ||
+    nowSeconds < base.acceptFrom ||
+    nowSeconds >= base.acceptUntil ||
+    nowSeconds > request.expiresAt ||
+    request.acceptedAt < base.acceptFrom ||
+    request.acceptedAt >= base.acceptUntil
+  )
+    reject();
+  const position = requestCursor(request, input.state.channelId);
+  let state = input.state;
+  let superseded: Hex | null = null;
+  if (position === state.nextSequence - 1) {
+    const tip = input.tip;
+    const tipVoucher = tip ? decodeOfflineVoucher(tip.voucher) : undefined;
+    if (
+      !tip ||
+      !tipVoucher ||
+      tip.receipt !== null ||
+      sameHex(tip.paymentId, request.paymentId) ||
+      !sameHex(tipVoucher.paymentId, tip.paymentId) ||
+      !sameHex(tipVoucher.channelId, state.channelId) ||
+      tipVoucher.sequence !== position ||
+      !sameHex(offlineVoucherDigest(tipVoucher), state.lastVoucherDigest) ||
+      tipVoucher.cumulativeGrossUnits !== state.spentUnits ||
+      state.approvedVoucherCount < 1 ||
+      nowSeconds <= tip.expiresAt
+    ) {
+      throw new OfflineAuthorizationRejected(
+        "This reserve is out of step with the stall's phone. Ask the stall to charge again in a minute.",
+      );
+    }
+    state = {
+      ...state,
+      spentUnits: tipVoucher.cumulativeGrossUnits - tipVoucher.grossUnits,
+      approvedVoucherCount: state.approvedVoucherCount - 1,
+      nextSequence: tipVoucher.sequence,
+      lastVoucherDigest: tipVoucher.previousVoucherDigest,
+    };
+    superseded = tip.paymentId;
+  } else if (position !== state.nextSequence) {
+    throw new OfflineAuthorizationRejected(
+      "This reserve is out of step with the stall's phone. Ask the stall to charge again in a minute.",
+    );
+  }
+  const voucher = voucherForOpenRequest({
+    request,
+    reserve: state,
+    sequence: state.nextSequence,
+    previousVoucherDigest: state.lastVoucherDigest,
+    spentUnits: state.spentUnits,
+  });
+  if (
+    voucher.cumulativeGrossUnits > state.reserveUnits ||
+    voucher.grossUnits > state.maxPerVoucher ||
+    state.approvedVoucherCount >= state.maxVoucherCount
+  )
+    reject();
+  const digest = offlineVoucherDigest(voucher);
+  return {
+    requestHash: openRequestHash(request),
+    voucher: encodeOfflineVoucher(voucher),
+    voucherDigest: digest,
+    sequence: voucher.sequence,
+    grossUnits: voucher.grossUnits,
+    cumulativeGrossUnits: voucher.cumulativeGrossUnits,
+    supersededPaymentId: superseded,
+    nextState: {
+      ...state,
+      revision: input.state.revision + 1,
+      spentUnits: voucher.cumulativeGrossUnits,
+      approvedVoucherCount: state.approvedVoucherCount + 1,
+      nextSequence: state.nextSequence + 1,
+      lastVoucherDigest: digest,
+    },
+  };
 }
