@@ -14,7 +14,12 @@ manifest on the testnet project, and the attendee journey — passkey enrollment
 deployment, sign-in, test funding, reserve channel, voucher settlement, reclaim, refund and vendor
 withdrawal — is proven against those deployed services on chain. On 9 Oct 2026 a full offline sale
 was proven between two real phones: an attendee phone on the web wallet and the Android terminal,
-with the terminal uploading straight to the cloud relayer (no laptop, no CLI). The integration worker
+with the terminal uploading straight to the cloud relayer (no laptop, no CLI). On 11 Oct 2026 the
+payment request moved to version 2 (the customer's phone picks which of its reserves pays), the
+attendee app became installable offline from any page, reserves got a 2-hour spend window (event
+config v2) and the CRE reserve-return workflow started running on a schedule. These are built,
+unit-tested and deployed; a two-phone sale with the version 2 request and the offline app on a phone
+are not yet tested. The integration worker
 is not deployed. The venue relay is optional on-site fallback rather than a required component; see
 the root checklist.
 
@@ -44,8 +49,19 @@ the registered stall terminal (the Android app), so that step is shown in the de
 reserves accept payments for 2 hours and give the stall 30 more minutes to upload, so unspent
 money is returnable 2½ hours after the reserve opens. `/account` lists each offline balance, 5 per
 page from `GET /v1/accounts/me/reserves` (cursor paginated), with when it can be spent and when the
-rest comes back, and offers *Return now* once it is due. Anyone can trigger the return, from
+rest comes back, and offers *Return now* once it is due. The scheduled CRE workflow returns due
+reserves by itself every few minutes while it runs; anyone can also trigger the return, from
 `/account` or with no account at all (see *Reserve return* below).
+
+The terminal's code names only the amount and the stall's reserves it can charge; the customer's
+phone picks one of its own reserves for that stall (the one closing soonest, or *Pay from* when
+several can pay), builds the voucher and signs it. The terminal rebuilds the same voucher from its
+own records before countersigning, so nothing the phone claims about the reserve is trusted.
+
+One visit to any page while online saves the Wallet and *Pay offline* pages on the phone (a service
+worker versioned per build, so each release replaces the saved copy). With no signal the Wallet
+shows *No signal* with a *Pay offline* button instead of the sign-in screen; signing in itself needs
+the server.
 
 The attendee pages and the terminal use plain words only: no addresses, hashes, "channel",
 "voucher" or "testnet" in the main flow. Errors pass through one translator (`friendlyError` in
@@ -377,6 +393,10 @@ window closes (`apps/web/scripts/reclaim-reserve.mjs`).
 
 #### Physical terminal with a headless attendee
 
+> `attendee-sign.mjs` speaks the version 1 request (the terminal picks the reserve). The current
+> Android terminal shows version 2 requests, so this headless path no longer pairs with it; it is
+> kept for the version 1 harness and tests. Use a real phone on `/offline` instead.
+
 To exercise the Android terminal end to end without a second phone, open a reserve for the device
 terminal and keep only its run identifier:
 
@@ -395,7 +415,8 @@ terminal signature against the signer the vault recorded for that channel before
 sponsored `VOUCHER_SETTLE`. Enroll the terminal for this with the QR from
 `node scripts/terminal-cloud-enrollment.mjs` (`secrets/testnet/terminal-cloud-enrollment-qr.png`).
 
-Sales are taken on the terminal's keypad (*Checkout* tab: type the amount, *Charge*); POS orders
+Sales are taken on the terminal's keypad (*Checkout* tab: type the amount, *Charge*; there is no
+reserve to choose, the customer's phone does that); POS orders
 pushed by a connected point of sale are listed under it when there are any. The *Sales* tab filters
 by Pending, Settled and Not paid and loads older sales 25 at a time; the *Terminal* tab lists Open
 and Closed reserves 10 at a time.
@@ -428,8 +449,11 @@ the response QR to `secrets/testnet/attendee-response.png` for the terminal to s
 records each approval before the response is written, so a rescan returns the stored answer rather
 than signing the same sequence twice.
 
-If the terminal does not scan the answer before its request expires, it releases that sequence and
-asks again for a new payment at the same position. The attendee (web wallet and this signer, via
+Version 2: a request does not hold a reserve position. It lists, for each reserve it can charge, the
+position the terminal expects next; an unanswered request simply expires. If the phone approved a
+payment the terminal never countersigned, the next request lists the same position again. Version
+1 (this signer): if the terminal does not scan the answer before its request expires, it releases
+that sequence and asks again for a new payment at the same position. The attendee (web wallet and this signer, via
 `@openbalance/attendee`) re-signs that position only when the earlier approval has no terminal
 receipt, is the channel tip, and has expired; the old approval is kept and marked superseded, and
 its receipt is refused. The vault settles each sequence once, so even a terminal that countersigned
