@@ -42,6 +42,8 @@ function toBaseUnits(value: string, decimals: number): string | undefined {
 
 export default function AccountPage() {
   const { session, signedIn, signedOut } = useSession();
+  /** The reserve whose return is being sent, so only its button shows progress. */
+  const [returning, setReturning] = useState<string>();
   const account = session?.account ?? "";
   const [status, setStatus] = useState("");
   const [tone, setTone] = useState<"info" | "success" | "error">("info");
@@ -171,6 +173,7 @@ export default function AccountPage() {
           setReturns((current) => ({ ...current, [id]: next }));
           if (next.state === "FINALIZED") {
             await Promise.all([loadFirstPages(), loadBalance(session.account)]);
+            report("Returned. The money is back in your balance.", "success");
           }
         } catch {
           // A transient status failure leaves the return in place; the next tick asks again.
@@ -297,7 +300,8 @@ export default function AccountPage() {
   }
 
   async function returnReserve(reserve: ReserveBalance) {
-    setBusy(true);
+    // Only the tapped reserve shows progress; the others stay usable.
+    setReturning(reserve.channelId);
     try {
       // A return needs no session: the vault pays only this account, so the relayer accepts it
       // from anyone and keeps one live return per balance.
@@ -311,7 +315,7 @@ export default function AccountPage() {
     } catch (error) {
       report(friendlyError(error, "The return was not accepted."), "error");
     } finally {
-      setBusy(false);
+      setReturning(undefined);
     }
   }
 
@@ -517,6 +521,7 @@ export default function AccountPage() {
               operations={returns}
               nowSeconds={nowSeconds}
               busy={busy}
+              returning={returning}
               onReturn={returnReserve}
             />
           )}

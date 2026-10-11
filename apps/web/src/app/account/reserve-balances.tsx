@@ -67,6 +67,7 @@ export function ReserveBalances({
   operations,
   nowSeconds,
   busy,
+  returning,
   onReturn,
 }: {
   reserves: ReserveBalance[];
@@ -74,17 +75,26 @@ export function ReserveBalances({
   operations: Record<string, ReturnOperation>;
   nowSeconds: number;
   busy: boolean;
+  returning?: string | undefined;
   onReturn: (reserve: ReserveBalance) => void;
 }) {
-  if (reserves.length === 0)
+  // Only money that still needs the attendee's attention: spendable, closing, or ready to come
+  // back. Returned and fully spent reserves are finished and already listed in Activity.
+  const current = reserves.filter((reserve) => {
+    const kind = reservePhase(reserve, nowSeconds).kind;
+    return kind !== "returned" && kind !== "spent";
+  });
+  if (current.length === 0)
     return (
       <p className="empty-state">
-        Nothing set aside yet. Set aside a small amount above to pay a stall when the network drops.
+        {reserves.length === 0
+          ? "Nothing set aside yet. Set aside a small amount above to pay a stall when the network drops."
+          : "Nothing set aside right now. Past reserves are listed in Activity."}
       </p>
     );
   return (
     <ol className="activity-list">
-      {reserves.map((reserve) => {
+      {current.map((reserve) => {
         const phase = reservePhase(reserve, nowSeconds);
         const operation = operations[reserve.channelId];
         const vendor = vendors.get(reserve.vendorId?.toLowerCase() ?? "") ?? "Stall";
@@ -118,8 +128,15 @@ export function ReserveBalances({
               {phase.kind === "due" && "It can only go back to your account."}
             </small>
             {phase.kind === "due" && (!operation || operation.state === "FAILED") && (
-              <button type="button" disabled={busy} onClick={() => onReturn(reserve)}>
-                Return {amount(reserve.remainingUnits)} now
+              <button
+                type="button"
+                disabled={busy || returning === reserve.channelId}
+                aria-busy={returning === reserve.channelId}
+                onClick={() => onReturn(reserve)}
+              >
+                {returning === reserve.channelId
+                  ? "Returning…"
+                  : `Return ${amount(reserve.remainingUnits)} now`}
               </button>
             )}
             {operation && phase.kind !== "returned" && (

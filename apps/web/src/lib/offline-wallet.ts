@@ -1,14 +1,15 @@
 import {
   type AttendeeChannelState,
   createAttendeeChannelState,
-  prepareAttendeeAuthorization,
+  prepareOpenAuthorization,
   verifyTerminalReceiptForAuthorization,
 } from "@openbalance/attendee";
 import {
   canonicalVoucherReceipt,
   decodeVoucherReceipt,
-  encodeAttendeeResponseQr,
-  paymentRequestHash,
+  encodeChannelResponseQr,
+  type OpenPaymentRequest,
+  openRequestHash,
   type ReserveChannelConfig,
   type TerminalPaymentRequest,
   type VoucherReceipt,
@@ -40,7 +41,12 @@ type StagedChannel = {
 export type StoredAuthorization = {
   paymentId: Hex;
   channelId: Hex;
-  request: TerminalPaymentRequest;
+  /** Version 2 requests (the customer picks the reserve); version 1 on rows from before. */
+  request: TerminalPaymentRequest | OpenPaymentRequest;
+  /** The voucher this phone signed. Version 1 rows carry it inside the request instead. */
+  voucher?: Hex;
+  /** Its position on the reserve. Version 1 rows carry it inside the request instead. */
+  sequence?: number;
   requestHash: Hex;
   attendeeSignature: Hex;
   responseQr: string;
@@ -64,7 +70,20 @@ async function tipAuthorization(
   const rows = await requestResult(
     store.index("byChannel").getAll(channelId) as IDBRequest<StoredAuthorization[]>,
   );
-  return rows.find((row) => !row.supersededBy && row.request.sequence === sequence);
+  return rows.find((row) => !row.supersededBy && authorizationSequence(row) === sequence);
+}
+
+/** The voucher a stored approval signed, for either request version. */
+export function authorizationVoucher(row: StoredAuthorization): Hex {
+  const voucher = row.voucher ?? ("voucher" in row.request ? row.request.voucher : undefined);
+  if (!voucher) throw new Error("Stored approval is missing its voucher.");
+  return voucher;
+}
+
+function authorizationSequence(row: StoredAuthorization): number {
+  const sequence = row.sequence ?? ("sequence" in row.request ? row.request.sequence : undefined);
+  if (sequence === undefined) throw new Error("Stored approval is missing its position.");
+  return sequence;
 }
 
 function requestResult<T>(request: IDBRequest<T>): Promise<T> {
@@ -294,15 +313,23 @@ async function decryptAndSign(database: IDBDatabase, keyId: string, digest: Hex)
   }
 }
 
-export async function authorizeOfflineRequest(input: {
-  request: TerminalPaymentRequest;
+/**
+ * Approves a stall's charge from the reserve the customer chose. Signing happens on this device
+ * with that reserve's own key; the reserve then moves to its next position, and an earlier
+ * approval the terminal never countersigned is marked replaced when the terminal asked again at
+ * its position.
+ */
+export async function authorizeOpenRequest(input: {
+  request: OpenPaymentRequest;
+  channelId: Hex;
   nowSeconds?: number;
 }): Promise<StoredAuthorization> {
   const database = await openDatabase();
   try {
+    const requestHash = openRequestHash(input.request);
     const read = database.transaction(["channels", "authorizations"], "readonly");
     const channel = await requestResult(
-      read.objectStore("channels").get(input.request.channelId) as IDBRequest<StagedChannel>,
+      read.objectStore("channels").get(input.channelId) as IDBRequest<StagedChannel>,
     );
     const duplicate = await requestResult(
       read.objectStore("authorizations").get(input.request.paymentId) as IDBRequest<
@@ -312,24 +339,31 @@ export async function authorizeOfflineRequest(input: {
     const tip = channel
       ? await tipAuthorization(
           read.objectStore("authorizations"),
-          input.request.channelId,
+          input.channelId,
           channel.state.nextSequence - 1,
         )
       : undefined;
     await transactionDone(read);
-    if (channel?.status !== "ACTIVE")
-      throw new Error("This channel is not finalized and active on this device.");
+    if (channel?.status !== "ACTIVE") throw new Error("This reserve is not active on this device.");
     if (duplicate) {
-      if (duplicate.requestHash !== paymentRequestHash(input.request))
+      // A rescan of the same charge shows the same answer; it is never signed twice.
+      if (duplicate.requestHash !== requestHash)
         throw new Error("Payment identifier was already authorized for another request.");
       return duplicate;
     }
-    const prepared = prepareAttendeeAuthorization({
+    const prepared = prepareOpenAuthorization({
       state: channel.state,
       request: input.request,
       nowSeconds: input.nowSeconds ?? Math.floor(Date.now() / 1_000),
       paymentAlreadyAuthorized: false,
-      tip,
+      tip: tip
+        ? {
+            paymentId: tip.paymentId,
+            voucher: authorizationVoucher(tip),
+            expiresAt: tip.request.expiresAt,
+            receipt: tip.receipt,
+          }
+        : undefined,
     });
     const attendeeSignature = await decryptAndSign(
       database,
@@ -342,17 +376,20 @@ export async function authorizeOfflineRequest(input: {
     });
     if (getAddress(recovered) !== getAddress(channel.state.signer))
       throw new Error("Offline key integrity check failed.");
-    const responseQr = encodeAttendeeResponseQr({
-      version: 1,
+    const responseQr = encodeChannelResponseQr({
+      version: 2,
       kind: "offline-voucher-response",
-      requestHash: prepared.requestHash,
+      requestHash,
+      channelId: input.channelId,
       attendeeSignature,
     });
     const authorization: StoredAuthorization = {
       paymentId: input.request.paymentId,
-      channelId: input.request.channelId,
+      channelId: input.channelId,
       request: input.request,
-      requestHash: prepared.requestHash,
+      voucher: prepared.voucher,
+      sequence: prepared.sequence,
+      requestHash,
       attendeeSignature,
       responseQr,
       grossUnits: prepared.grossUnits,
@@ -363,16 +400,14 @@ export async function authorizeOfflineRequest(input: {
 
     const write = database.transaction(["channels", "authorizations"], "readwrite");
     const channels = write.objectStore("channels");
-    const current = await requestResult(
-      channels.get(input.request.channelId) as IDBRequest<StagedChannel>,
-    );
+    const current = await requestResult(channels.get(input.channelId) as IDBRequest<StagedChannel>);
     if (current?.status !== "ACTIVE" || current.state.revision !== channel.state.revision) {
       write.abort();
-      throw new Error("Channel changed while approval was in progress. Scan the terminal again.");
+      throw new Error("Reserve changed while approval was in progress. Scan the stall again.");
     }
     const authorizations = write.objectStore("authorizations");
     if (prepared.supersededPaymentId) {
-      // The revision check above already pins the channel; this pins the replaced approval, so a
+      // The revision check above already pins the reserve; this pins the replaced approval, so a
       // receipt stored for it in the meantime can never be silently overwritten.
       const replaced = await requestResult(
         authorizations.get(prepared.supersededPaymentId) as IDBRequest<
@@ -381,7 +416,7 @@ export async function authorizeOfflineRequest(input: {
       );
       if (!replaced || replaced.receipt || replaced.supersededBy) {
         write.abort();
-        throw new Error("Channel changed while approval was in progress. Scan the terminal again.");
+        throw new Error("Reserve changed while approval was in progress. Scan the stall again.");
       }
       authorizations.put({
         ...replaced,
@@ -422,14 +457,20 @@ export async function storeTerminalReceipt(payload: string): Promise<StoredAutho
       channel?.status !== "ACTIVE" ||
       receipt.channelId !== authorization.channelId ||
       receipt.terminalId !== authorization.request.terminalId ||
-      receipt.sequence !== authorization.request.sequence ||
-      receipt.voucher !== authorization.request.voucher ||
+      receipt.sequence !== authorizationSequence(authorization) ||
+      receipt.voucher !== authorizationVoucher(authorization) ||
       receipt.attendeeSignature !== authorization.attendeeSignature
     )
       throw new Error("Terminal receipt does not match a locally authorized purchase.");
     await verifyTerminalReceiptForAuthorization({
       state: channel.state,
-      request: authorization.request,
+      request: {
+        terminalId: authorization.request.terminalId,
+        channelId: authorization.channelId,
+        paymentId: authorization.paymentId,
+        sequence: authorizationSequence(authorization),
+        voucher: authorizationVoucher(authorization),
+      },
       attendeeSignature: authorization.attendeeSignature,
       receipt,
     });

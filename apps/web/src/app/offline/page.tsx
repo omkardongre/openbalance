@@ -1,10 +1,10 @@
 "use client";
 
-import type { AttendeeChannelState } from "@openbalance/attendee";
+import { type AttendeeChannelState, canPayOpenRequest } from "@openbalance/attendee";
 import {
-  decodeOfflineVoucher,
-  decodePaymentRequestQr,
-  type TerminalPaymentRequest,
+  cursorKey,
+  decodeOpenPaymentRequestQr,
+  type OpenPaymentRequest,
 } from "@openbalance/protocol";
 import Image from "next/image";
 import Link from "next/link";
@@ -14,7 +14,7 @@ import { friendlyError } from "../../lib/account-display";
 import { money, when } from "../../lib/format";
 import { readSettlementStatuses, type SettlementStatus } from "../../lib/offline-settlement";
 import {
-  authorizeOfflineRequest,
+  authorizeOpenRequest,
   listOfflineAuthorizations,
   listOfflineChannels,
   type StoredAuthorization,
@@ -66,7 +66,11 @@ export default function OfflineWalletPage() {
   const [channels, setChannels] = useState<AttendeeChannelState[]>([]);
   const [authorizations, setAuthorizations] = useState<StoredAuthorization[]>([]);
   const [loaded, setLoaded] = useState(false);
-  const [request, setRequest] = useState<TerminalPaymentRequest>();
+  const [request, setRequest] = useState<OpenPaymentRequest>();
+  /** The reserve the customer pays from; defaults to the one that stops taking payments first. */
+  const [chosen, setChosen] = useState<string>();
+  /** The reserve an approval was signed from, kept so the answer stays on screen afterwards. */
+  const [approvedFrom, setApprovedFrom] = useState<AttendeeChannelState>();
   const [responseImage, setResponseImage] = useState<string>();
   const [rawPayload, setRawPayload] = useState("");
   const [pasteMode, setPasteMode] = useState<"request" | "receipt">("request");
@@ -158,8 +162,16 @@ export default function OfflineWalletPage() {
     [channels],
   );
   const usable = channels.filter((channel) => spendable(channel, nowSeconds));
-  const channel = request ? byChannel.get(request.channelId.toLowerCase()) : undefined;
-  const voucher = request ? decodeOfflineVoucher(request.voucher) : undefined;
+  // Reserves that can pay this charge, soonest-closing first so money about to stop being
+  // spendable is used before money that stays spendable longer.
+  const payable = request
+    ? channels
+        .filter((item) => canPayOpenRequest(item, request, nowSeconds))
+        .sort((left, right) => left.acceptUntil - right.acceptUntil)
+    : [];
+  const channel =
+    approvedFrom ?? payable.find((item) => item.channelId.toLowerCase() === chosen) ?? payable[0];
+  const gross = request ? BigInt(request.grossUnits) : undefined;
   const history = useMemo(
     () => [...authorizations].sort((left, right) => right.createdAt - left.createdAt),
     [authorizations],
@@ -167,11 +179,23 @@ export default function OfflineWalletPage() {
 
   async function consumePayload(payload: string, mode: "request" | "receipt") {
     if (mode === "request") {
-      const decoded = decodePaymentRequestQr(payload.trim());
-      if (!byChannel.has(decoded.channelId.toLowerCase()))
+      const decoded = decodeOpenPaymentRequestQr(payload.trim());
+      const now = Math.floor(Date.now() / 1_000);
+      const forStall = channels.filter(
+        (item) =>
+          item.terminalId.toLowerCase() === decoded.terminalId.toLowerCase() &&
+          decoded.cursors.some((entry) => entry.startsWith(`${cursorKey(item.channelId)}:`)),
+      );
+      if (forStall.length === 0)
         throw new Error(
           "This stall has no reserve from you on this phone. Set one aside in your wallet first.",
         );
+      if (!forStall.some((item) => canPayOpenRequest(item, decoded, now)))
+        throw new Error(
+          "Your reserve for this stall cannot cover this amount right now. Pay another way or ask for a smaller amount.",
+        );
+      setChosen(undefined);
+      setApprovedFrom(undefined);
       setRequest(decoded);
       setResponseImage(undefined);
       report("");
@@ -211,7 +235,8 @@ export default function OfflineWalletPage() {
     if (!request || !channel) return;
     setBusy(true);
     try {
-      const authorization = await authorizeOfflineRequest({ request });
+      const authorization = await authorizeOpenRequest({ request, channelId: channel.channelId });
+      setApprovedFrom(channel);
       const image = await QRCode.toDataURL(authorization.responseQr, {
         errorCorrectionLevel: "M",
         margin: 2,
@@ -353,17 +378,17 @@ export default function OfflineWalletPage() {
           )}
         </section>
 
-        {request && channel && voucher && asset && (
+        {request && channel && gross !== undefined && asset && (
           <section ref={approval} className="shell narrow checkout-shell offline-approval">
             {!responseImage ? (
               <>
                 <p className="eyebrow">Check and approve</p>
                 <div className="receipt-card">
                   <span>{channel.display.vendorName}</span>
-                  <strong>{money(voucher.grossUnits, asset)}</strong>
+                  <strong>{money(gross, asset)}</strong>
                   <small>
                     Left in this reserve after:{" "}
-                    {money(channel.reserveUnits - voucher.cumulativeGrossUnits, asset)}
+                    {money(channel.reserveUnits - channel.spentUnits - gross, asset)}
                   </small>
                   <small className={secondsLeft <= 30 ? "countdown urgent" : "countdown"}>
                     {secondsLeft > 0
@@ -371,13 +396,33 @@ export default function OfflineWalletPage() {
                       : "This request expired. Ask the stall to charge again."}
                   </small>
                 </div>
+                {payable.length > 1 && (
+                  <label className="reserve-choice">
+                    Pay from
+                    <select
+                      value={channel.channelId.toLowerCase()}
+                      disabled={busy}
+                      onChange={(event) => setChosen(event.target.value)}
+                    >
+                      {payable.map((item) => (
+                        <option key={item.channelId} value={item.channelId.toLowerCase()}>
+                          {money(item.reserveUnits - item.spentUnits, assetOf(item))} left · until{" "}
+                          {new Date(item.acceptUntil * 1_000).toLocaleTimeString([], {
+                            hour: "2-digit",
+                            minute: "2-digit",
+                          })}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                )}
                 <button
                   type="button"
                   className="block-button"
                   disabled={busy || secondsLeft <= 0}
                   onClick={approve}
                 >
-                  {busy ? "Approving…" : `Approve ${money(voucher.grossUnits, asset)}`}
+                  {busy ? "Approving…" : `Approve ${money(gross, asset)}`}
                 </button>
                 <button
                   type="button"
@@ -393,8 +438,7 @@ export default function OfflineWalletPage() {
                 <p className="eyebrow">Approved</p>
                 <h2>Show this to the stall</h2>
                 <p className="muted">
-                  {channel.display.vendorName} scans it to finish the{" "}
-                  {money(voucher.grossUnits, asset)} payment.
+                  {channel.display.vendorName} scans it to finish the {money(gross, asset)} payment.
                 </p>
                 <Image
                   src={responseImage}
