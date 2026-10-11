@@ -205,11 +205,16 @@ block, signed report, EVM write.
 |---|---|
 | `ReclaimTrigger` (Sourcify full match) | [`0x593c5Cf0250CFf0942D344B9F943AB4A4267f015`](https://testnet.monadexplorer.com/address/0x593c5Cf0250CFf0942D344B9F943AB4A4267f015) |
 | Broadcast run (6 Oct 2026): 1 due reserve listed, verified, returned (1 USDC) | [`0x0cb104ee…0d65`](https://testnet.monadexplorer.com/tx/0x0cb104ee1ad2a145f0e744ac27e477897e14a274ed038b7618a0a1a6f21c0d65) |
+| Scheduled run (11 Oct 2026): 6 due reserves listed, verified, returned in one report | [`0x3ee077c9…e280`](https://testnet.monadexplorer.com/tx/0x3ee077c991ce03c7413ac54105631596296cf131726b8e5ff8676ccab5dde280) |
 | Forwarder | Simulation forwarder `0xB9F79d863261869B234c481D1f9A7af84AeAd192` |
 
 Status: the workflow runs with `cre workflow simulate --broadcast`, which signs and broadcasts real
-transactions on Monad testnet. It is not deployed on a Chainlink DON, which needs commercial terms
-from Chainlink. The trigger binds one CRE forwarder immutably, so there is one per forwarder:
+transactions on Monad testnet, every 3 minutes on a schedule, so unspent reserves come back without
+anyone tapping *Return now* (the button stays as a fallback). It runs on our machine, not on a
+Chainlink DON: deploying needs commercial terms from Chainlink, and simulation is the path they
+point hackathon projects to. A simulated cron trigger fires once per CLI run, so the schedule is a
+systemd timer (`scripts/cre-schedule.mjs`); it needs this machine on and logged in to CRE. A run
+with nothing due sends no transaction. The trigger binds one CRE forwarder immutably, so there is one per forwarder:
 
 ```bash
 pnpm testnet:reclaim-trigger                                    # simulation forwarder (default)
@@ -230,6 +235,8 @@ Running the workflow needs the CRE CLI (`~/.cre/bin/cre`, logged in with `cre lo
 node scripts/cre-reserve-return.mjs signer            # create/show the broadcast key (0600, gitignored)
 node scripts/cre-reserve-return.mjs fund 0.5          # top it up from the deployer keystore
 node scripts/cre-reserve-return.mjs simulate          # one cron run, broadcast through the simulation forwarder
+node scripts/cre-schedule.mjs install                 # run it every 3 min (systemd user timer)
+node scripts/cre-schedule.mjs status                  # timer state and recent results
 ```
 
 `simulate` hands the broadcast key and the RPC URL to the CLI only through its environment, so
