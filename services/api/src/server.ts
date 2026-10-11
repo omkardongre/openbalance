@@ -23,6 +23,8 @@ import { OperationsAccessService } from "./operations-access.js";
 import { OperationsReportingService } from "./operations-reporting.js";
 import { OrganizerConfigurationService } from "./organizer-configuration.js";
 import { ViemOrganizerConfigurationChain } from "./organizer-configuration-chain.js";
+import { StallOnboardingService } from "./stall-onboarding.js";
+import { ViemStallChain } from "./stall-onboarding-chain.js";
 import { loadTimeAuthority } from "./time-authority.js";
 
 const environment = loadEnvironment(process.env);
@@ -79,19 +81,32 @@ if (pool && environment.PROJECTION_READS_ENABLED) {
     ]);
     if (capabilityKey.length < 32 || capabilityKey.length > 64)
       throw new Error("Checkout capability key must contain 32 to 64 raw bytes");
+    const stalls = new StallOnboardingService(
+      pool,
+      checkoutManifest,
+      new ViemStallChain(environment.ACCOUNT_RPC_URL as string),
+    );
     const checkout = new CheckoutService(
       pool,
       checkoutManifest,
       new ViemCheckoutPolicyVerifier(environment.ACCOUNT_RPC_URL as string),
       capabilityKey,
+      undefined,
+      stalls,
+      environment.CHECKOUT_UNLISTED_VENDOR_IDS,
     );
     const organizerConfiguration = new OrganizerConfigurationService(
       pool,
       checkoutManifest,
       new ViemOrganizerConfigurationChain(environment.ACCOUNT_RPC_URL as string),
     );
-    await Promise.all([checkout.assertReady(), organizerConfiguration.assertReady()]);
+    await Promise.all([
+      checkout.assertReady(),
+      organizerConfiguration.assertReady(),
+      stalls.assertReady(),
+    ]);
     control.checkout = checkout;
+    control.stalls = stalls;
     control.organizerConfiguration = organizerConfiguration;
   }
 }

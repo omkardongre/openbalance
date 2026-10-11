@@ -14,6 +14,8 @@ const migrations = [
   "008_terminal_order_import",
   "009_faucet_grants",
   "010_discoverable_sign_in",
+  "011_stall_onboarding",
+  "012_stall_owner_pairing",
 ] as const;
 
 const environment = z

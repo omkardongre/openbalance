@@ -15,6 +15,15 @@ const environmentSchema = z.object({
     .transform((value) => value === "true"),
   CHECKOUT_MANIFEST_PATH: z.string().min(1).optional(),
   CHECKOUT_CAPABILITY_KEY_PATH: z.string().min(1).optional(),
+  // Stalls kept for history (old reserves, sales, the web cashier) but no longer offered to
+  // attendees or shown to the organizer. Comma-separated vendor ids.
+  CHECKOUT_UNLISTED_VENDOR_IDS: z
+    .string()
+    .regex(/^(0x[0-9a-fA-F]{64})(,0x[0-9a-fA-F]{64})*$/)
+    .optional()
+    .transform((value) =>
+      value ? value.split(",").map((id) => id.toLowerCase() as `0x${string}`) : [],
+    ),
   FAUCET_RPC_URL: z.string().url().optional(),
   FAUCET_CHAIN_ID: z.coerce.number().int().positive().optional(),
   FAUCET_CHAIN_NAME: z

@@ -518,6 +518,10 @@ bundle for provider hostnames afterwards; intent is not evidence.
 Rate limits are per client. Cloud Run's front end connects from a link-local address and appends
 the client to `X-Forwarded-For`, so the API and relayer set Fastify `trustProxy` to `169.254.0.0/16`
 only. A request that reaches the process from any other peer is keyed on its socket address.
+The API's default is 20 requests per minute per client. Signed-in operator and terminal routes
+(stall list, phone check-in, configuration confirmations) each have their own 120 per minute
+budget, because several devices behind one venue IP poll them; invite links allow 20 per minute.
+Clients honour `Retry-After` and back off with jitter instead of failing a sent transaction.
 
 Runtime secret material is delivered as files at `/run/secrets/<name>/<name>` (mode 0400), matching
 the file paths the services already accept; each identity is granted access only to the secrets its

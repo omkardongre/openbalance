@@ -19,10 +19,17 @@ import {
 } from "viem";
 import type { AccountIdentity } from "./account-access.js";
 import type { CheckoutPolicyVerifier } from "./checkout-chain.js";
-import type { CheckoutEventPolicy, CheckoutManifest } from "./checkout-manifest.js";
+import type {
+  CheckoutEventPolicy,
+  CheckoutManifest,
+  CheckoutVendorPolicy,
+} from "./checkout-manifest.js";
 import type { OperationsIdentity } from "./operations-access.js";
+import type { StallDirectory } from "./stall-onboarding.js";
 
 export class CheckoutConflict extends Error {}
+/** A paired terminal proved its key, but the organizer has not registered it for the stall yet. */
+export class CheckoutTerminalPending extends Error {}
 export class CheckoutNotFound extends Error {}
 export class CheckoutRejected extends Error {}
 
@@ -102,6 +109,7 @@ function publicOrder(row: OrderRow) {
 export class CheckoutService {
   readonly #events: CheckoutEventPolicy[];
   readonly #chainId: number;
+  readonly #unlisted: Set<string>;
 
   constructor(
     private readonly pool: Pool,
@@ -109,7 +117,10 @@ export class CheckoutService {
     private readonly verifier: CheckoutPolicyVerifier,
     private readonly capabilityKey: Buffer,
     private readonly now: () => Date = () => new Date(),
+    private readonly stalls?: StallDirectory,
+    unlistedVendorIds: readonly Hex[] = [],
   ) {
+    this.#unlisted = new Set(unlistedVendorIds.map((id) => id.toLowerCase()));
     if (capabilityKey.length < 32) throw new Error("Checkout capability key is too short");
     this.#events = manifest.events;
     this.#chainId = manifest.chainId;
@@ -124,8 +135,8 @@ export class CheckoutService {
       throw new Error("Checkout migration is not installed");
   }
 
-  policy(identity: OperationsIdentity) {
-    const { event, vendor } = this.vendorPolicy(identity);
+  async policy(identity: OperationsIdentity) {
+    const { event, vendor } = await this.vendorPolicy(identity);
     return {
       chainId: this.#chainId,
       eventId: event.eventId,
@@ -146,7 +157,9 @@ export class CheckoutService {
    * terminal scope. The Android client independently verifies every channel against its RPC.
    */
   async beginTerminalProvisioning(identity: OperationsIdentity) {
-    const { event, vendor } = this.vendorPolicy(identity);
+    // A stall whose terminal is not registered yet still gets a challenge: answering it is how the
+    // device proves which key the organizer should register.
+    const { event, vendor } = await this.vendorPolicy(identity, true);
     const challenge = randomBytes(32).toString("base64url");
     await this.pool.query(
       `DELETE FROM terminal_provisioning_challenges WHERE challenge_hash IN (
@@ -176,7 +189,7 @@ export class CheckoutService {
   }
 
   async terminalProvisioning(identity: OperationsIdentity, challenge: string, signature: Hex) {
-    const { event, vendor } = this.vendorPolicy(identity);
+    const { event, vendor, live } = await this.vendorPolicy(identity, true);
     if (!provisioningChallengePattern.test(challenge) || !signaturePattern.test(signature))
       throw new CheckoutRejected("Terminal proof is malformed");
     const challengeBytes = Buffer.from(challenge, "base64url");
@@ -205,7 +218,19 @@ export class CheckoutService {
     } catch {
       throw new CheckoutRejected("Terminal proof is invalid");
     }
+    if (!live) {
+      // Proof of possession for pairing: remember the key so the organizer can register it.
+      await this.stalls?.recordTerminalSigner(
+        identity.streamId,
+        event.eventId,
+        vendor.vendorId,
+        signer,
+      );
+      throw new CheckoutTerminalPending();
+    }
     if (signer !== vendor.terminal.signer) throw new CheckoutRejected("Terminal proof is invalid");
+    // This phone is the stall's terminal again (it may have served another stall in between).
+    await this.stalls?.recordTerminalSeen(identity.streamId, event.eventId, vendor.vendorId);
     const db = await this.pool.connect();
     try {
       await db.query("BEGIN ISOLATION LEVEL REPEATABLE READ");
@@ -338,7 +363,7 @@ export class CheckoutService {
       input.grossUnits >= 1n << 256n
     )
       throw new CheckoutRejected();
-    const { event, vendor } = this.vendorPolicy(identity);
+    const { event, vendor } = await this.vendorPolicy(identity);
     const orderRefHash = orderReferenceHash(input.orderReference, input.orderVersion);
     const display: CheckoutDisplay = {
       vendorName: vendor.vendorName,
@@ -464,7 +489,7 @@ export class CheckoutService {
         throw new CheckoutConflict();
       return publicOrder(current);
     }
-    const { event, vendor } = this.rowPolicy(current);
+    const { event, vendor } = await this.rowPolicy(current);
     const now = Math.floor(this.now().getTime() / 1_000);
     const paymentId = keccak256(
       encodeAbiParameters(
@@ -577,7 +602,7 @@ export class CheckoutService {
       const row = result.rows[0];
       if (!row) throw new CheckoutNotFound();
       if (!row.encoded_intent || row.state === "CREATED") throw new CheckoutConflict();
-      const { vendor } = this.rowPolicy(row);
+      const { vendor } = await this.rowPolicy(row);
       const signer = await recoverAddress({
         hash: paymentIntentDigest(decodePaymentIntent(row.encoded_intent)),
         signature: terminalSignature,
@@ -637,11 +662,14 @@ export class CheckoutService {
    * the terminal signer and payout destinations from the registry when the reserve opens, so a
    * wrong value here can only make the open revert, never redirect money.
    */
-  reserveTerms() {
+  async reserveTerms() {
+    const events = await Promise.all(
+      this.#events.map(async (event) => ({ event, vendors: await this.liveVendors(event) })),
+    );
     return {
       schemaVersion: 1 as const,
       chainId: this.#chainId,
-      events: this.#events.map((event) => ({
+      events: events.map(({ event, vendors }) => ({
         eventId: event.eventId,
         vault: event.vault,
         asset: event.asset,
@@ -650,9 +678,11 @@ export class CheckoutService {
         configVersion: event.configVersion.toString(),
         organizerFeeBps: event.organizerFeeBps,
         platformFeeBps: event.platformFeeBps,
-        vendors: event.vendors.map((vendor) => ({
+        vendors: vendors.map((vendor) => ({
           vendorId: vendor.vendorId,
           vendorName: vendor.vendorName,
+          // Unlisted stalls stay in the listing only so history can still name them.
+          listed: !this.#unlisted.has(vendor.vendorId.toLowerCase()),
           destinationVersion: vendor.destinationVersion.toString(),
           terminal: {
             instanceId: vendor.terminal.instanceId,
@@ -670,28 +700,45 @@ export class CheckoutService {
       })),
     };
   }
-  private vendorPolicy(identity: OperationsIdentity) {
-    const event = this.#events.find(
-      (candidate) =>
-        candidate.streamId === identity.streamId &&
-        candidate.eventId === identity.eventId.toLowerCase(),
-    );
-    const vendor = event?.vendors.find(
-      (candidate) => candidate.vendorId === identity.vendorId?.toLowerCase(),
-    );
-    if (!event || !vendor) throw new CheckoutRejected();
-    return { event, vendor };
+  /** Manifest stalls plus onboarded stalls whose terminal is registered on chain. */
+  private async liveVendors(event: CheckoutEventPolicy): Promise<CheckoutVendorPolicy[]> {
+    if (!this.stalls) return event.vendors;
+    const onboarded = await this.stalls.vendors(event.streamId, event.eventId);
+    const known = new Set(event.vendors.map((vendor) => vendor.vendorId));
+    return [
+      ...event.vendors,
+      ...onboarded
+        // A stall whose phone moved to another stall has nobody to take payments: not offered.
+        .filter((stall) => stall.live && !stall.moved && !known.has(stall.vendor.vendorId))
+        .map((stall) => stall.vendor),
+    ];
   }
 
-  private rowPolicy(row: OrderRow) {
+  /**
+   * Resolves the vendor behind a credential or order. `pairing` admits an onboarded stall that is
+   * approved but has no registered terminal yet; it is reported as not live and must never sign.
+   */
+  private async findVendor(streamId: string, eventId: Hex, vendorId: Hex | null, pairing = false) {
     const event = this.#events.find(
-      (candidate) =>
-        candidate.streamId === row.stream_id && candidate.eventId === row.event_id.toLowerCase(),
+      (candidate) => candidate.streamId === streamId && candidate.eventId === eventId.toLowerCase(),
     );
-    const vendor = event?.vendors.find(
-      (candidate) => candidate.vendorId === row.vendor_id.toLowerCase(),
+    if (!event || !vendorId) throw new CheckoutRejected();
+    const fixed = event.vendors.find((candidate) => candidate.vendorId === vendorId.toLowerCase());
+    if (fixed) return { event, vendor: fixed, live: true };
+    const stall = (await this.stalls?.vendors(streamId, event.eventId))?.find(
+      (candidate) => candidate.vendor.vendorId === vendorId.toLowerCase(),
     );
-    if (!event || !vendor || vendor.terminal.instanceId !== row.terminal_instance_id.toLowerCase())
+    if (!stall || (!stall.live && !pairing)) throw new CheckoutRejected();
+    return { event, vendor: stall.vendor, live: stall.live };
+  }
+
+  private vendorPolicy(identity: OperationsIdentity, pairing = false) {
+    return this.findVendor(identity.streamId, identity.eventId, identity.vendorId, pairing);
+  }
+
+  private async rowPolicy(row: OrderRow) {
+    const { event, vendor } = await this.findVendor(row.stream_id, row.event_id, row.vendor_id);
+    if (vendor.terminal.instanceId !== row.terminal_instance_id.toLowerCase())
       throw new CheckoutRejected();
     return { event, vendor };
   }

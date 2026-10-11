@@ -10,6 +10,7 @@ import {
   CheckoutNotFound,
   CheckoutRejected,
   type CheckoutService,
+  CheckoutTerminalPending,
 } from "./checkout.js";
 import { DeploymentMismatch } from "./deployment-chain.js";
 import type { DeploymentService } from "./deployments.js";
@@ -41,6 +42,12 @@ import {
   type OrganizerConfigurationService,
 } from "./organizer-configuration.js";
 import { OrganizerConfigurationMismatch } from "./organizer-configuration-chain.js";
+import {
+  StallConflict,
+  StallNotFound,
+  type StallOnboardingService,
+  StallRejected,
+} from "./stall-onboarding.js";
 import type { TimeAuthority } from "./time-authority.js";
 
 export type OperationsControl = {
@@ -49,6 +56,7 @@ export type OperationsControl = {
   incidents: IncidentService;
   checkout?: CheckoutService;
   organizerConfiguration?: OrganizerConfigurationService;
+  stalls?: StallOnboardingService;
 };
 
 export async function buildApp(
@@ -73,6 +81,10 @@ export async function buildApp(
     origin: origin ?? false,
   });
   await app.register(rateLimit, { max: 20, timeWindow: "1 minute" });
+  // Signed-in operator and terminal routes are polled (stall list, phone check-in, transaction
+  // confirmation) by several devices behind one venue IP, and every call already needs a valid
+  // credential. Each route gets its own, larger per-IP budget so polling never starves the rest.
+  const operatorRate = { config: { rateLimit: { max: 120, timeWindow: "1 minute" } } };
   await attachHttpOperations(app, { serviceName: "openbalance-api", readiness });
   if (timeAuthority) {
     // Unauthenticated by design: a terminal refreshes time before it has any other credential in
@@ -453,30 +465,37 @@ export async function buildApp(
         .object({ eventId: bytes32, operationId: z.string().uuid() })
         .strict();
 
-      app.post("/v1/events/:eventId/configuration-operations", async (request, reply) => {
-        const params = z.object({ eventId: bytes32 }).strict().safeParse(request.params);
-        const body = command.safeParse(request.body);
-        const idempotencyKey = request.headers["idempotency-key"];
-        if (!params.success || !body.success || typeof idempotencyKey !== "string")
-          return reply.code(400).send({ error: "invalid_configuration_request", retryable: false });
-        try {
-          const identity = await control.access.authenticate(request.headers.authorization);
-          control.access.assertRole(identity, ["ORGANIZER"]);
-          control.access.assertEvent(identity, params.data.eventId as `0x${string}`);
-          const result = await organizerConfiguration.prepare(
-            identity,
-            params.data.eventId as `0x${string}`,
-            body.data as Parameters<OrganizerConfigurationService["prepare"]>[2],
-            idempotencyKey,
-          );
-          return reply.code(result.created ? 201 : 200).send(result);
-        } catch (error) {
-          return operationsError(reply, error);
-        }
-      });
+      app.post(
+        "/v1/events/:eventId/configuration-operations",
+        operatorRate,
+        async (request, reply) => {
+          const params = z.object({ eventId: bytes32 }).strict().safeParse(request.params);
+          const body = command.safeParse(request.body);
+          const idempotencyKey = request.headers["idempotency-key"];
+          if (!params.success || !body.success || typeof idempotencyKey !== "string")
+            return reply
+              .code(400)
+              .send({ error: "invalid_configuration_request", retryable: false });
+          try {
+            const identity = await control.access.authenticate(request.headers.authorization);
+            control.access.assertRole(identity, ["ORGANIZER"]);
+            control.access.assertEvent(identity, params.data.eventId as `0x${string}`);
+            const result = await organizerConfiguration.prepare(
+              identity,
+              params.data.eventId as `0x${string}`,
+              body.data as Parameters<OrganizerConfigurationService["prepare"]>[2],
+              idempotencyKey,
+            );
+            return reply.code(result.created ? 201 : 200).send(result);
+          } catch (error) {
+            return operationsError(reply, error);
+          }
+        },
+      );
 
       app.post(
         "/v1/events/:eventId/configuration-operations/:operationId/confirmations",
+        operatorRate,
         async (request, reply) => {
           const params = operationParams.safeParse(request.params);
           const body = z.object({ transactionHash: bytes32 }).strict().safeParse(request.body);
@@ -504,6 +523,7 @@ export async function buildApp(
 
       app.get(
         "/v1/events/:eventId/configuration-operations/:operationId",
+        operatorRate,
         async (request, reply) => {
           reply.header("Cache-Control", "private, no-store");
           const params = operationParams.safeParse(request.params);
@@ -579,7 +599,7 @@ export async function buildApp(
         }
       });
 
-      app.post("/v1/terminal/provisioning-challenges", async (request, reply) => {
+      app.post("/v1/terminal/provisioning-challenges", operatorRate, async (request, reply) => {
         reply.header("Cache-Control", "private, no-store");
         try {
           const identity = await control.access.authenticate(request.headers.authorization);
@@ -590,7 +610,7 @@ export async function buildApp(
         }
       });
 
-      app.post("/v1/terminal/provisioning", async (request, reply) => {
+      app.post("/v1/terminal/provisioning", operatorRate, async (request, reply) => {
         reply.header("Cache-Control", "private, no-store");
         const parsed = z
           .object({
@@ -612,6 +632,12 @@ export async function buildApp(
             parsed.data.terminalSignature as `0x${string}`,
           );
         } catch (error) {
+          if (error instanceof CheckoutTerminalPending)
+            return reply.code(409).send({
+              error: "terminal_pairing_pending",
+              action: "Ask the organizer to approve this terminal, then refresh.",
+              retryable: true,
+            });
           if (error instanceof CheckoutConflict)
             return reply
               .code(409)
@@ -694,7 +720,155 @@ export async function buildApp(
       });
     }
 
-    app.get("/v1/operations/me", async (request, reply) => {
+    if (control.stalls) {
+      const stalls = control.stalls;
+      const stallParams = z.object({ eventId: bytes32, stallId: z.string().uuid() }).strict();
+      const inviteToken = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
+      const stallError = (reply: FastifyReply, error: unknown) => {
+        if (error instanceof StallRejected)
+          return reply.code(422).send({ error: "stall_request_rejected", retryable: false });
+        if (error instanceof StallNotFound)
+          return reply.code(404).send({ error: "stall_not_found", retryable: false });
+        if (error instanceof StallConflict)
+          return reply.code(409).send({ error: "stall_state_conflict", retryable: false });
+        return operationsError(reply, error);
+      };
+      const organizer = async (authorization: string | undefined, eventId: string) => {
+        const identity = await control.access.authenticate(authorization);
+        control.access.assertRole(identity, ["ORGANIZER"]);
+        control.access.assertEvent(identity, eventId as `0x${string}`);
+        return identity;
+      };
+
+      app.post("/v1/events/:eventId/stalls", operatorRate, async (request, reply) => {
+        reply.header("Cache-Control", "no-store");
+        const params = z.object({ eventId: bytes32 }).strict().safeParse(request.params);
+        const body = z
+          .object({ label: z.string().min(1).max(80) })
+          .strict()
+          .safeParse(request.body);
+        if (!params.success || !body.success)
+          return reply.code(400).send({ error: "invalid_stall_invite", retryable: false });
+        try {
+          const identity = await organizer(request.headers.authorization, params.data.eventId);
+          return reply.code(201).send(await stalls.createInvite(identity, body.data.label));
+        } catch (error) {
+          return stallError(reply, error);
+        }
+      });
+
+      app.get("/v1/events/:eventId/stalls", operatorRate, async (request, reply) => {
+        reply.header("Cache-Control", "private, no-store");
+        const params = z.object({ eventId: bytes32 }).strict().safeParse(request.params);
+        if (!params.success)
+          return reply.code(400).send({ error: "invalid_stall_request", retryable: false });
+        try {
+          const identity = await organizer(request.headers.authorization, params.data.eventId);
+          return await stalls.list(identity);
+        } catch (error) {
+          return stallError(reply, error);
+        }
+      });
+
+      for (const action of ["refresh", "decline", "setup-codes"] as const) {
+        app.post(
+          `/v1/events/:eventId/stalls/:stallId/${action}`,
+          operatorRate,
+          async (request, reply) => {
+            reply.header("Cache-Control", "no-store");
+            const params = stallParams.safeParse(request.params);
+            if (!params.success)
+              return reply.code(400).send({ error: "invalid_stall_request", retryable: false });
+            try {
+              const identity = await organizer(request.headers.authorization, params.data.eventId);
+              if (action === "decline") return await stalls.decline(identity, params.data.stallId);
+              if (action === "setup-codes")
+                return reply
+                  .code(201)
+                  .send(await stalls.issueSetupCode(identity, params.data.stallId));
+              try {
+                return await stalls.refresh(identity, params.data.stallId);
+              } catch (error) {
+                if (
+                  error instanceof StallNotFound ||
+                  error instanceof StallRejected ||
+                  error instanceof OperationsAccessRejected ||
+                  error instanceof OperationsScopeRejected
+                )
+                  throw error;
+                // RPC errors can embed credential-bearing URLs; keep details out of HTTP responses.
+                return reply.code(503).send({ error: "registry_unavailable", retryable: true });
+              }
+            } catch (error) {
+              return stallError(reply, error);
+            }
+          },
+        );
+      }
+
+      // Public, capability-scoped by the single-use invite secret. Sent in the body, never the
+      // URL, so it stays out of access logs; the web page keeps it in the URL fragment.
+      const inviteRate = { rateLimit: { max: 20, timeWindow: "1 minute" } };
+      app.post("/v1/stall-invites/lookup", { config: inviteRate }, async (request, reply) => {
+        reply.header("Cache-Control", "no-store");
+        const body = z.object({ token: inviteToken }).strict().safeParse(request.body);
+        if (!body.success)
+          return reply.code(404).send({ error: "stall_invite_not_found", retryable: false });
+        try {
+          return await stalls.lookupInvite(body.data.token);
+        } catch (error) {
+          if (error instanceof StallNotFound)
+            return reply.code(404).send({ error: "stall_invite_not_found", retryable: false });
+          throw error;
+        }
+      });
+
+      // The owner shows their own terminal setup code from the invite link they already have.
+      app.post("/v1/stall-invites/setup-codes", { config: inviteRate }, async (request, reply) => {
+        reply.header("Cache-Control", "no-store");
+        const body = z.object({ token: inviteToken }).strict().safeParse(request.body);
+        if (!body.success)
+          return reply.code(404).send({ error: "stall_invite_not_found", retryable: false });
+        try {
+          return reply.code(201).send(await stalls.issueOwnerSetupCode(body.data.token));
+        } catch (error) {
+          if (error instanceof StallNotFound)
+            return reply.code(404).send({ error: "stall_invite_not_found", retryable: false });
+          if (error instanceof StallConflict)
+            return reply.code(409).send({ error: "stall_not_ready_for_phone", retryable: false });
+          throw error;
+        }
+      });
+      app.post("/v1/stall-invites/submissions", { config: inviteRate }, async (request, reply) => {
+        reply.header("Cache-Control", "no-store");
+        const body = z
+          .object({
+            token: inviteToken,
+            stallName: z.string().min(2).max(60),
+            category: z.string().min(2).max(40),
+            authority: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
+            payoutAddress: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
+            deadline: z.coerce.bigint().positive(),
+            signature: z.string().regex(/^0x[0-9a-fA-F]{130}$/),
+          })
+          .strict()
+          .safeParse(request.body);
+        if (!body.success)
+          return reply.code(400).send({ error: "invalid_stall_submission", retryable: false });
+        try {
+          const { token, ...input } = body.data;
+          return reply.code(201).send(await stalls.submitInvite(token, input));
+        } catch (error) {
+          if (error instanceof StallNotFound)
+            return reply.code(404).send({ error: "stall_invite_not_found", retryable: false });
+          if (error instanceof StallRejected)
+            return reply.code(422).send({ error: "stall_submission_rejected", retryable: false });
+          throw error;
+        }
+      });
+    }
+
+    app.get("/v1/operations/me", operatorRate, async (request, reply) => {
       reply.header("Cache-Control", "private, no-store");
       try {
         const identity = await control.access.authenticate(request.headers.authorization);
@@ -704,7 +878,7 @@ export async function buildApp(
           vendorId: identity.vendorId,
           checkoutPolicy:
             control.checkout && identity.role === "VENDOR"
-              ? control.checkout.policy(identity)
+              ? await control.checkout.policy(identity)
               : null,
           organizerPolicy:
             control.organizerConfiguration && identity.role === "ORGANIZER"

@@ -167,6 +167,7 @@ locals {
       # The API constructs its checkout service only when both are set.
       CHECKOUT_MANIFEST_PATH       = local.secret_path["checkout-manifest"]
       CHECKOUT_CAPABILITY_KEY_PATH = local.secret_path["checkout-capability"]
+      CHECKOUT_UNLISTED_VENDOR_IDS = join(",", var.unlisted_vendor_ids)
       TIME_AUTHORITY_KEY_PATH      = local.secret_path["time-authority"]
     }
     relayer = {

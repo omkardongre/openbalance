@@ -138,6 +138,11 @@ variable "worker_external_address" {
   default = true
 }
 
+# Stalls hidden from attendees and the organizer view; still resolvable for history and old reserves.
+variable "unlisted_vendor_ids" {
+  type    = list(string)
+  default = []
+}
 variable "api_image" { type = string }
 variable "relayer_image" { type = string }
 variable "web_image" { type = string }
