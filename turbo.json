@@ -6,7 +6,10 @@
         "NEXT_PUBLIC_API_URL",
         "NEXT_PUBLIC_RELAYER_URL",
         "NEXT_PUBLIC_FINANCIAL_RPC_URL",
-        "NEXT_PUBLIC_WEBAUTHN_RP_ID"
+        "NEXT_PUBLIC_WEBAUTHN_RP_ID",
+        "NEXT_PUBLIC_SETTLEMENT_ASSET",
+        "NEXT_PUBLIC_TERMINAL_RELAY_URL",
+        "OPENBALANCE_BUILD_ID"
       ],
       "dependsOn": ["^build"],
       "outputs": [".next/**", "!.next/cache/**", "dist/**"]

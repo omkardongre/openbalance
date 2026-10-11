@@ -21,6 +21,7 @@ import {
   storeTerminalReceipt,
 } from "../../lib/offline-wallet";
 import { AttendeeNav } from "../attendee-nav";
+import { useOfflineReady } from "../offline-shell";
 import { QrScanner } from "./qr-scanner";
 
 /** How often to recheck finalized settlement while a payment is still open and the device is online. */
@@ -75,7 +76,8 @@ export default function OfflineWalletPage() {
   const [rawPayload, setRawPayload] = useState("");
   const [pasteMode, setPasteMode] = useState<"request" | "receipt">("request");
   const [busy, setBusy] = useState(false);
-  const [offlineReady, setOfflineReady] = useState(false);
+  // The worker itself is installed from every page by the root layout.
+  const offlineReady = useOfflineReady();
   const [status, setStatus] = useState("");
   const [tone, setTone] = useState<Tone>("info");
   const [settlement, setSettlement] = useState<Map<string, SettlementStatus>>(new Map());
@@ -139,23 +141,6 @@ export default function OfflineWalletPage() {
       window.removeEventListener("online", check);
     };
   }, [open, channels, authorizations]);
-
-  useEffect(() => {
-    if (!("serviceWorker" in navigator) || !window.isSecureContext) return;
-    let active = true;
-    navigator.serviceWorker
-      .register("/offline-sw.js", { scope: "/" })
-      .then(() => navigator.serviceWorker.ready)
-      .then(() => {
-        if (active) setOfflineReady(true);
-      })
-      .catch(() => {
-        if (active) setOfflineReady(false);
-      });
-    return () => {
-      active = false;
-    };
-  }, []);
 
   const byChannel = useMemo(
     () => new Map(channels.map((channel) => [channel.channelId.toLowerCase(), channel])),

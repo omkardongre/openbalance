@@ -16,6 +16,7 @@ import { explorerTx } from "../../lib/format";
 import { useVendorNames } from "../../lib/reserve-terms";
 import { AttendeeNav } from "../attendee-nav";
 import { BrandMark } from "../brand-mark";
+import { useOnline } from "../offline-shell";
 import { useSession } from "../session-provider";
 import { type ActivityItem, ActivityList } from "./activity-list";
 import { OpenReserve } from "./open-reserve";
@@ -42,12 +43,19 @@ function toBaseUnits(value: string, decimals: number): string | undefined {
 
 export default function AccountPage() {
   const { session, signedIn, signedOut } = useSession();
-  /** The reserve whose return is being sent, so only its button shows progress. */
-  const [returning, setReturning] = useState<string>();
+  const online = useOnline();
+  // Venue Wi-Fi can look connected while passing nothing; a sign-in that cannot reach the server
+  // counts as no signal too.
+  const [unreachable, setUnreachable] = useState(false);
+  useEffect(() => {
+    if (!online) setUnreachable(false);
+  }, [online]);
   const account = session?.account ?? "";
   const [status, setStatus] = useState("");
   const [tone, setTone] = useState<"info" | "success" | "error">("info");
   const [busy, setBusy] = useState(false);
+  /** The reserve whose return is being sent, so only its button shows progress. */
+  const [returning, setReturning] = useState<string>();
   const [activity, setActivity] = useState<Page<ActivityItem, ActivityCursor>>();
   const [reserves, setReserves] = useState<Page<ReserveBalance, ReserveCursor>>();
   const [loadingMore, setLoadingMore] = useState<"activity" | "reserves">();
@@ -212,6 +220,14 @@ export default function AccountPage() {
         credentialId: assertion.id,
       });
     } catch (error) {
+      // fetch rejects with a TypeError only when no response arrived at all.
+      if (
+        error instanceof TypeError ||
+        (error instanceof DOMException && error.name === "TimeoutError")
+      ) {
+        setUnreachable(true);
+        return;
+      }
       report(
         error instanceof SessionEnded
           ? "That passkey was not accepted. Try again, or create an account."
@@ -365,6 +381,37 @@ export default function AccountPage() {
       {status}
     </p>
   );
+
+  // Signing in needs the server. With no signal the Wallet points to the one thing that works.
+  if (!session && (!online || unreachable))
+    return (
+      <main className="with-tabbar">
+        <section className="shell narrow">
+          <div className="brand-bar">
+            <BrandMark />
+          </div>
+          <h1>No signal</h1>
+          <p className="summary">
+            You can still pay a stall from the money you set aside. Your wallet comes back when you
+            are online again.
+          </p>
+          {/* A full page load, so the saved offline copy answers even with no network. */}
+          <a className="primary-action block-button" href="/offline">
+            Pay offline
+          </a>
+          {online && (
+            <button
+              type="button"
+              className="secondary-button block-button"
+              onClick={() => setUnreachable(false)}
+            >
+              Try signing in again
+            </button>
+          )}
+        </section>
+        <AttendeeNav />
+      </main>
+    );
 
   if (!session)
     return (

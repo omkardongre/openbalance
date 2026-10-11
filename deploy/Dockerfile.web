@@ -5,6 +5,9 @@ ARG NEXT_PUBLIC_RELAYER_URL
 ARG NEXT_PUBLIC_FINANCIAL_RPC_URL
 ARG NEXT_PUBLIC_WEBAUTHN_RP_ID
 ARG NEXT_PUBLIC_SETTLEMENT_ASSET
+ARG NEXT_PUBLIC_TERMINAL_RELAY_URL
+# Versions the offline service worker, so each release refreshes the copy saved on phones.
+ARG OPENBALANCE_BUILD_ID
 RUN npm install --global pnpm@12.3.4
 COPY . .
 RUN pnpm install --frozen-lockfile

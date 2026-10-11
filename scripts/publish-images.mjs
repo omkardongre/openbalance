@@ -108,6 +108,9 @@ async function build(name, tag) {
       "NEXT_PUBLIC_FINANCIAL_RPC_URL",
       "NEXT_PUBLIC_WEBAUTHN_RP_ID",
       "NEXT_PUBLIC_SETTLEMENT_ASSET",
+      // Terminals sign every upload over this exact URL (the relayer's ingress audience), so the
+      // setup codes /operations issues must carry the deterministic Cloud Run hostname.
+      "NEXT_PUBLIC_TERMINAL_RELAY_URL",
     ]) {
       const value = process.env[variable];
       // A browser bundle compiled against a missing URL fails at runtime in the user's browser, far
@@ -115,6 +118,8 @@ async function build(name, tag) {
       if (!value) throw new Error(`${variable} is required to build a releasable web image.`);
       args.push("--build-arg", `${variable}=${value}`);
     }
+    // The image tag names the build; the offline service worker embeds it as its cache version.
+    args.push("--build-arg", `OPENBALANCE_BUILD_ID=${tag}`);
   } else {
     args.push(
       "-f",

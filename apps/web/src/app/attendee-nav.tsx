@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useOnline } from "./offline-shell";
 
 function WalletIcon() {
   return (
@@ -31,13 +32,16 @@ const TABS = [
 /** The attendee's two destinations, as a bottom tab bar on phones and a top bar on wider screens. */
 export function AttendeeNav() {
   const path = usePathname();
+  // Offline, a client-side switch would need the server; a full page load is answered by the
+  // saved offline copy instead.
+  const Tab = useOnline() ? Link : "a";
   return (
     <nav className="tabbar" aria-label="Attendee">
       {TABS.map(({ href, label, Icon }) => (
-        <Link key={href} href={href} aria-current={path === href ? "page" : undefined}>
+        <Tab key={href} href={href} aria-current={path === href ? "page" : undefined}>
           <Icon />
           <span>{label}</span>
-        </Link>
+        </Tab>
       ))}
     </nav>
   );
