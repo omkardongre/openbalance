@@ -4,6 +4,8 @@ import type { Address, Hex } from "viem";
 export type Stall = {
   vendorId: Hex;
   vendorName: string;
+  /** False for a retired stall: kept so history can name it, but not offered for new reserves. */
+  listed?: boolean;
   destinationVersion: string;
   terminal: { instanceId: Hex; keyVersion: string; signer: Address };
   reservePolicy: {

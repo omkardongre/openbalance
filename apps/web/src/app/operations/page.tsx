@@ -1,7 +1,7 @@
 "use client";
 
 import { exactPayRouterAbi, type RefundIntent, refundIntentFields } from "@openbalance/protocol";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   createWalletClient,
   custom,
@@ -11,7 +11,9 @@ import {
   type Hex,
   keccak256,
 } from "viem";
+import { BrandMark } from "../brand-mark";
 import { OrganizerConfigurationPanel } from "./organizer-configuration";
+import { StallsPanel } from "./stalls-panel";
 
 const bytes32 = /^0x[0-9a-fA-F]{64}$/;
 
@@ -108,15 +110,20 @@ async function idempotencyKey(prefix: string, value: unknown) {
   return `${prefix}-${Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
 }
 
+const ACCESS_KEY_STORAGE = "openbalance.operations-key";
+/** Raw registry forms; the Stalls panel covers the organizer flow. Flip on only for recovery. */
+const SHOW_ADVANCED_REGISTRY_TOOLS = false;
+
 export default function OperationsPage() {
   const [token, setToken] = useState("");
-  const [eventId, setEventId] = useState("");
   const [vendorId, setVendorId] = useState("");
   const [statement, setStatement] = useState<Statement>();
   const [reconciliation, setReconciliation] = useState<Reconciliation>();
   const [reserves, setReserves] = useState<ReserveSummary>();
   const [incidents, setIncidents] = useState<Incident[]>();
   const [profile, setProfile] = useState<OperationsProfile>();
+  // The organizer view shows only stall setup; money and incident views stay for other roles.
+  const organizer = profile?.role === "ORGANIZER";
   const [severity, setSeverity] = useState("MEDIUM");
   const [summary, setSummary] = useState("");
   const [mitigation, setMitigation] = useState("");
@@ -131,6 +138,9 @@ export default function OperationsPage() {
   const [financialOperation, setFinancialOperation] = useState<SubmittedOperation>();
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
+  const [showKey, setShowKey] = useState(false);
+  // Set once from this tab's saved key so a reload signs straight back in.
+  const [resume, setResume] = useState(false);
   const api = process.env.NEXT_PUBLIC_API_URL;
   const relayer = process.env.NEXT_PUBLIC_RELAYER_URL;
 
@@ -147,6 +157,8 @@ export default function OperationsPage() {
     });
     if (!response.ok) {
       const body = (await response.json().catch(() => null)) as { error?: string } | null;
+      if (response.status === 401 || body?.error === "operations_session_invalid")
+        throw new Error("That key didn't work. Check it and try again.");
       throw new Error(body?.error?.replaceAll("_", " ") ?? "Operations data is unavailable.");
     }
     return response.json() as Promise<T>;
@@ -285,20 +297,48 @@ export default function OperationsPage() {
     }
   }
 
+  // The key survives a reload of this tab only (sessionStorage is per tab and cleared when it
+  // closes), never localStorage, so it does not linger on a shared laptop.
+  useEffect(() => {
+    const saved = sessionStorage.getItem(ACCESS_KEY_STORAGE);
+    if (saved) {
+      setToken(saved);
+      setResume(true);
+    }
+  }, []);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: runs once, after the saved key is set
+  useEffect(() => {
+    if (resume && token) {
+      setResume(false);
+      void load();
+    }
+  }, [resume, token]);
+  function signOut() {
+    sessionStorage.removeItem(ACCESS_KEY_STORAGE);
+    setToken("");
+    setProfile(undefined);
+    setStatement(undefined);
+    setReconciliation(undefined);
+    setReserves(undefined);
+    setIncidents(undefined);
+    setStatus("");
+    setShowKey(false);
+  }
   async function load() {
     if (!token) {
-      setStatus("Enter your scoped operations credential.");
+      setStatus("Enter your access key.");
       return;
     }
     setBusy(true);
-    setStatus("Loading finalized operational records…");
+    // Progress shows on the button only; `status` is reserved for real problems.
+    setStatus("");
     try {
       const profile = await request<OperationsProfile>("/v1/operations/me");
+      sessionStorage.setItem(ACCESS_KEY_STORAGE, token);
       setProfile(profile);
       const scopedVendor = profile.role === "VENDOR" ? profile.vendorId : vendorId;
       if (profile.role === "VENDOR" && !bytes32.test(scopedVendor ?? ""))
         throw new Error("Enter the vendor identifier for this statement.");
-      setEventId(profile.eventId);
       if (profile.vendorId) setVendorId(profile.vendorId);
       const encodedEvent = encodeURIComponent(profile.eventId);
       const eventScope = ["ORGANIZER", "FINANCE"].includes(profile.role);
@@ -322,14 +362,22 @@ export default function OperationsPage() {
       setReconciliation(nextReconciliation);
       setReserves(nextReserves);
       setIncidents(nextIncidents.items);
-      setStatus(`${profile.role.toLowerCase()} scope loaded from finalized records.`);
+      setStatus(profile.role === "ORGANIZER" ? "" : `Signed in as ${profile.role.toLowerCase()}.`);
     } catch (error) {
       setStatement(undefined);
       setReconciliation(undefined);
       setReserves(undefined);
       setIncidents(undefined);
       setProfile(undefined);
-      setStatus(error instanceof Error ? error.message : "Operations data is unavailable.");
+      // A rejected key is forgotten; a network blip keeps it so the next try can resume.
+      if (error instanceof Error && error.message.startsWith("That key"))
+        sessionStorage.removeItem(ACCESS_KEY_STORAGE);
+      // Before sign-in succeeds every failure reads as a sign-in problem, never a raw error code.
+      setStatus(
+        error instanceof Error && error.message.startsWith("That key")
+          ? error.message
+          : "Couldn't sign in. Check the key and try again.",
+      );
     } finally {
       setBusy(false);
     }
@@ -404,52 +452,106 @@ export default function OperationsPage() {
   return (
     <main>
       <div className="page-stack operations-stack">
-        <section className="shell operations-shell">
-          <p className="eyebrow">Event operations</p>
-          <h1>Know what settled.</h1>
-          <p className="summary">
-            Review finalized vendor money, reconciliation freshness, pending allocation read-back,
-            and open incidents from one event-scoped credential.
-          </p>
-          <div className="operations-inputs">
-            <label>
-              Operations credential
-              <input
-                type="password"
-                autoComplete="off"
-                value={token}
-                disabled={busy}
-                onChange={(event) => setToken(event.target.value)}
-              />
-            </label>
-            <label>
-              Scoped event
-              <input
-                autoComplete="off"
-                spellCheck={false}
-                value={eventId || "Resolved from credential"}
-                disabled
-              />
-            </label>
-            <label>
-              Vendor identifier
-              <input
-                autoComplete="off"
-                spellCheck={false}
-                value={vendorId}
-                disabled={busy}
-                onChange={(event) => setVendorId(event.target.value)}
-              />
-            </label>
-          </div>
-          <button type="button" disabled={busy} onClick={load}>
-            {busy ? "Checking…" : "Load finalized operations"}
-          </button>
-          <p role="status">{status}</p>
-        </section>
+        {profile ? (
+          <header className="shell signed-in-bar">
+            <div>
+              <p className="eyebrow">Run your event</p>
+              <p>
+                Signed in as <strong>{profile.role.toLowerCase()}</strong>
+              </p>
+            </div>
+            <button type="button" className="secondary-button" onClick={signOut}>
+              Sign out
+            </button>
+          </header>
+        ) : (
+          <section className="shell sign-in-card" aria-labelledby="sign-in-title">
+            <BrandMark />
+            <h1 id="sign-in-title">Organizer sign in</h1>
+            <p className="muted">Add stalls and get them ready for customers.</p>
+            <form
+              className="sign-in-form"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void load();
+              }}
+            >
+              <label htmlFor="access-key">Access key</label>
+              <div className="key-field">
+                <input
+                  id="access-key"
+                  type={showKey ? "text" : "password"}
+                  autoComplete="off"
+                  spellCheck={false}
+                  placeholder="Paste your access key"
+                  value={token}
+                  disabled={busy}
+                  aria-invalid={Boolean(status) || undefined}
+                  aria-describedby="access-key-help"
+                  onChange={(event) => {
+                    setToken(event.target.value.trim());
+                    setStatus("");
+                  }}
+                />
+                <button
+                  type="button"
+                  className="text-button"
+                  aria-pressed={showKey}
+                  onClick={() => setShowKey((value) => !value)}
+                >
+                  {showKey ? "Hide" : "Show"}
+                </button>
+              </div>
+              {status ? (
+                <p role="alert" className="field-error">
+                  {status}
+                </p>
+              ) : (
+                <p id="access-key-help" className="fine-print">
+                  Your event's access key. It stays in this tab only.
+                </p>
+              )}
+              <button type="submit" className="block-button" disabled={busy || !token}>
+                {busy && <span className="spinner" aria-hidden="true" />}
+                {busy ? "Signing in…" : "Sign in"}
+              </button>
+            </form>
+          </section>
+        )}
+        {profile && profile.role !== "ORGANIZER" && (
+          <section className="shell operations-shell">
+            {/* Finance and support can filter one stall's earnings; organizers and stalls never need it. */}
+            {profile && !["ORGANIZER", "VENDOR"].includes(profile.role) && (
+              <div className="operations-inputs">
+                <label>
+                  Stall ID (optional)
+                  <input
+                    autoComplete="off"
+                    spellCheck={false}
+                    value={vendorId}
+                    disabled={busy}
+                    onChange={(event) => setVendorId(event.target.value)}
+                  />
+                </label>
+                <button type="button" disabled={busy} onClick={load}>
+                  Refresh
+                </button>
+              </div>
+            )}
+            {status && <p role="status">{status}</p>}
+          </section>
+        )}
 
         {incidents && (
           <>
+            {profile?.role === "ORGANIZER" && profile.organizerPolicy && api && (
+              <StallsPanel
+                api={api}
+                token={token}
+                eventId={profile.eventId}
+                chainId={profile.organizerPolicy.chainId}
+              />
+            )}
             {statement && (
               <section className="operations-grid" aria-label="Operational totals">
                 <article>
@@ -475,7 +577,7 @@ export default function OperationsPage() {
               </section>
             )}
 
-            {reserves && (
+            {reserves && !organizer && (
               <section className="shell operations-panel" aria-labelledby="reserves-heading">
                 <div className="section-heading">
                   <div>
@@ -527,7 +629,7 @@ export default function OperationsPage() {
               </section>
             )}
 
-            {reconciliation && (
+            {reconciliation && !organizer && (
               <section className="shell operations-panel">
                 <div className="section-heading">
                   <div>
@@ -670,125 +772,134 @@ export default function OperationsPage() {
               </section>
             )}
 
-            {profile?.role === "ORGANIZER" && profile.organizerPolicy && api && (
-              <OrganizerConfigurationPanel
-                api={api}
-                token={token}
-                profile={profile}
-                busy={busy}
-                setBusy={setBusy}
-                setStatus={setStatus}
-              />
-            )}
-
-            <section className="shell operations-panel">
-              <div className="section-heading">
-                <div>
-                  <p className="eyebrow">Exceptions</p>
-                  <h2>Open incidents</h2>
-                </div>
-                <p>{incidents.length} open</p>
-              </div>
-              {incidents.length === 0 ? (
-                <p className="empty-state">No scoped operational incidents are open.</p>
-              ) : (
-                <ol className="activity-list">
-                  {incidents.map((incident) => (
-                    <li key={incident.incidentId}>
-                      <div>
-                        <strong>{incident.summary}</strong>
-                        <span>
-                          {incident.owner} · next: {incident.nextAction}
-                        </span>
-                      </div>
-                      <div className="incident-actions">
-                        <span className="severity">{incident.severity}</span>
-                        {profile && ["ORGANIZER", "SUPPORT"].includes(profile.role) && (
-                          <>
-                            <input
-                              aria-label={`Resolution proof for ${incident.summary}`}
-                              placeholder="Resolution proof"
-                              value={resolutionProofs[incident.incidentId] ?? ""}
-                              disabled={busy}
-                              onChange={(event) =>
-                                setResolutionProofs((current) => ({
-                                  ...current,
-                                  [incident.incidentId]: event.target.value,
-                                }))
-                              }
-                            />
-                            <button
-                              type="button"
-                              className="secondary-button"
-                              disabled={busy}
-                              onClick={() => resolveIncident(incident.incidentId)}
-                            >
-                              Resolve
-                            </button>
-                          </>
-                        )}
-                      </div>
-                    </li>
-                  ))}
-                </ol>
+            {/* Kept for registry recovery; hidden so the organizer view stays focused on stalls. */}
+            {SHOW_ADVANCED_REGISTRY_TOOLS &&
+              profile?.role === "ORGANIZER" &&
+              profile.organizerPolicy &&
+              api && (
+                <details className="advanced-tools">
+                  <summary>Advanced registry tools</summary>
+                  <OrganizerConfigurationPanel
+                    api={api}
+                    token={token}
+                    profile={profile}
+                    busy={busy}
+                    setBusy={setBusy}
+                    setStatus={setStatus}
+                  />
+                </details>
               )}
 
-              {profile && (
-                <div className="incident-form">
-                  <h3>Report an incident</h3>
-                  <div className="incident-fields">
+            {!organizer && (
+              <section className="shell operations-panel">
+                <div className="section-heading">
+                  <div>
+                    <p className="eyebrow">Exceptions</p>
+                    <h2>Open incidents</h2>
+                  </div>
+                  <p>{incidents.length} open</p>
+                </div>
+                {incidents.length === 0 ? (
+                  <p className="empty-state">No scoped operational incidents are open.</p>
+                ) : (
+                  <ol className="activity-list">
+                    {incidents.map((incident) => (
+                      <li key={incident.incidentId}>
+                        <div>
+                          <strong>{incident.summary}</strong>
+                          <span>
+                            {incident.owner} · next: {incident.nextAction}
+                          </span>
+                        </div>
+                        <div className="incident-actions">
+                          <span className="severity">{incident.severity}</span>
+                          {profile && ["ORGANIZER", "SUPPORT"].includes(profile.role) && (
+                            <>
+                              <input
+                                aria-label={`Resolution proof for ${incident.summary}`}
+                                placeholder="Resolution proof"
+                                value={resolutionProofs[incident.incidentId] ?? ""}
+                                disabled={busy}
+                                onChange={(event) =>
+                                  setResolutionProofs((current) => ({
+                                    ...current,
+                                    [incident.incidentId]: event.target.value,
+                                  }))
+                                }
+                              />
+                              <button
+                                type="button"
+                                className="secondary-button"
+                                disabled={busy}
+                                onClick={() => resolveIncident(incident.incidentId)}
+                              >
+                                Resolve
+                              </button>
+                            </>
+                          )}
+                        </div>
+                      </li>
+                    ))}
+                  </ol>
+                )}
+
+                {profile && (
+                  <div className="incident-form">
+                    <h3>Report an incident</h3>
+                    <div className="incident-fields">
+                      <label>
+                        Severity
+                        <select
+                          value={severity}
+                          disabled={busy}
+                          onChange={(event) => setSeverity(event.target.value)}
+                        >
+                          <option>LOW</option>
+                          <option>MEDIUM</option>
+                          <option>HIGH</option>
+                          <option>CRITICAL</option>
+                        </select>
+                      </label>
+                      <label>
+                        Owner
+                        <input
+                          value={owner}
+                          disabled={busy}
+                          onChange={(event) => setOwner(event.target.value)}
+                        />
+                      </label>
+                    </div>
                     <label>
-                      Severity
-                      <select
-                        value={severity}
-                        disabled={busy}
-                        onChange={(event) => setSeverity(event.target.value)}
-                      >
-                        <option>LOW</option>
-                        <option>MEDIUM</option>
-                        <option>HIGH</option>
-                        <option>CRITICAL</option>
-                      </select>
-                    </label>
-                    <label>
-                      Owner
+                      Summary
                       <input
-                        value={owner}
+                        value={summary}
                         disabled={busy}
-                        onChange={(event) => setOwner(event.target.value)}
+                        onChange={(event) => setSummary(event.target.value)}
                       />
                     </label>
+                    <label>
+                      Immediate mitigation
+                      <textarea
+                        value={mitigation}
+                        disabled={busy}
+                        onChange={(event) => setMitigation(event.target.value)}
+                      />
+                    </label>
+                    <label>
+                      Next action
+                      <textarea
+                        value={nextAction}
+                        disabled={busy}
+                        onChange={(event) => setNextAction(event.target.value)}
+                      />
+                    </label>
+                    <button type="button" disabled={busy} onClick={submitIncident}>
+                      Record incident
+                    </button>
                   </div>
-                  <label>
-                    Summary
-                    <input
-                      value={summary}
-                      disabled={busy}
-                      onChange={(event) => setSummary(event.target.value)}
-                    />
-                  </label>
-                  <label>
-                    Immediate mitigation
-                    <textarea
-                      value={mitigation}
-                      disabled={busy}
-                      onChange={(event) => setMitigation(event.target.value)}
-                    />
-                  </label>
-                  <label>
-                    Next action
-                    <textarea
-                      value={nextAction}
-                      disabled={busy}
-                      onChange={(event) => setNextAction(event.target.value)}
-                    />
-                  </label>
-                  <button type="button" disabled={busy} onClick={submitIncident}>
-                    Record incident
-                  </button>
-                </div>
-              )}
-            </section>
+                )}
+              </section>
+            )}
           </>
         )}
       </div>

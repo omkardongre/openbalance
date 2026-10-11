@@ -80,7 +80,11 @@ export function OpenReserve(props: {
       .then((terms: ReserveTerms) => {
         setChainId(terms.chainId);
         setChoices(
-          terms.events.flatMap((event) => event.vendors.map((stall) => ({ event, stall }))),
+          terms.events.flatMap((event) =>
+            event.vendors
+              .filter((stall) => stall.listed !== false)
+              .map((stall) => ({ event, stall })),
+          ),
         );
       })
       .catch(() => {

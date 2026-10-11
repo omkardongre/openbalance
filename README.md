@@ -53,11 +53,23 @@ The attendee pages and the terminal use plain words only: no addresses, hashes, 
 never shown as-is. `/operations`, `/verify` and `/cashier` are organizer and auditor tools and keep
 technical detail on purpose.
 
-An organizer credential on `/operations` also shows the event's offline reserves from
-`GET /v1/events/:eventId/reserves`: reserved, spent offline, still open, due back and returned. The
-five figures must add up to the reserved total or the API refuses to answer. Offline sales a
-terminal has not uploaded yet are only visible on that terminal. Organizer credentials are issued
-with `services/api/src/provision-operations-access.ts`; the API stores only the token's SHA-256 hash.
+An organizer signs in to `/operations` with an access key and sees only stall setup: invite a stall,
+the owner fills in `/stall/join` and signs their own payout address, the organizer registers it from
+the organizer wallet, and approves the stall's phone once it checks in. The owner's invite link
+stays their status page: after registration it shows the terminal setup code, so the owner pairs
+the phone remotely (Terminal app → ⋮ → *Scan setup code*). The stall then appears in the
+attendee's stall list. A stall whose phone was since set up for another stall is hidden until it is
+paired again. The event's offline reserves (`GET /v1/events/:eventId/reserves`),
+reconciliation and incidents stay in the API and on the page for other roles, but are hidden from the
+organizer view. Organizer access keys are issued with
+`services/api/src/provision-operations-access.ts`; the API stores only the key's SHA-256 hash.
+
+## Business model
+
+Every sale is split on-chain by the payment router at the moment it settles: 1% platform fee to
+OpenBalance and 2% organizer fee to the event, and the rest to the stall. No invoicing or manual
+payout is involved. On testnet both fee destinations point to the organizer wallet. Later revenue:
+a monthly organizer plan and terminal rental.
 
 ## Layout
 
