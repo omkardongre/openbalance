@@ -18,7 +18,7 @@
       "asset": "0x534b2f3A21130d7a60830c2Df862319e593943A3",
       "assetSymbol": "USDC",
       "assetDecimals": 6,
-      "configVersion": "1",
+      "configVersion": "2",
       "organizerFeeBps": 200,
       "platformFeeBps": 100,
       "intentLifetimeSeconds": 600,
@@ -36,7 +36,7 @@
             "maximumReserveUnits": "50000000",
             "maximumPerVoucherUnits": "15000000",
             "maximumVoucherCount": 8,
-            "acceptanceDurationSeconds": 3600,
+            "acceptanceDurationSeconds": 7200,
             "submissionDelaySeconds": 1800
           }
         },
@@ -53,7 +53,7 @@
             "maximumReserveUnits": "50000000",
             "maximumPerVoucherUnits": "15000000",
             "maximumVoucherCount": 8,
-            "acceptanceDurationSeconds": 3600,
+            "acceptanceDurationSeconds": 7200,
             "submissionDelaySeconds": 1800
           }
         }

@@ -28,9 +28,11 @@ const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 const BYTES32 = /^0x[0-9a-fA-F]{64}$/;
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 
-// One config version, one vendor and one terminal are enough to prove every money rule; more would
-// add setup without adding a distinct claim.
-const CONFIG_VERSION = 1n;
+// One vendor and one terminal are enough to prove every money rule; more would add setup without
+// adding a distinct claim. Configs are first-write-only, so a new policy is a new version: v1
+// (Sep 2026) capped spending at 1 h and expires 23 Oct 2026; v2 (11 Oct 2026) allows the 2 h demo
+// spend window and stays valid through judging and the winner announcement.
+const CONFIG_VERSION = 2n;
 const DESTINATION_VERSION = 1n;
 const TERMINAL_VERSION = 1n;
 const VENDOR_LABEL = "openbalance:testnet:vendor:1";
@@ -41,9 +43,9 @@ const PLATFORM_FEE_BPS = 100;
 // Bounds on what a reserve channel may later ask for. They cap the channel's own windows, so they
 // must be at least as long as the shortest windows a real-time test can use and no longer than the
 // operator would accept being committed to.
-const MAXIMUM_ACCEPTANCE_DURATION = 3_600;
+const MAXIMUM_ACCEPTANCE_DURATION = 7_200;
 const MAXIMUM_SUBMISSION_DELAY = 3_600;
-const CONFIG_VALIDITY_SECONDS = 30 * 24 * 3_600;
+const CONFIG_VALIDITY_SECONDS = 60 * 24 * 3_600;
 
 const cast = (args) => foundry("cast", args, { cwd: root });
 

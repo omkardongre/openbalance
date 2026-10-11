@@ -41,8 +41,8 @@ Use a browser with a platform passkey (Chrome, Safari, or Edge on a phone or lap
 public `GET /v1/reserve-terms`) and 1, 2 or 5 USDC, then approve with the passkey. *Pay offline*
 (`/offline`) then pays that stall by scanning the terminal's code, even with no signal. Paying needs
 the registered stall terminal (the Android app), so that step is shown in the demo video. Demo
-reserves accept payments for 60 minutes and give the stall 30 more minutes to upload, so unspent
-money is returnable 90 minutes after the reserve opens. `/account` lists each offline balance, 5 per
+reserves accept payments for 2 hours and give the stall 30 more minutes to upload, so unspent
+money is returnable 2½ hours after the reserve opens. `/account` lists each offline balance, 5 per
 page from `GET /v1/accounts/me/reserves` (cursor paginated), with when it can be spent and when the
 rest comes back, and offers *Return now* once it is due. Anyone can trigger the return, from
 `/account` or with no account at all (see *Reserve return* below).

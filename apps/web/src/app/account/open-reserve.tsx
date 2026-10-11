@@ -251,7 +251,14 @@ export function OpenReserve(props: {
       </div>
       <p className="muted">
         Lock a small amount for one stall so you can still pay there if the network drops. Whatever
-        you do not spend can be returned to you after about 90 minutes.
+        you do not spend can be returned to you{" "}
+        {choice
+          ? `after about ${duration(
+              choice.stall.reservePolicy.acceptanceDurationSeconds +
+                choice.stall.reservePolicy.submissionDelaySeconds,
+            )}`
+          : "later"}
+        .
       </p>
       {choices.length > 1 && (
         <label>
@@ -304,4 +311,12 @@ export function OpenReserve(props: {
       )}
     </section>
   );
+}
+
+/** "2½ hours", "90 minutes": a reserve's lifetime in words a customer reads at a glance. */
+function duration(seconds: number): string {
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 120) return `${minutes} minutes`;
+  const halves = Math.round(minutes / 30) / 2;
+  return `${Number.isInteger(halves) ? halves : `${Math.floor(halves)}½`} hours`;
 }
