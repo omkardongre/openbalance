@@ -21,10 +21,12 @@ import xyz.openbalance.terminal.data.OfflineLimits
 import xyz.openbalance.terminal.data.OrderView
 import xyz.openbalance.terminal.provisioning.ConnectedProvisioningClient
 import xyz.openbalance.terminal.provisioning.FinalizedChannelVerifier
+import xyz.openbalance.terminal.provisioning.TerminalPairingPending
 import xyz.openbalance.terminal.provisioning.VendorProfile
 import java.math.BigInteger
 import xyz.openbalance.terminal.time.SignedTimeSource
 import xyz.openbalance.terminal.time.TrustedTime
+import xyz.openbalance.terminal.time.TrustedTimeStore
 
 data class TerminalUiState(
     val signer: String = "",
@@ -33,7 +35,6 @@ data class TerminalUiState(
     val sales: List<SaleView> = emptyList(),
     val channels: List<ChannelView> = emptyList(),
     val orders: List<OrderView> = emptyList(),
-    val selectedChannelId: String? = null,
     val activeRequestId: String? = null,
     val scanOpen: Boolean = false,
     val scanPurpose: String? = null,
@@ -57,6 +58,10 @@ data class TerminalUiState(
     val keypadCents: Long = 0L,
     /** How many recent sales the Sales list shows; grows with "Show more". */
     val salesLimit: Int = SALES_PAGE_SIZE,
+    /** Set up for a stall, but the organizer has not approved this phone yet. Checked again on its own. */
+    val pairing: Boolean = false,
+    /** The last automatic clock check could not reach the time service (usually: no internet). */
+    val clockFailed: Boolean = false,
 )
 
 const val SALES_PAGE_SIZE = 25
@@ -65,11 +70,6 @@ const val SALES_PAGE_SIZE = 25
 fun ChannelView.isChargeable(nowSeconds: Long) =
     acceptUntil > nowSeconds && salesLeft > 0 && runCatching { BigInteger(remainingUnits) > BigInteger.ZERO }.getOrDefault(false)
 
-/** Keeps the current choice while it can still be charged; otherwise the chargeable reserve that closes last. */
-fun pickReserve(channels: List<ChannelView>, current: String?, nowSeconds: Long = System.currentTimeMillis() / 1000): String? {
-    val open = channels.filter { it.isChargeable(nowSeconds) }
-    return current?.takeIf { id -> open.any { it.channelId == id } } ?: open.maxByOrNull { it.acceptUntil }?.channelId
-}
 
 class TerminalViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application as TerminalApplication
@@ -77,14 +77,28 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
     val state: StateFlow<TerminalUiState> = _state.asStateFlow()
     private val timeSource = if (BuildConfig.TIME_ENDPOINT.isNotBlank() && BuildConfig.TIME_PUBLIC_KEY_DER_BASE64.isNotBlank())
         SignedTimeSource(app, BuildConfig.TIME_ENDPOINT, BuildConfig.TIME_PUBLIC_KEY_DER_BASE64) else null
+    private val timeStore = TrustedTimeStore(app)
+
+    /** A saved sample that still verifies and is fresh on this boot, so closing the app offline keeps selling. */
+    private fun restoredTime(): TrustedTime? {
+        val source = timeSource ?: return null
+        val saved = runCatching { timeStore.load() }.getOrNull() ?: return null
+        return runCatching { source.restore(saved) }.getOrElse { timeStore.clear(); null }
+    }
+
+    private fun acceptSample(sample: TrustedTime) {
+        runCatching { timeStore.save(sample) }
+    }
 
     init {
         viewModelScope.launch(Dispatchers.IO) {
             runCatching {
                 val identity = app.keys.getOrCreate()
                 val config = app.provisioning.current()
+                val restored = restoredTime()
                 _state.value = _state.value.copy(
                     signer = identity.signer,
+                    trustedTime = restored ?: _state.value.trustedTime,
                     configured = timeSource != null && config != null,
                     sales = app.repository.recoverSales(SALES_PAGE_SIZE), pending = app.repository.pendingUploads(),
                     channels = app.repository.channelViews(),
@@ -93,10 +107,9 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
                     message = when {
                         timeSource == null -> "This build is missing its clock setting"
                         config == null -> "Scan the setup code from the organizer"
-                        else -> "Tap Refresh, then Check clock, while online"
+                        else -> "Getting the time"
                     },
                 )
-                _state.update { it.copy(selectedChannelId = pickReserve(it.channels, it.selectedChannelId)) }
                 if (config != null) {
                     val summary = app.relay.runBatch(config)
                     _state.value = _state.value.copy(
@@ -112,6 +125,44 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
                 delay(1_000)
             }
         }
+        // While the organizer has not approved this phone, check in again by itself so the stall owner
+        // never has to find a Refresh button.
+        viewModelScope.launch(Dispatchers.IO) {
+            while (isActive) {
+                delay(PAIRING_RECHECK_MS)
+                val current = _state.value
+                if (!current.pairing || current.busy || current.scanOpen) continue
+                runCatching { fetchAndInstall() }
+                    .onSuccess { next -> _state.update { if (it.busy) it else next } }
+            }
+        }
+        // Trusted time is fetched by itself whenever the phone is online, and renewed before it runs
+        // out, so a cashier never has to tap "Check clock". Offline, the last sample keeps working
+        // until it expires; a failed check is only surfaced once there is no usable sample left.
+        viewModelScope.launch(Dispatchers.IO) {
+            while (isActive) {
+                val current = _state.value
+                val source = timeSource
+                // Renew often while online so the drift allowance stays small; offline the saved
+                // sample keeps working for up to SignedTimeSource.MAX_SAMPLE_AGE_MS.
+                val due = current.trustedTime?.let { SystemClock.elapsedRealtime() - it.observedMonotonicMs >= CLOCK_REFRESH_AGE_MS } ?: true
+                if (source != null && due && current.configured && !current.pairing && !current.busy && !current.scanOpen) {
+                    runCatching { source.sample() }
+                        .onSuccess { sample ->
+                            acceptSample(sample)
+                            _state.update {
+                                if (it.busy) it else it.copy(
+                                    trustedTime = sample,
+                                    timeValidSeconds = SignedTimeSource.MAX_SAMPLE_AGE_MS / 1_000,
+                                    clockFailed = false,
+                                )
+                            }
+                        }
+                        .onFailure { _state.update { it.copy(clockFailed = true) } }
+                }
+                delay(CLOCK_POLL_MS)
+            }
+        }
         // The relay worker uploads and settles sales in the background; re-read the journal so the
         // pending-upload warning clears on its own instead of only after the next tap.
         viewModelScope.launch(Dispatchers.IO) {
@@ -124,7 +175,6 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
                     _state.update {
                         if (it.busy) it else it.copy(
                             sales = sales, pending = pending,
-                            selectedChannelId = pickReserve(it.channels, it.selectedChannelId, it.nowSeconds),
                         )
                     }
                 }
@@ -151,7 +201,9 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
                 nowSeconds = System.currentTimeMillis() / 1000,
                 trustedTime = if (expired) null else it.trustedTime,
                 timeValidSeconds = if (expired) null else validFor,
-                message = if (expired && !it.busy) "Check the clock before the next sale" else it.message,
+                // Ran out offline: the readiness card shows the "Connect to the internet" note.
+                clockFailed = if (expired) true else it.clockFailed,
+                message = if (expired && !it.busy) "Connect to the internet to check the time" else it.message,
                 error = if (expired && !it.busy) false else it.error,
             )
         }
@@ -172,9 +224,10 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
         runBusy("Checking the clock") {
             val source = requireNotNull(timeSource) { "Trusted-time endpoint and pinned key are not configured" }
             val sample = source.sample()
+            acceptSample(sample)
             _state.value.copy(
                 trustedTime = sample, timeValidSeconds = SignedTimeSource.MAX_SAMPLE_AGE_MS / 1_000,
-                message = "Clock checked", busy = false,
+                clockFailed = false, message = "Clock checked", busy = false,
             )
         }
     }
@@ -193,10 +246,14 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
 
     fun scanned(value: String) = viewModelScope.launch(Dispatchers.IO) {
         if (_state.value.scanPurpose == "ENROLLMENT") {
-            runBusy("Setting up this terminal") {
+            runBusy("Checking in with the organizer") {
                 app.provisioning.installQr(value)
                 app.scheduleRelay()
-                _state.value.copy(configured = timeSource != null, scanOpen = false, scanPurpose = null, message = "Set up. Tap Refresh to load reserves", busy = false)
+                // The previous stall's name is gone with its setup; never show it while pairing.
+                _state.value = _state.value.copy(configured = timeSource != null, scanOpen = false, scanPurpose = null, synced = false, pairing = false, vendor = null)
+                // Check in straight away: a new stall waits here for the organizer's approval, and an
+                // approved one loads its reserves without a second tap.
+                fetchAndInstall()
             }
             return@launch
         }
@@ -204,16 +261,13 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
             val requestId = requireNotNull(_state.value.activeRequestId)
             val source = requireNotNull(timeSource) { "Trusted-time source is unavailable" }
             val sample = requireNotNull(_state.value.trustedTime) { "Check the clock first" }
-            val window = source.current(sample)
-            val accepted = app.repository.recordAttendeeResponse(requestId, value, (window.second + 999) / 1000, System.currentTimeMillis())
             val current = source.current(sample)
-            val completed = app.repository.accept(accepted.requestId, (current.second + 999) / 1000, System.currentTimeMillis()) { source.current(sample) }
+            val completed = app.repository.respond(requestId, value, (current.second + 999) / 1000, System.currentTimeMillis()) { source.current(sample) }
             app.scheduleRelay()
             val channels = app.repository.channelViews()
             _state.value.copy(
                 sales = app.repository.recoverSales(_state.value.salesLimit), pending = app.repository.pendingUploads(),
                 channels = channels, activeRequestId = null, scanOpen = false, scanPurpose = null,
-                selectedChannelId = pickReserve(channels, _state.value.selectedChannelId),
                 focusedSaleId = completed.requestId,
                 message = "Payment accepted. It is paid once uploaded and settled", busy = false,
             )
@@ -221,7 +275,12 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun synchronize() = viewModelScope.launch(Dispatchers.IO) {
-        runBusy("Refreshing") {
+        runBusy(if (_state.value.pairing) "Checking with the organizer" else "Refreshing") { fetchAndInstall() }
+    }
+
+    /** One provisioning round trip. Throws [TerminalPairingPending] while the organizer has not approved the phone. */
+    private suspend fun fetchAndInstall(): TerminalUiState {
+        return run {
             val config = requireNotNull(app.provisioning.current()) { "Terminal enrollment is not installed" }
             val identity = app.keys.getOrCreate()
             val batch = ConnectedProvisioningClient().fetch(config, identity.signer, app.keys::signDigest)
@@ -241,11 +300,12 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
                 channels = channels,
                 orders = app.repository.orderViews(),
                 sales = app.repository.recoverSales(_state.value.salesLimit), pending = app.repository.pendingUploads(),
-                // Keep the cashier's choice while it still accepts payments; otherwise default to the
-                // open reserve that closes last.
-                selectedChannelId = pickReserve(channels, _state.value.selectedChannelId),
-                message = syncMessage(installed, imported),
+                message = if (_state.value.pairing || !_state.value.synced)
+                    batch.vendor?.let { "Ready. This phone is now ${it.vendorName}" } ?: syncMessage(installed, imported)
+                else syncMessage(installed, imported),
                 synced = true,
+                pairing = false,
+                error = false,
                 busy = false,
             )
         }
@@ -263,19 +323,14 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
-    fun selectChannel(channelId: String) {
-        _state.value = _state.value.copy(selectedChannelId = channelId, error = false, message = "Reserve selected")
-    }
-
     fun createOfflineRequest(orderId: String) = viewModelScope.launch(Dispatchers.IO) {
         runBusy("Creating payment") {
-            val channelId = requireNotNull(_state.value.selectedChannelId) { "Choose a reserve first" }
             val source = requireNotNull(timeSource) { "Trusted-time source is unavailable" }
             val sample = requireNotNull(_state.value.trustedTime) { "Check the clock first" }
             val window = source.current(sample)
             val earliest = Math.addExact(window.first, 999) / 1_000
             val latest = Math.addExact(window.second, 999) / 1_000
-            val sale = app.repository.prepareOrderSale(orderId, channelId, earliest, latest, latest, System.currentTimeMillis())
+            val sale = app.repository.prepareOrderSale(orderId, earliest, latest, latest, System.currentTimeMillis())
             _state.value.copy(
                 orders = app.repository.orderViews(), sales = app.repository.recoverSales(_state.value.salesLimit), pending = app.repository.pendingUploads(),
                 focusedSaleId = sale.requestId,
@@ -287,15 +342,14 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
     /** Charges an amount keyed in on the terminal; works offline once the terminal has synced once. */
     fun chargeAmount(grossUnits: BigInteger) = viewModelScope.launch(Dispatchers.IO) {
         runBusy("Creating payment") {
-            val vendor = requireNotNull(_state.value.vendor) { "Tap Refresh once while online to load this stall" }
-            val channelId = requireNotNull(_state.value.selectedChannelId) { "Choose a reserve first" }
+            val vendor = requireNotNull(_state.value.vendor) { "Open the Terminal tab and tap Refresh while online to load this stall" }
             val source = requireNotNull(timeSource) { "Trusted-time source is unavailable" }
             val sample = requireNotNull(_state.value.trustedTime) { "Check the clock first" }
             val window = source.current(sample)
             val earliest = Math.addExact(window.first, 999) / 1_000
             val latest = Math.addExact(window.second, 999) / 1_000
             val sale = app.repository.prepareKeypadSale(
-                vendor, KEYPAD_DESCRIPTION, grossUnits, channelId, earliest, latest, latest, System.currentTimeMillis(),
+                vendor, KEYPAD_DESCRIPTION, grossUnits, earliest, latest, latest, System.currentTimeMillis(),
             )
             _state.value.copy(
                 orders = app.repository.orderViews(), sales = app.repository.recoverSales(_state.value.salesLimit), pending = app.repository.pendingUploads(),
@@ -341,8 +395,12 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
 
     private fun fail(error: Throwable) {
         _state.value = _state.value.copy(
-            busy = false, scanOpen = false, scanPurpose = null, error = true,
-            message = error.message ?: "That did not work. Try again",
+            // Waiting for the organizer is a normal setup step, not a failure.
+            busy = false, scanOpen = false, scanPurpose = null, error = error !is TerminalPairingPending,
+            // A dropped connection while waiting keeps the waiting card; the next check retries.
+            pairing = error is TerminalPairingPending || _state.value.pairing,
+            message = if (error is TerminalPairingPending) "Waiting for the organizer to approve this phone. It checks again by itself."
+            else error.message ?: "That did not work. Try again",
         )
     }
 
@@ -368,6 +426,11 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
 
     private companion object {
         const val JOURNAL_REFRESH_MS = 20_000L
+        const val PAIRING_RECHECK_MS = 10_000L
+        /** How often the automatic clock check looks at the sample. */
+        const val CLOCK_POLL_MS = 15_000L
+        /** While online, renew a trusted-time sample once it is this old. */
+        const val CLOCK_REFRESH_AGE_MS = 10 * 60 * 1_000L
         const val KEYPAD_DESCRIPTION = "Custom amount"
     }
 }

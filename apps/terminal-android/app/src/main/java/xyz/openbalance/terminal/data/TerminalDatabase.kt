@@ -86,6 +86,15 @@ interface TerminalDao {
     @Query("SELECT * FROM sales ORDER BY createdAt DESC LIMIT :limit") suspend fun sales(limit: Int = 100): List<SaleEntity>
     @Query("SELECT * FROM sales WHERE channelId = :channelId AND sequence = :sequence")
     suspend fun saleAt(channelId: String, sequence: Long): SaleEntity?
+    /** Version 2 requests the customer has not answered yet: no reserve is chosen, so none is held. */
+    @Query("SELECT * FROM sales WHERE state = 'PREPARED' AND channelId LIKE 'unbound:%'")
+    suspend fun preparedUnbound(): List<SaleEntity>
+    /**
+     * Ties an answered version 2 request to the reserve the customer chose. The unique
+     * (channelId, sequence) index makes this the claim on that reserve position.
+     */
+    @Query("UPDATE sales SET channelId=:channelId, sequence=:sequence, state='ATTENDEE_SIGNED', payloadNonce=:nonce, payloadCiphertext=:ciphertext, updatedAt=:now WHERE requestId=:requestId AND state='PREPARED' AND channelId=:unbound")
+    suspend fun bindSale(requestId: String, unbound: String, channelId: String, sequence: Long, nonce: ByteArray, ciphertext: ByteArray, now: Long): Int
     @Query("DELETE FROM sales WHERE requestId = :requestId AND state = 'PREPARED' AND relayState = 'NOT_READY'")
     suspend fun deleteUnansweredSale(requestId: String): Int
     @Query("UPDATE orders SET state='EXPIRED',updatedAt=:now WHERE requestId=:requestId AND state='REQUESTED'")

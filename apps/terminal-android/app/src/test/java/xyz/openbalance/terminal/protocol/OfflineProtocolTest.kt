@@ -63,6 +63,46 @@ class OfflineProtocolTest {
 
     private fun TerminalPaymentRequest.requestHash() = OfflineProtocol.requestHash(this)
 
+    // Version 2: the request names no reserve, and the customer's phone (the web wallet) builds and
+    // signs the voucher. These values come from packages/protocol and packages/attendee, so this pins
+    // that both sides encode, hash and build the same voucher. The digest equals the version 1
+    // vector above: the voucher, and so settlement, did not change.
+    @Test
+    fun matchesWebWalletForCustomerChosenReserve() {
+        val request = OpenPaymentRequest(
+            requestId = "request:android", terminalId = h('7'), paymentId = h('a'), orderRefHash = h('b'),
+            receiptCommitment = h('c'), grossUnits = BigInteger("125"), acceptedAt = 100, expiresAt = 150,
+            cursors = listOf("${OfflineProtocol.cursorKey(h('3'))}:1"),
+        )
+        val qr = OfflineProtocol.encodeOpenRequestQr(request)
+        assertEquals(
+            "obqr1:eyJ2ZXJzaW9uIjoyLCJraW5kIjoib2ZmbGluZS1wYXltZW50LXJlcXVlc3QiLCJyZXF1ZXN0SWQiOiJyZXF1ZXN0OmFuZHJvaWQiLCJ0ZXJtaW5hbElkIjoiMHg3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3IiwicGF5bWVudElkIjoiMHhhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhIiwib3JkZXJSZWZIYXNoIjoiMHhiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiIiwicmVjZWlwdENvbW1pdG1lbnQiOiIweGNjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2MiLCJncm9zc1VuaXRzIjoiMTI1IiwiYWNjZXB0ZWRBdCI6MTAwLCJleHBpcmVzQXQiOjE1MCwiY3Vyc29ycyI6WyIzMzMzMzMzMzMzMzM6MSJdfQ",
+            qr,
+        )
+        assertEquals(request, OfflineProtocol.decodeOpenRequestQr(qr))
+        assertEquals("0x53e0f675bf56e5ac436acfa972684341fb3c0e900ee4a9c0741ea150e406c4a0", OfflineProtocol.openRequestHash(request))
+        val voucher = OfflineProtocol.buildVoucher(snapshot, 1, h('8'), BigInteger.ZERO, request)
+        assertEquals(
+            "0x47c1d6bc2bb46c1176e8ad195e125e3292edfe594ef789df55df3e49bb97228e",
+            "0x" + OfflineProtocol.voucherDigest(voucher).toHex(),
+        )
+        val response = OfflineProtocol.decodeChannelResponseQr(
+            "obqr1:eyJ2ZXJzaW9uIjoyLCJraW5kIjoib2ZmbGluZS12b3VjaGVyLXJlc3BvbnNlIiwicmVxdWVzdEhhc2giOiIweDUzZTBmNjc1YmY1NmU1YWM0MzZhY2ZhOTcyNjg0MzQxZmIzYzBlOTAwZWU0YTljMDc0MWVhMTUwZTQwNmM0YTAiLCJjaGFubmVsSWQiOiIweDMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMiLCJhdHRlbmRlZVNpZ25hdHVyZSI6IjB4MWM0Y2I2MDQwZmI0MzE5NGJiZjBkY2M3NjI1Nzg1OTNiNmQyOTE1NzEwOGNjMmI3MGI0MDZiYWFiODc3M2JkYTBlOTk2Yzk3MzA1ZDA0OWNjMjdkNTk1OWQzODU3YTBiOTdjNTUxZjM4MjlkOTNlZDcwMjM0YmMwZTU0OTQyNzIxYiJ9",
+        )
+        assertEquals(h('3'), response.channelId)
+        assertEquals(OfflineProtocol.openRequestHash(request), response.requestHash)
+        OfflineProtocol.verifyAttendeeVoucher(voucher, response.attendeeSignature, snapshot.attendeeSigner)
+        // A terminal one position ahead builds a different voucher, so the same answer is refused.
+        val ahead = OfflineProtocol.buildVoucher(snapshot, 2, h('9'), BigInteger("125"), request)
+        assertThrows(InvalidOfflineExchange::class.java) {
+            OfflineProtocol.verifyAttendeeVoucher(ahead, response.attendeeSignature, snapshot.attendeeSigner)
+        }
+        // Over the reserve's finalized per-sale cap.
+        assertThrows(InvalidOfflineExchange::class.java) {
+            OfflineProtocol.buildVoucher(snapshot, 1, h('8'), BigInteger.ZERO, request.copy(grossUnits = BigInteger("501")))
+        }
+    }
+
     @Test
     fun rejectsExpiredOrCrossRequestAttendeeResponse() {
         val (_, request) = OfflineProtocol.prepareVoucher(

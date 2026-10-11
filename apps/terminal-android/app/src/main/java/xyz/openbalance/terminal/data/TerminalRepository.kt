@@ -2,9 +2,9 @@ package xyz.openbalance.terminal.data
 
 import androidx.room.withTransaction
 import org.json.JSONObject
-import xyz.openbalance.terminal.protocol.AttendeeVoucherResponse
 import xyz.openbalance.terminal.protocol.ChannelSnapshot
 import xyz.openbalance.terminal.protocol.OfflineProtocol
+import xyz.openbalance.terminal.protocol.OpenPaymentRequest
 import xyz.openbalance.terminal.protocol.TerminalPaymentRequest
 import xyz.openbalance.terminal.protocol.VoucherReceipt
 import xyz.openbalance.terminal.security.EncryptedJournalPayloads
@@ -18,8 +18,17 @@ import java.security.SecureRandom
 import java.util.UUID
 
 data class UploadAuthorization(val keyVersion: Long, val sentAt: Long, val nonce: String, val signature: String)
+/**
+ * What the journal stores for one sale. [requestQr] is the code shown to the customer, kept byte
+ * for byte. A version 2 request is not tied to a reserve until the customer answers, so
+ * [voucher] is null until then; version 1 rows (from before) carry the voucher in the request.
+ */
 data class SalePayload(
-    val request: TerminalPaymentRequest,
+    val requestQr: String,
+    val grossUnits: BigInteger,
+    val expiresAt: Long,
+    val openRequest: OpenPaymentRequest?,
+    val voucher: String?,
     val attendeeSignature: String?,
     val receipt: VoucherReceipt?,
     val uploadAuthorization: UploadAuthorization? = null,
@@ -123,9 +132,14 @@ class TerminalRepository(
         created
     }
 
+    /**
+     * Creates a payment request for an order without choosing a reserve: the customer's phone
+     * picks one of its reserves for this stall when it answers. The request lists every reserve
+     * this terminal can charge for the amount, with the position it expects next on each, so the
+     * phone builds the same voucher the terminal will. Throws when no reserve can cover it.
+     */
     suspend fun prepareOrderSale(
         orderId: String,
-        channelId: String,
         acceptedAt: Long,
         latestTrustedAt: Long,
         nowSeconds: Long,
@@ -134,25 +148,58 @@ class TerminalRepository(
         database.withTransaction {
             val order = requireNotNull(dao.order(orderId)) { "POS order is not imported" }
             check(order.state == "IMPORTED" && order.expiresAt > nowSeconds) { "POS order is unavailable" }
-            val channel = requireNotNull(dao.channel(channelId.lowercase())) { "Channel is not installed" }
-            val snapshot = parseSnapshot(channel.snapshotJson)
-            val expiresAt = minOf(order.expiresAt, snapshot.acceptUntil, Math.addExact(nowSeconds, 120))
+            releaseExpiredUnboundRequests(nowSeconds, now)
+            val gross = BigInteger(order.grossUnits)
+            val eligible = chargeableChannels(gross, acceptedAt, nowSeconds)
+            check(eligible.isNotEmpty()) { "No customer reserve here can pay this amount" }
+            // One terminal identity per request; after a re-pairing, older reserves may name another.
+            val terminalId = eligible.first().second.terminalId.lowercase()
+            val cursors = eligible.filter { it.second.terminalId.equals(terminalId, true) }
+                .sortedByDescending { it.second.acceptUntil }
+                .distinctBy { OfflineProtocol.cursorKey(it.first.channelId) }
+                .take(OfflineProtocol.MAX_REQUEST_CURSORS)
+                .map { "${OfflineProtocol.cursorKey(it.first.channelId)}:${it.first.nextSequence}" }
+                .sorted()
+            val expiresAt = minOf(order.expiresAt, Math.addExact(nowSeconds, REQUEST_SECONDS))
             check(latestTrustedAt >= acceptedAt && latestTrustedAt < expiresAt) { "Trusted time does not fit the payment window" }
-            releaseExpiredRequest(channel.channelId, channel.nextSequence, nowSeconds, now)
             val requestId = UUID.randomUUID().toString()
             var paymentBytes: ByteArray
             do paymentBytes = ByteArray(32).also(SecureRandom()::nextBytes) while (paymentBytes.all { it == 0.toByte() })
             val paymentId = "0x" + paymentBytes.toHex()
-            val (_, request) = OfflineProtocol.prepareVoucher(
-                snapshot, channel.nextSequence, channel.lastVoucherDigest, BigInteger(channel.spentUnits),
-                paymentId, order.orderRefHash, BigInteger(order.grossUnits), order.receiptCommitment,
-                acceptedAt, expiresAt, requestId,
+            val request = OpenPaymentRequest(
+                requestId, terminalId, paymentId, order.orderRefHash.lowercase(), order.receiptCommitment.lowercase(),
+                gross, acceptedAt, expiresAt, cursors,
             )
-            val sealed = seal(requestId, SalePayload(request, null, null))
-            dao.insertSale(newSale(requestId, channel.channelId, channel.nextSequence, paymentId, sealed, now))
+            val payload = SalePayload(OfflineProtocol.encodeOpenRequestQr(request), gross, expiresAt, request, null, null, null)
+            dao.insertSale(newSale(requestId, UNBOUND + requestId, 0, paymentId, seal(requestId, payload), now))
             check(dao.markOrderRequested(orderId, requestId, nowSeconds, now) == 1) { "POS order was already used" }
             view(requireNotNull(dao.sale(requestId)))
         }
+
+    /**
+     * Reserves this terminal can charge [gross] against now, newest first, with their parsed
+     * terms. A reserve whose next position is still held by an older, live or answered request is
+     * left out until that request settles one way or the other.
+     */
+    private suspend fun chargeableChannels(gross: BigInteger, acceptedAt: Long, nowSeconds: Long) =
+        dao.channels().mapNotNull { row ->
+            val snapshot = parseSnapshot(row.snapshotJson)
+            val held = dao.saleAt(row.channelId, row.nextSequence)
+            val heldOpen = held != null && !(held.state == "PREPARED" && open(held).expiresAt <= nowSeconds)
+            val remaining = snapshot.reserveUnits - BigInteger(row.spentUnits)
+            if (heldOpen || nowSeconds >= snapshot.acceptUntil || acceptedAt < snapshot.acceptFrom ||
+                acceptedAt >= snapshot.acceptUntil || row.nextSequence > snapshot.maxVoucherCount ||
+                gross > snapshot.maxPerVoucher || gross > remaining
+            ) null else row to snapshot
+        }
+
+    /** Unanswered version 2 requests past their expiry hold nothing; drop them and free their orders. */
+    private suspend fun releaseExpiredUnboundRequests(nowSeconds: Long, now: Long) {
+        for (row in dao.preparedUnbound()) {
+            if (open(row).expiresAt > nowSeconds) continue
+            if (dao.deleteUnansweredSale(row.requestId) == 1) dao.expireRequestedOrder(row.requestId, now)
+        }
+    }
 
     /**
      * A sale the cashier keys in on the terminal, the way card terminals take a custom amount. It
@@ -163,7 +210,6 @@ class TerminalRepository(
         vendor: VendorProfile,
         description: String,
         grossUnits: BigInteger,
-        channelId: String,
         acceptedAt: Long,
         latestTrustedAt: Long,
         nowSeconds: Long,
@@ -191,45 +237,46 @@ class TerminalRepository(
             assetDecimals = vendor.assetDecimals,
         )
         check(importOrders(listOf(order), now) == 1) { "Keypad order conflict" }
-        prepareOrderSale(order.orderId, channelId, acceptedAt, latestTrustedAt, nowSeconds, now)
+        prepareOrderSale(order.orderId, acceptedAt, latestTrustedAt, nowSeconds, now)
     }
 
-    suspend fun prepareSale(
-        channelId: String,
-        requestId: String,
-        paymentId: String,
-        orderRefHash: String,
-        grossUnits: BigInteger,
-        receiptCommitment: String,
-        acceptedAt: Long,
-        expiresAt: Long,
-        now: Long,
-    ): SaleView = database.withTransaction {
-        val channel = requireNotNull(dao.channel(channelId.lowercase())) { "Channel is not installed" }
-        val snapshot = parseSnapshot(channel.snapshotJson)
-        val (_, request) = OfflineProtocol.prepareVoucher(
-            snapshot, channel.nextSequence, channel.lastVoucherDigest, BigInteger(channel.spentUnits),
-            paymentId, orderRefHash, grossUnits, receiptCommitment, acceptedAt, expiresAt, requestId,
-        )
-        val payload = SalePayload(request, null, null)
-        val sealed = seal(requestId, payload)
-        dao.insertSale(newSale(requestId, channel.channelId, channel.nextSequence, paymentId.lowercase(), sealed, now))
-        view(requireNotNull(dao.sale(requestId)))
-    }
-
-    suspend fun recordAttendeeResponse(requestId: String, qr: String, nowSeconds: Long, now: Long): SaleView =
+    /**
+     * Takes the customer's answer to a version 2 request and, in one transaction, binds the sale to
+     * the reserve they chose, checks their signature against the voucher this terminal builds
+     * from its own position on that reserve, and countersigns. Nothing the phone says about the
+     * reserve's state is trusted: a phone that is out of step simply fails the signature check.
+     */
+    suspend fun respond(requestId: String, qr: String, nowSeconds: Long, now: Long, signingTime: () -> Pair<Long, Long>): SaleView =
         database.withTransaction {
             val row = requireNotNull(dao.sale(requestId)) { "Sale not found" }
-            check(row.state == "PREPARED" || row.state == "ATTENDEE_SIGNED") { "Sale cannot accept attendee response" }
-            val current = open(row)
-            val snapshot = parseSnapshot(requireNotNull(dao.channel(row.channelId)).snapshotJson)
-            val response = OfflineProtocol.decodeAttendeeResponseQr(qr)
-            val signature = OfflineProtocol.verifyAttendee(current.request, response, snapshot.attendeeSigner, nowSeconds)
-            if (current.attendeeSignature != null) check(current.attendeeSignature == signature) { "Attendee signature conflict" }
-            val next = current.copy(attendeeSignature = signature)
-            val sealed = seal(requestId, next)
-            if (row.state == "PREPARED") check(dao.transition(requestId, "PREPARED", "ATTENDEE_SIGNED", sealed.first, sealed.second, now) == 1)
-            view(requireNotNull(dao.sale(requestId)))
+            if (row.state == "ACCEPTED") return@withTransaction view(row)
+            if (row.state == "ATTENDEE_SIGNED") return@withTransaction accept(requestId, nowSeconds, now, signingTime)
+            check(row.state == "PREPARED" && row.channelId.startsWith(UNBOUND)) { "This payment cannot take an answer" }
+            val payload = open(row)
+            val request = requireNotNull(payload.openRequest) { "This payment cannot take an answer" }
+            val response = OfflineProtocol.decodeChannelResponseQr(qr)
+            check(response.requestHash.equals(OfflineProtocol.openRequestHash(request), true)) {
+                "That approval is for another payment"
+            }
+            check(nowSeconds <= request.expiresAt) { "The approval came too late. Charge again" }
+            val channelId = response.channelId.lowercase()
+            val channel = requireNotNull(dao.channel(channelId)) { "That reserve is not on this terminal. Tap Refresh and charge again" }
+            val snapshot = parseSnapshot(channel.snapshotJson)
+            check(snapshot.terminalId.equals(request.terminalId, true)) { "That reserve belongs to another stall" }
+            check("${OfflineProtocol.cursorKey(channelId)}:${channel.nextSequence}" in request.cursors) {
+                "That reserve was not offered for this payment. Charge again"
+            }
+            releaseExpiredRequest(channelId, channel.nextSequence, nowSeconds, now)
+            val voucher = OfflineProtocol.buildVoucher(
+                snapshot, channel.nextSequence, channel.lastVoucherDigest, BigInteger(channel.spentUnits), request,
+            )
+            val signature = OfflineProtocol.verifyAttendeeVoucher(voucher, response.attendeeSignature, snapshot.attendeeSigner)
+            val bound = payload.copy(voucher = OfflineProtocol.encodeVoucher(voucher), attendeeSignature = signature)
+            val sealed = seal(requestId, bound)
+            check(dao.bindSale(requestId, row.channelId, channelId, voucher.sequence, sealed.first, sealed.second, now) == 1) {
+                "Payment changed while it was being accepted"
+            }
+            accept(requestId, nowSeconds, now, signingTime)
         }
 
     suspend fun accept(requestId: String, nowSeconds: Long, now: Long, signingTime: () -> Pair<Long, Long>): SaleView = database.withTransaction {
@@ -240,18 +287,19 @@ class TerminalRepository(
         val attendeeSignature = requireNotNull(payload.attendeeSignature)
         val channel = requireNotNull(dao.channel(row.channelId))
         val snapshot = parseSnapshot(channel.snapshotJson)
-        val voucher = OfflineProtocol.decodeVoucher(payload.request.voucher)
-        check(nowSeconds < voucher.acceptUntil && nowSeconds <= payload.request.expiresAt) { "Acceptance window closed" }
+        val encodedVoucher = requireNotNull(payload.voucher) { "Sale is not tied to a reserve yet" }
+        val voucher = OfflineProtocol.decodeVoucher(encodedVoucher)
+        check(nowSeconds < voucher.acceptUntil && nowSeconds <= payload.expiresAt) { "Acceptance window closed" }
         check(channel.nextSequence == voucher.sequence && channel.lastVoucherDigest.equals(voucher.previousVoucherDigest, true)) { "Channel cursor conflict" }
         val terminalSignature = "0x" + keys.signDigest(OfflineProtocol.voucherDigest(voucher)).toHex()
         val time = signingTime()
         check(time.first >= Math.multiplyExact(snapshot.acceptFrom, 1000L) &&
             time.second < Math.multiplyExact(voucher.acceptUntil, 1000L) &&
-            time.second <= Math.multiplyExact(payload.request.expiresAt, 1000L)) { "Signing crossed the acceptance window" }
+            time.second <= Math.multiplyExact(payload.expiresAt, 1000L)) { "Signing crossed the acceptance window" }
         val receipt = VoucherReceipt(
             receiptId = "receipt:${Keccak.hex(requestId.toByteArray()).removePrefix("0x")}", terminalId = snapshot.terminalId,
             channelId = snapshot.channelId, sequence = voucher.sequence, paymentId = voucher.paymentId,
-            voucher = payload.request.voucher, attendeeSignature = attendeeSignature, terminalSignature = terminalSignature,
+            voucher = encodedVoucher, attendeeSignature = attendeeSignature, terminalSignature = terminalSignature,
         )
         val receiptJson = OfflineProtocol.canonicalReceipt(receipt)
         val sealed = seal(requestId, payload.copy(receipt = receipt))
@@ -331,7 +379,7 @@ class TerminalRepository(
     /** Every unsettled accepted sale, not just the recent list, so the totals cannot undercount. */
     suspend fun pendingUploads(): OfflineLimits.PendingUploads = OfflineLimits.pendingUploads(
         dao.unsettledSales().map { row ->
-            val voucher = OfflineProtocol.decodeVoucher(open(row).request.voucher)
+            val voucher = OfflineProtocol.decodeVoucher(requireNotNull(open(row).voucher))
             OfflineLimits.UnsettledSale(row.relayState, row.relayAcknowledgedAt != null, voucher.grossUnits, voucher.submitUntil)
         },
         // Display only: the deadline the vault enforces is chain time, which this clock tracks closely.
@@ -354,7 +402,7 @@ class TerminalRepository(
      */
     private suspend fun releaseExpiredRequest(channelId: String, sequence: Long, nowSeconds: Long, now: Long) {
         val held = dao.saleAt(channelId, sequence) ?: return
-        check(held.state == "PREPARED" && open(held).request.expiresAt <= nowSeconds) {
+        check(held.state == "PREPARED" && open(held).expiresAt <= nowSeconds) {
             "Channel sequence is held by an open or answered payment request"
         }
         check(dao.deleteUnansweredSale(held.requestId) == 1) { "Expired payment request changed concurrently" }
@@ -363,13 +411,13 @@ class TerminalRepository(
 
     private fun view(row: SaleEntity): SaleView {
         val payload = open(row)
-        val voucher = OfflineProtocol.decodeVoucher(payload.request.voucher)
+        val voucher = payload.voucher?.let(OfflineProtocol::decodeVoucher)
         return SaleView(
-            row.requestId, row.channelId, row.state, row.relayState,
-            OfflineProtocol.encodeRequestQr(payload.request), payload.receipt?.let(OfflineProtocol::canonicalReceipt),
+            row.requestId, if (row.channelId.startsWith(UNBOUND)) "" else row.channelId, row.state, row.relayState,
+            payload.requestQr, payload.receipt?.let(OfflineProtocol::canonicalReceipt),
             row.transactionHash, row.lastUploadError,
-            voucher.grossUnits.toString(),
-            payload.request.expiresAt, row.createdAt, voucher.submitUntil,
+            payload.grossUnits.toString(),
+            payload.expiresAt, row.createdAt, voucher?.submitUntil ?: 0,
         )
     }
 
@@ -381,7 +429,8 @@ class TerminalRepository(
     )
 
     private fun payloadJson(value: SalePayload) = JSONObject().apply {
-        put("requestQr", OfflineProtocol.encodeRequestQr(value.request))
+        put("requestQr", value.requestQr)
+        put("voucher", value.voucher ?: JSONObject.NULL)
         put("attendeeSignature", value.attendeeSignature ?: JSONObject.NULL)
         put("receipt", value.receipt?.let(OfflineProtocol::canonicalReceipt) ?: JSONObject.NULL)
         put("uploadAuthorization", value.uploadAuthorization?.let { authorizationJson(it) } ?: JSONObject.NULL)
@@ -389,16 +438,20 @@ class TerminalRepository(
 
     private fun parsePayload(value: String): SalePayload {
         val json = JSONObject(value)
-        val request = decodeRequestQr(json.getString("requestQr"))
+        val requestQr = json.getString("requestQr")
         val receipt = if (json.isNull("receipt")) null else parseReceipt(json.getString("receipt"))
         val authorization = if (!json.has("uploadAuthorization") || json.isNull("uploadAuthorization")) null
         else parseAuthorization(json.getJSONObject("uploadAuthorization"))
-        return SalePayload(
-            request,
-            if (json.isNull("attendeeSignature")) null else json.getString("attendeeSignature"),
-            receipt,
-            authorization,
-        )
+        val attendeeSignature = if (json.isNull("attendeeSignature")) null else json.getString("attendeeSignature")
+        if (OfflineProtocol.qrVersion(requestQr) == 2) {
+            val request = OfflineProtocol.decodeOpenRequestQr(requestQr)
+            val voucher = if (!json.has("voucher") || json.isNull("voucher")) null else json.getString("voucher")
+            return SalePayload(requestQr, request.grossUnits, request.expiresAt, request, voucher, attendeeSignature, receipt, authorization)
+        }
+        // Version 1 rows: the request was already tied to one reserve and carries the voucher.
+        val legacy = decodeRequestQr(requestQr)
+        val voucher = OfflineProtocol.decodeVoucher(legacy.voucher)
+        return SalePayload(requestQr, voucher.grossUnits, legacy.expiresAt, null, legacy.voucher, attendeeSignature, receipt, authorization)
     }
 
     private fun decodeRequestQr(value: String): TerminalPaymentRequest {
@@ -475,6 +528,10 @@ class TerminalRepository(
 
     private companion object {
         const val KEYPAD_ORDER_SECONDS = 600L
+        /** How long a customer has to answer a payment request. */
+        const val REQUEST_SECONDS = 120L
+        /** channelId placeholder for a request the customer has not answered (no reserve chosen yet). */
+        const val UNBOUND = "unbound:"
         val keypadReferenceFormat: java.time.format.DateTimeFormatter =
             java.time.format.DateTimeFormatter.ofPattern("yyMMdd-HHmmss").withZone(java.time.ZoneOffset.UTC)
     }

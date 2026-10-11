@@ -59,6 +59,7 @@ import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.DateRange
 import androidx.compose.material.icons.rounded.Lock
+import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Send
 import androidx.compose.material.icons.rounded.ShoppingCart
@@ -69,6 +70,8 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -114,6 +117,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -245,10 +249,9 @@ private fun isLiveRequest(sale: SaleView, nowSeconds: Long) =
 private fun CheckoutTab(state: TerminalUiState, model: TerminalViewModel, openTerminal: () -> Unit) {
     val orders = chargeableOrders(state)
     val live = state.sales.firstOrNull { isLiveRequest(it, state.nowSeconds) }
-    var pickingReserve by remember { mutableStateOf(false) }
     TabList {
-        item { TopBar(state) }
-        item { ReadinessCard(state, model, onChangeReserve = { pickingReserve = true }, openTerminal = openTerminal) }
+        item { TopBar(state, model) }
+        item { ReadinessCard(state, model, openTerminal = openTerminal) }
         if (state.pending.waitingCount > 0 || state.pending.needsAttentionCount > 0) {
             item(key = "pending") { PendingUploadBanner(state, model) }
         }
@@ -263,7 +266,6 @@ private fun CheckoutTab(state: TerminalUiState, model: TerminalViewModel, openTe
             items(orders, key = { "order:${it.orderId}" }) { order -> OrderRow(order, state, model) }
         }
     }
-    if (pickingReserve) ReservePicker(state, model) { pickingReserve = false }
 }
 
 @Composable
@@ -389,7 +391,7 @@ private fun TerminalTab(state: TerminalUiState, model: TerminalViewModel) {
     var showClosed by rememberSaveable { mutableStateOf(false) }
     var visible by rememberSaveable { mutableStateOf(RESERVE_PAGE_SIZE) }
     TabList {
-        item { TopBar(state) }
+        item { TopBar(state, model) }
         item { StatusHero(state, enrolled, timeReady) }
         item { ActionDeck(state, model, enrolled, timeReady) }
         val open = usableChannels(state)
@@ -418,11 +420,8 @@ private fun TerminalTab(state: TerminalUiState, model: TerminalViewModel) {
             }
         }
         items(list.take(visible), key = { "channel:${it.channelId}" }) { channel ->
-            ChannelCard(
-                channel,
-                selected = !showClosed && state.selectedChannelId == channel.channelId,
-                enabled = !state.busy && !showClosed,
-            ) { model.selectChannel(channel.channelId) }
+            // Informational: the customer's phone picks which of its reserves pays.
+            ChannelCard(channel, selected = false, enabled = false) {}
         }
         if (list.size > visible) {
             item(key = "moreReserves") {
@@ -442,20 +441,30 @@ private fun TerminalTab(state: TerminalUiState, model: TerminalViewModel) {
  * against which reserve. Everything else lives on the Terminal tab.
  */
 @Composable
-private fun ReadinessCard(state: TerminalUiState, model: TerminalViewModel, onChangeReserve: () -> Unit, openTerminal: () -> Unit) {
+private fun ReadinessCard(state: TerminalUiState, model: TerminalViewModel, openTerminal: () -> Unit) {
     val haptics = LocalHapticFeedback.current
     val usable = usableChannels(state)
-    val selected = usable.firstOrNull { it.channelId == state.selectedChannelId }
     val timeReady = state.trustedTime != null
-    val ready = state.configured && timeReady && selected != null
+    val ready = state.configured && !state.pairing && timeReady && usable.isNotEmpty()
+    var details by rememberSaveable { mutableStateOf(false) }
     val (title, action) = when {
         !state.configured -> "Set up this terminal" to ("Start setup" to openTerminal)
-        !timeReady -> "Clock check needed" to ("Check clock" to { model.refreshTime(); Unit })
+        state.pairing -> "Waiting for approval" to ("Check again" to { model.synchronize(); Unit })
+        // The clock is checked by itself while online; a button appears only when that failed.
+        !timeReady && state.clockFailed -> "Connect to the internet" to ("Try again" to { model.refreshTime(); Unit })
+        !timeReady -> "Getting the time…" to null
         usable.isEmpty() && state.channels.any { it.acceptUntil > state.nowSeconds } ->
             "Reserves used up" to ("Refresh for new reserves" to { model.synchronize(); Unit })
         usable.isEmpty() -> "Waiting for reserves" to ("Refresh" to { model.synchronize(); Unit })
-        selected == null -> "Choose a reserve" to ("Choose reserve" to onChangeReserve)
         else -> "Ready to charge" to null
+    }
+    val subtitle = when {
+        !state.configured -> "Scan the setup code from the stall owner or organizer."
+        state.pairing -> "The organizer still has to approve this phone."
+        !timeReady && state.clockFailed -> "The phone needs the internet once to check the time before selling."
+        !timeReady -> "This takes a few seconds."
+        usable.isEmpty() -> "No open reserves right now. One appears when a customer sets money aside for this stall."
+        else -> null
     }
     Surface(
         shape = MaterialTheme.shapes.large,
@@ -463,54 +472,44 @@ private fun ReadinessCard(state: TerminalUiState, model: TerminalViewModel, onCh
         border = BorderStroke(1.dp, if (ready) TerminalColors.Mint.copy(alpha = 0.4f) else MaterialTheme.colorScheme.outlineVariant),
         modifier = Modifier.fillMaxWidth().animateContentSize(),
     ) {
-        Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(title, style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f).semantics { heading() })
-                val seconds = state.timeValidSeconds
-                if (timeReady && seconds != null) {
-                    StatusPill(
-                        "Clock ${countdown(seconds)}",
-                        if (seconds <= 60) TerminalColors.Amber else TerminalColors.Mint,
-                        pulsing = seconds <= 60,
-                    )
-                }
-            }
-            if (selected != null) {
-                Row(
-                    Modifier.fillMaxWidth().clip(MaterialTheme.shapes.medium)
-                        .background(MaterialTheme.colorScheme.surfaceContainerHighest)
-                        .clickable(enabled = !state.busy, role = Role.Button, onClickLabel = "Change reserve", onClick = onChangeReserve)
-                        .padding(horizontal = 14.dp, vertical = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Icon(Icons.Rounded.Lock, null, tint = TerminalColors.Mint, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(10.dp))
-                    Column(Modifier.weight(1f)) {
-                        Text("${formatUnits(selected.remainingUnits, CHANNEL_ASSET_DECIMALS)} $CHANNEL_ASSET_SYMBOL reserve", style = MaterialTheme.typography.titleSmall)
-                        Text(
-                            "Up to ${formatUnits(selected.maxPerSaleUnits.toString(), CHANNEL_ASSET_DECIMALS)} per sale · " +
-                                "${selected.salesLeft} sale${if (selected.salesLeft == 1L) "" else "s"} left",
-                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    if (usable.size > 1) Text("Change", style = MaterialTheme.typography.labelLarge, color = TerminalColors.Mint)
-                }
-                // The reserve stops taking offline payments at acceptUntil; count down to it the way
-                // trusted time is counted down, so a cashier is never surprised mid-queue.
-                val left = selected.acceptUntil - state.nowSeconds
-                StatusPill(
-                    "Takes payments for ${countdown(left)} · until ${clock(selected.acceptUntil)}",
-                    if (left <= RESERVE_CLOSING_SECONDS) TerminalColors.Amber else TerminalColors.Mint,
-                    pulsing = left <= RESERVE_CLOSING_SECONDS,
+                Box(
+                    Modifier.size(10.dp).clip(CircleShape)
+                        .background(if (ready) TerminalColors.Mint else TerminalColors.Amber),
                 )
+                Spacer(Modifier.width(10.dp))
+                Text(title, style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f).semantics { heading() })
+                if (ready) {
+                    TextButton(onClick = { details = !details }) { Text(if (details) "Hide details" else "Details") }
+                }
             }
-            MessageLine(state)
+            subtitle?.let {
+                Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            if (ready) {
+                Text(
+                    "${usable.size} customer${if (usable.size == 1) "" else "s"} can pay offline",
+                    style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                AnimatedVisibility(details, enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        DetailLine(
+                            "Most one customer can pay",
+                            "${formatUnits(OfflineLimits.bestCover(usable).toString(), CHANNEL_ASSET_DECIMALS)} $CHANNEL_ASSET_SYMBOL",
+                        )
+                        usable.minOfOrNull { it.acceptUntil }?.let { DetailLine("First reserve closes at", clock(it)) }
+                    }
+                }
+            }
+            // Errors always show; routine progress only appears in Details.
+            if (state.error) MessageLine(state)
             action?.let { (label, onClick) ->
                 PrimaryAction(label, if (label == "Start setup" || label == "Choose reserve") null else Icons.Rounded.Refresh, enabled = !state.busy) {
                     haptics.performHapticFeedback(HapticFeedbackType.LongPress); onClick()
                 }
             }
-            AnimatedVisibility(state.busy, enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
+            AnimatedVisibility(state.busy || (!timeReady && !state.clockFailed && state.configured && !state.pairing), enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
                 LinearProgressIndicator(
                     modifier = Modifier.fillMaxWidth().height(4.dp).clip(CircleShape),
                     color = TerminalColors.Mint, trackColor = MaterialTheme.colorScheme.surfaceContainerHighest,
@@ -520,22 +519,11 @@ private fun ReadinessCard(state: TerminalUiState, model: TerminalViewModel, onCh
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ReservePicker(state: TerminalUiState, model: TerminalViewModel, onDismiss: () -> Unit) {
-    val sheet = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheet, containerColor = MaterialTheme.colorScheme.surfaceContainer) {
-        LazyColumn(
-            contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = 28.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            item { Text("Charge against", style = MaterialTheme.typography.titleLarge, modifier = Modifier.semantics { heading() }) }
-            items(usableChannels(state), key = { it.channelId }) { channel ->
-                ChannelCard(channel, selected = state.selectedChannelId == channel.channelId, enabled = !state.busy) {
-                    model.selectChannel(channel.channelId); onDismiss()
-                }
-            }
-        }
+private fun DetailLine(label: String, value: String) {
+    Row(Modifier.fillMaxWidth()) {
+        Text(label, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f))
+        Text(value, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurface)
     }
 }
 
@@ -640,14 +628,22 @@ private fun SummaryTile(label: String, count: Int, color: Color, modifier: Modif
 }
 
 @Composable
-private fun TopBar(state: TerminalUiState) {
+private fun TopBar(state: TerminalUiState, model: TerminalViewModel) {
+    var menuOpen by remember { mutableStateOf(false) }
+    var confirmReenroll by remember { mutableStateOf(false) }
     Row(Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
         BrandMark()
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
             Text("OpenBalance", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-            Text("Terminal", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            // Which stall this phone sells for, so a phone moved between stalls is never ambiguous.
+            Text(
+                state.vendor?.vendorName?.let { "Terminal · $it" } ?: "Terminal",
+                style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+            )
         }
+
         StatusPill(
             text = when {
                 state.busy -> "Working"
@@ -660,6 +656,38 @@ private fun TopBar(state: TerminalUiState) {
                 else -> TerminalColors.Muted
             },
             pulsing = state.busy,
+        )
+        // The one place the setup steps point to, on every tab: "Tap ⋮, then Scan setup code".
+        Box {
+            IconButton(onClick = { menuOpen = true }, enabled = !state.busy) {
+                Icon(Icons.Rounded.MoreVert, contentDescription = "More options")
+            }
+            DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                DropdownMenuItem(
+                    text = { Text("Scan setup code") },
+                    leadingIcon = { ScanGlyph(18.dp, MaterialTheme.colorScheme.onSurface) },
+                    onClick = {
+                        menuOpen = false
+                        if (state.configured) confirmReenroll = true else model.beginEnrollmentScan()
+                    },
+                )
+            }
+        }
+    }
+    if (confirmReenroll) {
+        AlertDialog(
+            onDismissRequest = { confirmReenroll = false },
+            title = { Text("Scan a new setup code?") },
+            text = {
+                Text(
+                    state.vendor?.let { "This phone stops selling for ${it.vendorName} and sells for the stall in the new code. Your sales stay on this phone." }
+                        ?: "Scan the setup code for your stall. Your sales stay on this phone.",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { confirmReenroll = false; model.beginEnrollmentScan() }) { Text("Scan code") }
+            },
+            dismissButton = { TextButton(onClick = { confirmReenroll = false }) { Text("Cancel") } },
         )
     }
 }
@@ -709,6 +737,7 @@ private fun StatusHero(state: TerminalUiState, enrolled: Boolean, timeReady: Boo
     val ready = enrolled && timeReady && openCount > 0
     val title = when {
         !enrolled -> "Set up this terminal"
+        state.pairing -> "Waiting for approval"
         !timeReady -> "Clock check needed"
         !state.synced && state.channels.isEmpty() -> "Tap Refresh to go live"
         openCount == 0 -> "Waiting for reserves"
@@ -740,7 +769,7 @@ private fun StatusHero(state: TerminalUiState, enrolled: Boolean, timeReady: Boo
                 Spacer(Modifier.height(18.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                     ReadinessStep("Set up", enrolled, Modifier.weight(1f))
-                    ReadinessStep(state.timeValidSeconds?.takeIf { timeReady }?.let { "Clock ${countdown(it)}" } ?: "Clock", timeReady, Modifier.weight(1f))
+                    ReadinessStep("Clock", timeReady, Modifier.weight(1f))
                     ReadinessStep(if (openCount == 0) "Reserves" else "$openCount open",
                         openCount > 0, Modifier.weight(1f))
                 }
@@ -806,7 +835,9 @@ private fun ActionDeck(state: TerminalUiState, model: TerminalViewModel, enrolle
     // one tap away as a compact tonal action.
     val primary: Triple<String, ImageVector?, () -> Unit> = when {
         !enrolled -> Triple("Scan setup code", null, model::beginEnrollmentScan)
-        !timeReady -> Triple("Check clock", Icons.Rounded.DateRange, { model.refreshTime(); Unit })
+        state.pairing -> Triple("Check again", Icons.Rounded.Refresh, { model.synchronize(); Unit })
+        // The clock syncs by itself while online; a retry appears only when that failed.
+        !timeReady && state.clockFailed -> Triple("Try again", Icons.Rounded.Refresh, { model.refreshTime(); Unit })
         else -> Triple("Refresh", Icons.Rounded.Refresh, { model.synchronize(); Unit })
     }
     var confirmReenroll by remember { mutableStateOf(false) }
@@ -814,15 +845,23 @@ private fun ActionDeck(state: TerminalUiState, model: TerminalViewModel, enrolle
         PrimaryAction(primary.first, primary.second, enabled = !state.busy, onClick = act(primary.third))
         if (enrolled) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                if (timeReady) {
-                    ChipAction("Check clock", Icons.Rounded.DateRange, !state.busy, act { model.refreshTime() })
-                } else {
+                if (primary.first != "Refresh") {
                     ChipAction("Refresh", Icons.Rounded.Refresh, !state.busy, act { model.synchronize() })
                 }
                 ChipAction("Upload sales", Icons.Rounded.Send, !state.busy, act { model.synchronizeReceipts() })
             }
-            TextButton(onClick = { confirmReenroll = true }, enabled = !state.busy, modifier = Modifier.fillMaxWidth()) {
-                Text("Set up again with a new code", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            // A real (outlined) button, quieter than Refresh / Upload sales but clearly tappable.
+            OutlinedButton(
+                onClick = { confirmReenroll = true },
+                enabled = !state.busy,
+                shape = MaterialTheme.shapes.extraLarge,
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                contentPadding = PaddingValues(horizontal = 20.dp, vertical = 14.dp),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                ScanGlyph(18.dp, MaterialTheme.colorScheme.onSurface)
+                Spacer(Modifier.width(10.dp))
+                Text("Scan a new setup code", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurface)
             }
         }
     }
@@ -830,7 +869,7 @@ private fun ActionDeck(state: TerminalUiState, model: TerminalViewModel, enrolle
         AlertDialog(
             onDismissRequest = { confirmReenroll = false },
             title = { Text("Set up this terminal again?") },
-            text = { Text("Scan a new setup code from the organizer. Your sales stay on this phone.") },
+            text = { Text("Scan the setup code for your stall. Your sales stay on this phone.") },
             confirmButton = {
                 TextButton(onClick = { confirmReenroll = false; model.beginEnrollmentScan() }) { Text("Scan code") }
             },
@@ -950,6 +989,12 @@ private fun EmptyCard(icon: ImageVector, title: String, body: String) {
     }
 }
 
+/** Keypad key height: still above the 44 dp touch target, small enough that keys and Charge fit. */
+private val KEY_HEIGHT = 46.dp
+
+/** One-tap amounts on Checkout, in cents. */
+private val QUICK_AMOUNTS_CENTS = listOf(50L, 100L, 200L, 500L)
+
 /** Largest keyed amount, in cents: 9,999.99. */
 private const val KEYPAD_MAX_CENTS = 999_999L
 
@@ -964,11 +1009,14 @@ private fun KeypadCard(state: TerminalUiState, model: TerminalViewModel) {
     val decimals = state.vendor?.assetDecimals ?: CHANNEL_ASSET_DECIMALS
     val symbol = state.vendor?.assetSymbol ?: CHANNEL_ASSET_SYMBOL
     val units = if (decimals >= 2) BigInteger.valueOf(cents).multiply(BigInteger.TEN.pow(decimals - 2)) else BigInteger.ZERO
-    val reserve = usableChannels(state).firstOrNull { it.channelId == state.selectedChannelId }
-    val block = if (cents > 0 && reserve != null) OfflineLimits.chargeBlock(units, reserve) else null
+    val reserves = usableChannels(state)
+    val block = if (cents > 0 && reserves.isNotEmpty()) OfflineLimits.chargeBlock(units, reserves) else null
     val live = state.sales.any { isLiveRequest(it, state.nowSeconds) }
-    val canCharge = cents > 0 && reserve != null && block == null && state.vendor != null &&
+    val canCharge = cents > 0 && reserves.isNotEmpty() && block == null && state.vendor != null &&
         state.trustedTime != null && !state.busy && !live
+    // Most stall prices are a few round amounts, so those are one tap; the full keypad opens only
+    // for anything else and stays out of the way otherwise.
+    var keypadOpen by rememberSaveable { mutableStateOf(false) }
     Surface(
         shape = MaterialTheme.shapes.large,
         color = MaterialTheme.colorScheme.surfaceContainer,
@@ -980,22 +1028,29 @@ private fun KeypadCard(state: TerminalUiState, model: TerminalViewModel) {
             Row(
                 verticalAlignment = Alignment.Bottom,
                 horizontalArrangement = Arrangement.Center,
-                modifier = Modifier.fillMaxWidth().semantics { contentDescription = "Amount ${formatCents(cents)} $symbol" },
+                modifier = Modifier.fillMaxWidth().clip(MaterialTheme.shapes.medium)
+                    .clickable(enabled = !state.busy, role = Role.Button, onClickLabel = "Type an amount") { keypadOpen = true }
+                    .semantics { contentDescription = "Amount ${formatCents(cents)} $symbol" },
             ) {
+                // Smaller while the keypad is open, so amount, keys and Charge fit on one screen.
                 Text(
-                    formatCents(cents), style = MaterialTheme.typography.displayMedium,
+                    formatCents(cents),
+                    style = if (keypadOpen) MaterialTheme.typography.displaySmall else MaterialTheme.typography.displayMedium,
                     color = if (cents == 0L) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface,
                 )
                 Spacer(Modifier.width(6.dp))
                 Text(symbol, style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(bottom = 8.dp))
             }
             val hint = when {
-                state.vendor == null -> "Tap Refresh once while online to load this stall"
+                state.vendor == null -> "Open the Terminal tab and tap Refresh while online to load this stall"
                 block is OfflineLimits.Block.OverPerSale ->
                     "Over the ${formatUnits(block.maxPerSaleUnits.toString(), CHANNEL_ASSET_DECIMALS)} offline limit per sale"
                 block is OfflineLimits.Block.OverRemaining ->
                     "Only ${formatUnits(block.remainingUnits.toString(), CHANNEL_ASSET_DECIMALS)} left on this reserve"
                 block == OfflineLimits.Block.NoSalesLeft -> "This reserve has no sales left"
+                block is OfflineLimits.Block.OverEveryReserve ->
+                    "Too much to pay offline. The most one customer can pay here is " +
+                        "${formatUnits(block.bestUnits.toString(), CHANNEL_ASSET_DECIMALS)} $CHANNEL_ASSET_SYMBOL"
                 else -> null
             }
             hint?.let {
@@ -1005,9 +1060,32 @@ private fun KeypadCard(state: TerminalUiState, model: TerminalViewModel) {
                     modifier = Modifier.fillMaxWidth(),
                 )
             }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                QUICK_AMOUNTS_CENTS.forEach { amount ->
+                    FilterChip(
+                        selected = cents == amount && !keypadOpen,
+                        onClick = {
+                            haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            model.setKeypadCents(amount); keypadOpen = false
+                        },
+                        enabled = !state.busy,
+                        label = { Text(formatCents(amount), style = MaterialTheme.typography.titleSmall, modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center) },
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = TerminalColors.Mint.copy(alpha = 0.18f),
+                            selectedLabelColor = TerminalColors.MintDeep,
+                        ),
+                        modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                    )
+                }
+            }
+            TextButton(onClick = { keypadOpen = !keypadOpen }, enabled = !state.busy, modifier = Modifier.fillMaxWidth()) {
+                Text(if (keypadOpen) "Hide keypad" else "Other amount")
+            }
             val rows = listOf(listOf("1", "2", "3"), listOf("4", "5", "6"), listOf("7", "8", "9"), listOf("C", "0", "⌫"))
+            AnimatedVisibility(keypadOpen, enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
             rows.forEach { row ->
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
                     row.forEach { key ->
                         KeypadKey(
                             key,
@@ -1026,6 +1104,8 @@ private fun KeypadCard(state: TerminalUiState, model: TerminalViewModel) {
                         }
                     }
                 }
+            }
+            }
             }
             val source = remember { MutableInteractionSource() }
             Button(
@@ -1055,11 +1135,11 @@ private fun KeypadKey(key: String, label: String, enabled: Boolean, modifier: Mo
     Surface(
         shape = MaterialTheme.shapes.medium,
         color = MaterialTheme.colorScheme.surfaceContainerHighest,
-        modifier = modifier.heightIn(min = 56.dp).scale(pressScale(source)).clip(MaterialTheme.shapes.medium)
+        modifier = modifier.height(KEY_HEIGHT).scale(pressScale(source)).clip(MaterialTheme.shapes.medium)
             .clickable(enabled = enabled, role = Role.Button, interactionSource = source, indication = null, onClick = onClick)
             .semantics { contentDescription = label },
     ) {
-        Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp)) {
+        Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxWidth().height(KEY_HEIGHT)) {
             Text(key, style = MaterialTheme.typography.headlineSmall, color = MaterialTheme.colorScheme.onSurface)
         }
     }
@@ -1072,9 +1152,9 @@ private fun formatCents(cents: Long): String = "%d.%02d".format(cents / 100, cen
 private fun OrderRow(order: OrderView, state: TerminalUiState, model: TerminalViewModel) {
     val haptics = LocalHapticFeedback.current
     val live = state.sales.any { isLiveRequest(it, state.nowSeconds) }
-    val reserve = usableChannels(state).firstOrNull { it.channelId == state.selectedChannelId }
-    val block = reserve?.let { OfflineLimits.chargeBlock(BigInteger(order.grossUnits), it) }
-    val canCharge = reserve != null && block == null && state.trustedTime != null && !state.busy && !live
+    val reserves = usableChannels(state)
+    val block = reserves.takeIf { it.isNotEmpty() }?.let { OfflineLimits.chargeBlock(BigInteger(order.grossUnits), it) }
+    val canCharge = reserves.isNotEmpty() && block == null && state.trustedTime != null && !state.busy && !live
     Surface(
         shape = MaterialTheme.shapes.medium,
         color = MaterialTheme.colorScheme.surfaceContainer,
@@ -1102,6 +1182,8 @@ private fun OrderRow(order: OrderView, state: TerminalUiState, model: TerminalVi
                             is OfflineLimits.Block.OverRemaining ->
                                 "Only ${formatUnits(it.remainingUnits.toString(), CHANNEL_ASSET_DECIMALS)} left on this reserve"
                             OfflineLimits.Block.NoSalesLeft -> "This reserve has no sales left"
+                            is OfflineLimits.Block.OverEveryReserve ->
+                                "Most one customer can pay offline: ${formatUnits(it.bestUnits.toString(), CHANNEL_ASSET_DECIMALS)}"
                         },
                         style = MaterialTheme.typography.bodySmall, color = TerminalColors.Amber,
                     )

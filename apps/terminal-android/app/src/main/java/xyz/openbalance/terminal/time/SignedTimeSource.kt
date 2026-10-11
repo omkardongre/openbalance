@@ -13,7 +13,23 @@ import org.bouncycastle.crypto.signers.Ed25519Signer
 import java.security.SecureRandom
 import javax.net.ssl.HttpsURLConnection
 
-data class TrustedTime(val earliestUnixMs: Long, val latestUnixMs: Long, val observedMonotonicMs: Long, val bootId: String)
+/** The server's signed answer, kept so a saved sample can be re-verified after the app restarts. */
+data class TimeProof(
+    val nonce: String,
+    val unixMs: Long,
+    val uncertaintyMs: Long,
+    val signature: String,
+    /** How long the request took on the monotonic clock; widens the latest bound. */
+    val roundTripMs: Long,
+)
+
+data class TrustedTime(
+    val earliestUnixMs: Long,
+    val latestUnixMs: Long,
+    val observedMonotonicMs: Long,
+    val bootId: String,
+    val proof: TimeProof,
+)
 
 class SignedTimeSource(
     private val context: Context,
@@ -59,36 +75,81 @@ class SignedTimeSource(
         val after = monotonic()
         val data = JSONObject(body)
         if (data.length() != 4 || data.getString("nonce") != nonce) throw IllegalStateException("Time attestation mismatch")
-        val unixMs = data.getLong("unixMs")
-        val uncertaintyMs = data.getLong("uncertaintyMs")
-        val signature = data.getString("signature")
-        if (!signature.matches(Regex("^[a-f0-9]{128}$")) || uncertaintyMs < 0 || unixMs < 0 || before.second != after.second)
-            throw IllegalStateException("Invalid time attestation")
-        require(uncertaintyMs <= 5_000 && unixMs >= uncertaintyMs)
-        val payload = "{\"domain\":\"openbalance:terminal-time:v1\",\"nonce\":\"$nonce\",\"unixMs\":$unixMs,\"uncertaintyMs\":$uncertaintyMs}".toByteArray()
-        val valid = Ed25519Signer().run {
-            init(false, publicKey); update(payload, 0, payload.size); verifySignature(signature.hexBytes())
-        }
-        if (!valid) throw IllegalStateException("Time attestation signature rejected")
+        if (before.second != after.second) throw IllegalStateException("Invalid time attestation")
         val elapsed = after.first - before.first
         if (elapsed !in 0..timeoutMs.toLong()) throw IllegalStateException("Time request lost clock continuity")
-        return TrustedTime(unixMs - uncertaintyMs, Math.addExact(Math.addExact(unixMs, uncertaintyMs), elapsed), after.first, after.second)
+        val proof = TimeProof(nonce, data.getLong("unixMs"), data.getLong("uncertaintyMs"), data.getString("signature"), elapsed)
+        return fromProof(publicKey, proof, after.first, after.second, timeoutMs.toLong())
+    }
+
+    /**
+     * Rebuilds a saved sample after the app was closed. The server signature is checked again, and
+     * the sample is only usable on the same boot and within [MAX_SAMPLE_AGE_MS]: the monotonic clock
+     * it counts forward on cannot be changed by the cashier, but it restarts with the phone.
+     */
+    fun restore(saved: TrustedTime): TrustedTime {
+        val rebuilt = fromProof(publicKey, saved.proof, saved.observedMonotonicMs, saved.bootId, timeoutMs.toLong())
+        current(rebuilt)
+        return rebuilt
     }
 
     fun current(sample: TrustedTime): Pair<Long, Long> {
         val current = monotonic()
-        if (current.second != sample.bootId || current.first < sample.observedMonotonicMs)
-            throw IllegalStateException("Trusted time continuity lost")
-        val elapsed = current.first - sample.observedMonotonicMs
-        check(elapsed <= MAX_SAMPLE_AGE_MS) { "Trusted time sample is stale; refresh while connected" }
-        val drift = (elapsed + 999) / 1_000
-        return Math.subtractExact(Math.addExact(sample.earliestUnixMs, elapsed), drift) to
-            Math.addExact(Math.addExact(sample.latestUnixMs, elapsed), drift)
+        if (current.second != sample.bootId) throw IllegalStateException("Trusted time continuity lost")
+        return window(sample, current.first)
     }
 
     companion object {
-        /** How long a sample may be carried forward on the monotonic clock before it must be refreshed. */
-        const val MAX_SAMPLE_AGE_MS = 300_000L
+        /**
+         * How long a sample may be carried forward on the monotonic clock before it must be
+         * refreshed: long enough to sell through a whole outage, since [window] widens the bounds
+         * for clock drift as it ages.
+         */
+        const val MAX_SAMPLE_AGE_MS = 12 * 60 * 60 * 1_000L
+
+        /**
+         * Allowed monotonic-clock drift: 1 ms per elapsed second (1000 ppm), far above the tens of
+         * ppm a phone's crystal drifts, so the true time always stays inside the bounds.
+         */
+        private const val DRIFT_DIVISOR = 1_000L
+
+        /** Verifies the server's signature and turns the proof into a time window. */
+        internal fun fromProof(
+            key: Ed25519PublicKeyParameters,
+            proof: TimeProof,
+            observedMonotonicMs: Long,
+            bootId: String,
+            maxRoundTripMs: Long,
+        ): TrustedTime {
+            if (!proof.nonce.matches(Regex("^[a-f0-9]{64}$")) || !proof.signature.matches(Regex("^[a-f0-9]{128}$")) ||
+                proof.uncertaintyMs !in 0..5_000 || proof.unixMs < proof.uncertaintyMs ||
+                proof.roundTripMs !in 0..maxRoundTripMs || observedMonotonicMs < 0
+            ) throw IllegalStateException("Invalid time attestation")
+            val payload = ("{\"domain\":\"openbalance:terminal-time:v1\",\"nonce\":\"${proof.nonce}\"," +
+                "\"unixMs\":${proof.unixMs},\"uncertaintyMs\":${proof.uncertaintyMs}}").toByteArray()
+            val valid = Ed25519Signer().run {
+                init(false, key); update(payload, 0, payload.size); verifySignature(proof.signature.hexBytes())
+            }
+            if (!valid) throw IllegalStateException("Time attestation signature rejected")
+            return TrustedTime(
+                proof.unixMs - proof.uncertaintyMs,
+                Math.addExact(Math.addExact(proof.unixMs, proof.uncertaintyMs), proof.roundTripMs),
+                observedMonotonicMs, bootId, proof,
+            )
+        }
+
+        /** The sample counted forward to [nowMonotonicMs], widened for drift. Throws once too old. */
+        internal fun window(sample: TrustedTime, nowMonotonicMs: Long): Pair<Long, Long> {
+            if (nowMonotonicMs < sample.observedMonotonicMs) throw IllegalStateException("Trusted time continuity lost")
+            val elapsed = nowMonotonicMs - sample.observedMonotonicMs
+            check(elapsed <= MAX_SAMPLE_AGE_MS) { "Trusted time sample is stale; refresh while connected" }
+            val drift = (elapsed + DRIFT_DIVISOR - 1) / DRIFT_DIVISOR
+            return Math.subtractExact(Math.addExact(sample.earliestUnixMs, elapsed), drift) to
+                Math.addExact(Math.addExact(sample.latestUnixMs, elapsed), drift)
+        }
+
+        private fun ByteArray.toHex() = joinToString("") { "%02x".format(it.toInt() and 0xff) }
+        private fun String.hexBytes() = chunked(2).map { it.toInt(16).toByte() }.toByteArray()
     }
 
     private fun monotonic(): Pair<Long, String> {
@@ -96,8 +157,6 @@ class SignedTimeSource(
         check(boot >= 0) { "Device boot continuity is unavailable" }
         return SystemClock.elapsedRealtime() to boot.toString()
     }
-    private fun ByteArray.toHex() = joinToString("") { "%02x".format(it.toInt() and 0xff) }
-    private fun String.hexBytes() = chunked(2).map { it.toInt(16).toByte() }.toByteArray()
 }
 
 /** Ed25519 SubjectPublicKeyInfo is a fixed 12-byte header followed by the 32-byte key. */

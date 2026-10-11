@@ -40,6 +40,8 @@ class ConnectedProvisioningClient(private val timeoutMs: Int = 10_000) {
         }
         try {
             connection.outputStream.use { it.write(body.toByteArray()) }
+            if (connection.responseCode == HttpURLConnection.HTTP_CONFLICT && pairingPending(connection))
+                throw TerminalPairingPending()
             if (connection.responseCode != HttpURLConnection.HTTP_OK ||
                 connection.contentType?.startsWith("application/json") != true
             ) throw IllegalStateException("Terminal provisioning service rejected the request")
@@ -48,6 +50,12 @@ class ConnectedProvisioningClient(private val timeoutMs: Int = 10_000) {
             connection.disconnect()
         }
     }
+
+    /** The stall is set up, but the organizer has not registered this device's key yet. */
+    private fun pairingPending(connection: HttpsURLConnection): Boolean = runCatching {
+        val body = connection.errorStream?.use { stream -> stream.readBytes().take(4_096).toByteArray().decodeToString() }
+        JSONObject(body ?: "").optString("error") == "terminal_pairing_pending"
+    }.getOrDefault(false)
 
     private data class Challenge(
         val value: String,
@@ -155,6 +163,9 @@ class ConnectedProvisioningClient(private val timeoutMs: Int = 10_000) {
     private fun JSONArray.objects(max: Int) = (0 until length()).also { require(length() <= max) }.map(::getJSONObject)
     private fun ByteArray.toHex() = "0x" + joinToString("") { "%02x".format(it.toInt() and 0xff) }
 }
+
+class TerminalPairingPending :
+    IllegalStateException("Waiting for the organizer to approve this terminal. Tap Refresh after they do.")
 
 internal fun terminalProvisioningDigest(chainId: BigInteger, eventId: String, terminalId: String, challenge: String): ByteArray {
     require(chainId > BigInteger.ZERO)

@@ -13,7 +13,20 @@ object OfflineLimits {
         data class OverPerSale(val maxPerSaleUnits: BigInteger) : Block
         data class OverRemaining(val remainingUnits: BigInteger) : Block
         data object NoSalesLeft : Block
+        /** No single customer reserve here can pay this much; [bestUnits] is the most one can. */
+        data class OverEveryReserve(val bestUnits: BigInteger) : Block
     }
+
+    /**
+     * The most one customer can pay offline right now: the customer's phone picks its own reserve,
+     * so the cashier only needs to know whether any reserve here could cover the amount.
+     */
+    fun bestCover(reserves: List<ChannelView>): BigInteger = reserves
+        .filter { it.salesLeft > 0 }
+        .maxOfOrNull { minOf(it.maxPerSaleUnits, BigInteger(it.remainingUnits)) } ?: BigInteger.ZERO
+
+    fun chargeBlock(orderUnits: BigInteger, reserves: List<ChannelView>): Block? =
+        bestCover(reserves).let { best -> if (orderUnits > best) Block.OverEveryReserve(best) else null }
 
     fun chargeBlock(orderUnits: BigInteger, reserve: ChannelView): Block? = when {
         reserve.salesLeft <= 0 -> Block.NoSalesLeft

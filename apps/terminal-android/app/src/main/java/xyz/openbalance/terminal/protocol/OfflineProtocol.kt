@@ -14,6 +14,7 @@ private const val MAX_QR_LENGTH = 4096
 private val HEX_32 = Regex("^0x[0-9a-fA-F]{64}$")
 private val ADDRESS = Regex("^0x[0-9a-fA-F]{40}$")
 private val SIGNATURE = Regex("^0x[0-9a-fA-F]{130}$")
+private val CURSOR = Regex("^([0-9a-f]{12}):([1-9][0-9]{0,9})$")
 private const val VOUCHER_TYPE = "OfflineVoucher(uint32 protocolVersion,uint256 chainId,address vault,bytes32 channelId,uint32 sequence,bytes32 previousVoucherDigest,bytes32 paymentId,bytes32 orderRefHash,uint256 grossUnits,uint256 cumulativeGrossUnits,bytes32 receiptCommitment,uint48 acceptedAt,uint48 acceptUntil,uint48 submitUntil,uint256 configVersion)"
 private const val DOMAIN_TYPE = "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
 private const val TERMINAL_INGRESS_TYPE = "OpenBalanceTerminalIngress(bytes32 audienceHash,bytes32 terminalId,uint256 keyVersion,uint64 sentAt,bytes32 nonce,bytes32 payloadHash)"
@@ -66,6 +67,27 @@ data class TerminalPaymentRequest(
 )
 
 data class AttendeeVoucherResponse(val requestHash: String, val attendeeSignature: String)
+
+/**
+ * Version 2 request: the cashier charges an amount and the customer's phone picks which of its
+ * reserves for this terminal pays. It carries no voucher; [cursors] lists, for every reserve the
+ * terminal can charge now, the first 6 bytes of the reserve id and the position the terminal
+ * expects next ("abcdef012345:3"), sorted. Must match `packages/protocol/src/open-exchange.ts`.
+ */
+data class OpenPaymentRequest(
+    val requestId: String,
+    val terminalId: String,
+    val paymentId: String,
+    val orderRefHash: String,
+    val receiptCommitment: String,
+    val grossUnits: BigInteger,
+    val acceptedAt: Long,
+    val expiresAt: Long,
+    val cursors: List<String>,
+)
+
+/** The phone's version 2 answer: the reserve it paid from and its signature over that voucher. */
+data class ChannelVoucherResponse(val requestHash: String, val channelId: String, val attendeeSignature: String)
 
 data class VoucherReceipt(
     val receiptId: String,
@@ -132,6 +154,104 @@ object OfflineProtocol {
     }
 
     fun encodeRequestQr(request: TerminalPaymentRequest): String = encodeQr(canonicalRequest(request))
+
+    /** Most reserves one version 2 request lists; keeps the QR comfortably scannable. */
+    const val MAX_REQUEST_CURSORS = 48
+
+    /** Key a reserve is listed under in a version 2 request: its id's first 6 bytes, lowercase. */
+    fun cursorKey(channelId: String): String {
+        requireHex32(channelId)
+        return channelId.lowercase().substring(2, 14)
+    }
+
+    fun encodeOpenRequestQr(request: OpenPaymentRequest): String = encodeQr(canonicalOpenRequest(request))
+
+    fun openRequestHash(request: OpenPaymentRequest): String = hex(Keccak.digest(canonicalOpenRequest(request).toByteArray()))
+
+    /** Which request version a stored or scanned code carries (1 or 2). */
+    fun qrVersion(value: String): Int = decodeQr(value).optInt("version", 0)
+
+    fun decodeOpenRequestQr(value: String): OpenPaymentRequest {
+        val json = decodeQr(value)
+        val cursors = json.optJSONArray("cursors") ?: throw InvalidOfflineExchange("Invalid terminal payment request")
+        val request = OpenPaymentRequest(
+            requestId = json.requireString("requestId"),
+            terminalId = json.requireString("terminalId"),
+            paymentId = json.requireString("paymentId"),
+            orderRefHash = json.requireString("orderRefHash"),
+            receiptCommitment = json.requireString("receiptCommitment"),
+            grossUnits = BigInteger(json.requireString("grossUnits")),
+            acceptedAt = json.getLong("acceptedAt"),
+            expiresAt = json.getLong("expiresAt"),
+            cursors = List(cursors.length()) { cursors.getString(it) },
+        )
+        if (encodeOpenRequestQr(request) != value) throw InvalidOfflineExchange("Noncanonical payment request")
+        return request
+    }
+
+    fun decodeChannelResponseQr(value: String): ChannelVoucherResponse {
+        val json = decodeQr(value)
+        val response = ChannelVoucherResponse(
+            requestHash = json.requireString("requestHash"),
+            channelId = json.requireString("channelId"),
+            attendeeSignature = json.requireString("attendeeSignature"),
+        )
+        if (json.length() != 5 || json.optInt("version") != 2 ||
+            json.requireString("kind") != "offline-voucher-response" ||
+            !HEX_32.matches(response.requestHash) || !HEX_32.matches(response.channelId) ||
+            !SIGNATURE.matches(response.attendeeSignature) ||
+            // Compare bytes, not a re-serialized JSONObject: key order is part of the format.
+            encodeQr(canonicalChannelResponse(response)) != value
+        ) throw InvalidOfflineExchange("Invalid attendee voucher response")
+        return response
+    }
+
+    /**
+     * The voucher for a version 2 request paid from one reserve, at this terminal's own position
+     * on it. The phone builds the same voucher from its records; if the two disagree the attendee
+     * signature does not verify and nothing is countersigned. Enforces the reserve's finalized
+     * caps and window the vault will enforce again.
+     */
+    fun buildVoucher(
+        snapshot: ChannelSnapshot,
+        nextSequence: Long,
+        previousDigest: String,
+        spentUnits: BigInteger,
+        request: OpenPaymentRequest,
+    ): OfflineVoucher {
+        requireSnapshot(snapshot)
+        canonicalOpenRequest(request)
+        val cumulative = spentUnits + request.grossUnits
+        if (nextSequence !in 1..snapshot.maxVoucherCount || request.grossUnits > snapshot.maxPerVoucher ||
+            cumulative > snapshot.reserveUnits || request.acceptedAt < snapshot.acceptFrom ||
+            request.acceptedAt >= snapshot.acceptUntil
+        ) throw InvalidOfflineExchange("Sale exceeds finalized channel policy")
+        requireHex32(previousDigest)
+        return OfflineVoucher(
+            chainId = snapshot.chainId,
+            vault = snapshot.vault,
+            channelId = snapshot.channelId,
+            sequence = nextSequence,
+            previousVoucherDigest = previousDigest,
+            paymentId = request.paymentId,
+            orderRefHash = request.orderRefHash,
+            grossUnits = request.grossUnits,
+            cumulativeGrossUnits = cumulative,
+            receiptCommitment = request.receiptCommitment,
+            acceptedAt = request.acceptedAt,
+            acceptUntil = snapshot.acceptUntil,
+            submitUntil = snapshot.submitUntil,
+            configVersion = snapshot.configVersion,
+        ).also(::validateVoucher)
+    }
+
+    fun verifyAttendeeVoucher(voucher: OfflineVoucher, signature: String, expectedSigner: String): String {
+        if (!SIGNATURE.matches(signature)) throw InvalidOfflineExchange("Invalid signature")
+        val recovered = recover(voucherDigest(voucher), signature)
+        if (!recovered.equals(expectedSigner, ignoreCase = true))
+            throw InvalidOfflineExchange("Attendee signature does not match channel authority")
+        return signature.lowercase()
+    }
 
     fun decodeAttendeeResponseQr(value: String): AttendeeVoucherResponse {
         val json = decodeQr(value)
@@ -277,6 +397,45 @@ object OfflineProtocol {
             "\"expiresAt\":${request.expiresAt}",
         ).joinToString(",") + "}"
     }
+
+    private fun canonicalOpenRequest(request: OpenPaymentRequest): String {
+        if (!request.requestId.matches(Regex("^[A-Za-z0-9][A-Za-z0-9:_-]{0,127}$")) ||
+            !HEX_32.matches(request.terminalId) || !HEX_32.matches(request.paymentId) ||
+            !HEX_32.matches(request.orderRefHash) || !HEX_32.matches(request.receiptCommitment) ||
+            request.grossUnits <= BigInteger.ZERO || request.grossUnits.bitLength() > 256 ||
+            request.acceptedAt < 0 || request.expiresAt < request.acceptedAt ||
+            request.cursors.isEmpty() || request.cursors.size > MAX_REQUEST_CURSORS
+        ) throw InvalidOfflineExchange("Invalid terminal payment request")
+        var previous = ""
+        for (entry in request.cursors) {
+            val match = CURSOR.matchEntire(entry) ?: throw InvalidOfflineExchange("Invalid terminal payment request")
+            val key = match.groupValues[1]
+            if (match.groupValues[2].toLong() >= (1L shl 32) || key <= previous)
+                throw InvalidOfflineExchange("Invalid terminal payment request")
+            previous = key
+        }
+        return "{" + listOf(
+            "\"version\":2",
+            "\"kind\":\"offline-payment-request\"",
+            "\"requestId\":${JSONObject.quote(request.requestId)}",
+            "\"terminalId\":\"${request.terminalId.lowercase()}\"",
+            "\"paymentId\":\"${request.paymentId.lowercase()}\"",
+            "\"orderRefHash\":\"${request.orderRefHash.lowercase()}\"",
+            "\"receiptCommitment\":\"${request.receiptCommitment.lowercase()}\"",
+            "\"grossUnits\":\"${request.grossUnits}\"",
+            "\"acceptedAt\":${request.acceptedAt}",
+            "\"expiresAt\":${request.expiresAt}",
+            "\"cursors\":[" + request.cursors.joinToString(",") { "\"$it\"" } + "]",
+        ).joinToString(",") + "}"
+    }
+
+    private fun canonicalChannelResponse(response: ChannelVoucherResponse) = "{" + listOf(
+        "\"version\":2",
+        "\"kind\":\"offline-voucher-response\"",
+        "\"requestHash\":\"${response.requestHash.lowercase()}\"",
+        "\"channelId\":\"${response.channelId.lowercase()}\"",
+        "\"attendeeSignature\":\"${response.attendeeSignature.lowercase()}\"",
+    ).joinToString(",") + "}"
 
     private fun canonicalResponse(response: AttendeeVoucherResponse) = "{" + listOf(
         "\"version\":1",
