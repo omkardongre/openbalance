@@ -6,11 +6,14 @@ import androidx.lifecycle.viewModelScope
 import android.os.SystemClock
 import android.provider.Settings
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import xyz.openbalance.terminal.BuildConfig
@@ -18,7 +21,17 @@ import xyz.openbalance.terminal.TerminalApplication
 import xyz.openbalance.terminal.data.SaleView
 import xyz.openbalance.terminal.data.ChannelView
 import xyz.openbalance.terminal.data.OfflineLimits
+import xyz.openbalance.terminal.data.OnlineSaleView
 import xyz.openbalance.terminal.data.OrderView
+import xyz.openbalance.terminal.checkout.CashierOrder
+import xyz.openbalance.terminal.checkout.OnlineCheckoutException
+import xyz.openbalance.terminal.protocol.CheckoutCommitments
+import xyz.openbalance.terminal.protocol.InvalidOfflineExchange
+import xyz.openbalance.terminal.protocol.OfflineProtocol
+import xyz.openbalance.terminal.protocol.PaymentIntentProtocol
+import xyz.openbalance.terminal.provisioning.ProvisioningConfig
+import xyz.openbalance.terminal.provisioning.TerminalContext
+import java.util.concurrent.ConcurrentHashMap
 import xyz.openbalance.terminal.provisioning.ConnectedProvisioningClient
 import xyz.openbalance.terminal.provisioning.FinalizedChannelVerifier
 import xyz.openbalance.terminal.provisioning.TerminalPairingPending
@@ -62,6 +75,14 @@ data class TerminalUiState(
     val pairing: Boolean = false,
     /** The last automatic clock check could not reach the time service (usually: no internet). */
     val clockFailed: Boolean = false,
+    /** The phone has working internet right now. */
+    val online: Boolean = false,
+    /** This terminal has synced once since it learned to take online payments, so it can open them. */
+    val onlineReady: Boolean = false,
+    /** Recent sales taken online, newest first. */
+    val onlineSales: List<OnlineSaleView> = emptyList(),
+    /** The online sale shown full screen while a customer pays it. */
+    val focusedOnlineId: String? = null,
 )
 
 const val SALES_PAGE_SIZE = 25
@@ -78,6 +99,12 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
     private val timeSource = if (BuildConfig.TIME_ENDPOINT.isNotBlank() && BuildConfig.TIME_PUBLIC_KEY_DER_BASE64.isNotBlank())
         SignedTimeSource(app, BuildConfig.TIME_ENDPOINT, BuildConfig.TIME_PUBLIC_KEY_DER_BASE64) else null
     private val timeStore = TrustedTimeStore(app)
+
+    /** Order links by order id. Memory only: a link is a capability, so it is never written to disk. */
+    private val checkoutUrls = ConcurrentHashMap<String, String>()
+    /** Held while an online sale is signed or cancelled, so a cancel can never race the signature. */
+    private val onlineLock = Mutex()
+    @Volatile private var onlineContext: TerminalContext? = null
 
     /** A saved sample that still verifies and is fresh on this boot, so closing the app offline keeps selling. */
     private fun restoredTime(): TrustedTime? {
@@ -96,6 +123,8 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
                 val identity = app.keys.getOrCreate()
                 val config = app.provisioning.current()
                 val restored = restoredTime()
+                onlineContext = runCatching { app.provisioning.context() }.getOrNull()
+                _state.update { it.copy(onlineSales = loadOnlineSales()) }
                 _state.value = _state.value.copy(
                     signer = identity.signer,
                     trustedTime = restored ?: _state.value.trustedTime,
@@ -104,6 +133,7 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
                     channels = app.repository.channelViews(),
                     orders = app.repository.orderViews(),
                     vendor = runCatching { app.provisioning.vendor() }.getOrNull(),
+                    onlineReady = onlineContext != null,
                     message = when {
                         timeSource == null -> "This build is missing its clock setting"
                         config == null -> "Scan the setup code from the organizer"
@@ -163,6 +193,40 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
                 delay(CLOCK_POLL_MS)
             }
         }
+        // Track working internet, which decides whether a sale is taken online or offline.
+        viewModelScope.launch {
+            app.connectivity.online.collect { online ->
+                _state.update { it.copy(online = online) }
+                // Back online with sales still waiting: upload right away instead of waiting for the
+                // background worker's backoff, and quietly (no busy state, no message).
+                if (online) launch(Dispatchers.IO) { uploadWaitingSales() }
+            }
+        }
+        // A terminal that synced before it could take online payments learns what it needs to check
+        // them (its network, contract and terminal identity) from one more sync, done by itself.
+        viewModelScope.launch(Dispatchers.IO) {
+            while (isActive) {
+                delay(CONTEXT_RECHECK_MS)
+                val current = _state.value
+                if (!current.online || !current.configured || current.pairing || current.busy || current.scanOpen || onlineContext != null) continue
+                runCatching { fetchAndInstall() }.onSuccess { next -> _state.update { if (it.busy) it else next } }
+            }
+        }
+        // Online sales: while a customer is paying, ask the server often; sign the payment as soon as
+        // they have signed in; notice when it is paid.
+        viewModelScope.launch(Dispatchers.IO) {
+            while (isActive) {
+                delay(if (_state.value.onlineSales.any { it.active }) ONLINE_POLL_MS else ONLINE_IDLE_POLL_MS)
+                val state = _state.value
+                val config = app.provisioning.current()
+                val context = onlineContext
+                if (!state.online || config == null || context == null) continue
+                val pollable = runCatching { app.repository.pollableOnlineSales(System.currentTimeMillis()) }.getOrNull() ?: continue
+                if (pollable.isEmpty()) continue
+                for (sale in pollable) runCatching { advanceOnline(sale, config, context) }
+                _state.update { it.copy(onlineSales = loadOnlineSales()) }
+            }
+        }
         // The relay worker uploads and settles sales in the background; re-read the journal so the
         // pending-upload warning clears on its own instead of only after the next tap.
         viewModelScope.launch(Dispatchers.IO) {
@@ -172,9 +236,10 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
                 runCatching {
                     val sales = app.repository.recoverSales(_state.value.salesLimit)
                     val pending = app.repository.pendingUploads()
+                    val onlineSales = loadOnlineSales()
                     _state.update {
                         if (it.busy) it else it.copy(
-                            sales = sales, pending = pending,
+                            sales = sales, pending = pending, onlineSales = onlineSales,
                         )
                     }
                 }
@@ -217,7 +282,11 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun dismissFocusedSale() {
-        _state.update { it.copy(focusedSaleId = null) }
+        _state.update { it.copy(focusedSaleId = null, focusedOnlineId = null) }
+    }
+
+    fun focusOnlineSale(orderId: String) {
+        _state.update { it.copy(focusedOnlineId = orderId) }
     }
 
     fun refreshTime() = viewModelScope.launch(Dispatchers.IO) {
@@ -293,6 +362,8 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
             }
             val imported = app.repository.importOrders(batch.orders, System.currentTimeMillis())
             batch.vendor?.let(app.provisioning::saveVendor)
+            app.provisioning.saveContext(batch.deployment, batch.terminal)
+            onlineContext = app.provisioning.context()
             val channels = app.repository.channelViews()
             _state.value.copy(
                 configured = timeSource != null,
@@ -305,9 +376,23 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
                 else syncMessage(installed, imported),
                 synced = true,
                 pairing = false,
+                onlineReady = onlineContext != null,
                 error = false,
                 busy = false,
             )
+        }
+    }
+
+    /** Sends whatever offline sales are waiting, without touching the screen unless something changed. */
+    private suspend fun uploadWaitingSales() {
+        runCatching {
+            val config = app.provisioning.current() ?: return
+            if (app.repository.pendingRelayCount() == 0) return
+            delay(RECONNECT_UPLOAD_DELAY_MS)
+            app.relay.runBatch(config)
+            val sales = app.repository.recoverSales(_state.value.salesLimit)
+            val pending = app.repository.pendingUploads()
+            _state.update { if (it.busy) it else it.copy(sales = sales, pending = pending) }
         }
     }
 
@@ -339,8 +424,30 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
-    /** Charges an amount keyed in on the terminal; works offline once the terminal has synced once. */
+    /**
+     * Charges an amount keyed in on the terminal. With working internet the customer pays online
+     * from their own balance with one scan; without it (or if the server cannot be reached) the sale
+     * is taken offline against a reserve the customer set aside, as before.
+     */
     fun chargeAmount(grossUnits: BigInteger) = viewModelScope.launch(Dispatchers.IO) {
+        val start = _state.value
+        if (start.online && start.onlineReady && !start.pairing && start.vendor != null) {
+            var fallBackToOffline = false
+            runBusy("Creating payment") {
+                try {
+                    openOnlineSale(grossUnits)
+                } catch (error: OnlineCheckoutException) {
+                    if (error.kind != OnlineCheckoutException.Kind.UNREACHABLE) throw error
+                    fallBackToOffline = true
+                    _state.value.copy(busy = false)
+                }
+            }
+            if (!fallBackToOffline) return@launch
+        }
+        chargeOffline(grossUnits)
+    }
+
+    private suspend fun chargeOffline(grossUnits: BigInteger) {
         runBusy("Creating payment") {
             val vendor = requireNotNull(_state.value.vendor) { "Open the Terminal tab and tap Refresh while online to load this stall" }
             val source = requireNotNull(timeSource) { "Trusted-time source is unavailable" }
@@ -354,9 +461,137 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
             _state.value.copy(
                 orders = app.repository.orderViews(), sales = app.repository.recoverSales(_state.value.salesLimit), pending = app.repository.pendingUploads(),
                 focusedSaleId = sale.requestId, keypadCents = 0L,
-                message = "Show the code to the customer", busy = false,
+                message = "", busy = false,
             )
         }
+    }
+
+    /** Opens an order on the server for the customer to scan; the poll loop takes it from there. */
+    private suspend fun openOnlineSale(grossUnits: BigInteger): TerminalUiState {
+        val config = requireNotNull(app.provisioning.current()) { "Terminal enrollment is not installed" }
+        val vendor = requireNotNull(_state.value.vendor) { "Tap Refresh while online to load this stall" }
+        val nowMs = System.currentTimeMillis()
+        val suffix = ByteArray(3).also(java.security.SecureRandom()::nextBytes).joinToString("") { "%02x".format(it.toInt() and 0xff) }
+        val reference = ONLINE_REFERENCE_PREFIX + onlineReferenceFormat.format(java.time.Instant.ofEpochMilli(nowMs)) + "-" + suffix
+        val order = app.onlineCheckout.create(config, reference, KEYPAD_DESCRIPTION, grossUnits)
+        // The code is offered for as long as an offline request is; once a customer has signed in the
+        // payment has the longer window the server gave it.
+        val offeredUntil = minOf(order.expiresAt, nowMs / 1_000 + ONLINE_CODE_SECONDS)
+        app.repository.createOnlineSale(order.orderId, reference, KEYPAD_DESCRIPTION, grossUnits, vendor.assetSymbol, vendor.assetDecimals, offeredUntil, nowMs)
+        checkoutUrls[order.orderId] = order.checkoutUrl
+        return _state.value.copy(
+            onlineSales = loadOnlineSales(), focusedOnlineId = order.orderId, keypadCents = 0L, message = "", busy = false,
+        )
+    }
+
+    private suspend fun loadOnlineSales(): List<OnlineSaleView> =
+        app.repository.onlineSaleViews(_state.value.salesLimit).map { sale -> sale.copy(checkoutUrl = checkoutUrls[sale.orderId]) }
+
+    /**
+     * One step for one online sale: learn from the server whether the customer has signed in
+     * (then check and sign the payment) or whether it is paid. Anything the terminal cannot verify
+     * is declined, never signed.
+     */
+    private suspend fun advanceOnline(sale: OnlineSaleView, config: ProvisioningConfig, context: TerminalContext) {
+        val nowSeconds = System.currentTimeMillis() / 1_000
+        if (sale.state == "WAITING" && nowSeconds > sale.expiresAt) {
+            app.repository.transitionOnlineSale(sale.orderId, listOf("WAITING"), "EXPIRED", System.currentTimeMillis())
+            return
+        }
+        val order = try {
+            app.onlineCheckout.cashier(config, sale.orderId)
+        } catch (error: OnlineCheckoutException) {
+            // Gone from the server means it lapsed unpaid. Anything else is a hiccup; ask again next round.
+            if (error.kind == OnlineCheckoutException.Kind.GONE && sale.state != "SIGNED")
+                app.repository.transitionOnlineSale(sale.orderId, listOf(sale.state), "EXPIRED", System.currentTimeMillis())
+            return
+        }
+        order.checkoutUrl?.let { checkoutUrls[sale.orderId] = it }
+        val nowMs = System.currentTimeMillis()
+        when {
+            order.settlement?.status == "PAID" -> app.repository.transitionOnlineSale(
+                sale.orderId, OnlineSaleView.ACTIVE_STATES + "EXPIRED", "PAID", nowMs,
+                paymentId = order.paymentId, transactionHash = order.settlement.transactionHash,
+            )
+            order.settlement?.status == "CANCELLED" ->
+                app.repository.transitionOnlineSale(sale.orderId, OnlineSaleView.ACTIVE_STATES, "CANCELLED", nowMs)
+            order.state == "BOUND" && sale.state in UNSIGNED -> signOnline(sale, order, config, context)
+            order.state == "READY" && sale.state in UNSIGNED -> app.repository.transitionOnlineSale(
+                sale.orderId, UNSIGNED, "SIGNED", nowMs, paymentId = order.paymentId, expiresAt = order.expiresAt,
+            )
+            // The payment lapsed without being paid: stop waiting after a short grace for a late finality.
+            sale.state == "SIGNED" && nowSeconds > sale.expiresAt + ONLINE_LATE_GRACE_SECONDS ->
+                app.repository.transitionOnlineSale(sale.orderId, listOf("SIGNED"), "EXPIRED", nowMs)
+            sale.state == "CUSTOMER_PAYING" && nowSeconds > sale.expiresAt ->
+                app.repository.transitionOnlineSale(sale.orderId, listOf("CUSTOMER_PAYING"), "EXPIRED", nowMs)
+        }
+    }
+
+    private suspend fun signOnline(sale: OnlineSaleView, order: CashierOrder, config: ProvisioningConfig, context: TerminalContext) {
+        onlineLock.withLock {
+            // Re-read under the lock: a cancel that got here first wins and nothing is signed.
+            val current = app.repository.onlineSaleView(sale.orderId) ?: return
+            if (current.state !in UNSIGNED) return
+            val nowMs = System.currentTimeMillis()
+            app.repository.transitionOnlineSale(sale.orderId, UNSIGNED, "CUSTOMER_PAYING", nowMs, expiresAt = order.expiresAt)
+            val vendor = requireNotNull(app.provisioning.vendor()) { "Vendor profile is missing" }
+            val gross = BigInteger(sale.grossUnits)
+            val intent = try {
+                val intent = PaymentIntentProtocol.decode(requireNotNull(order.encodedIntent) { "The server sent no payment" })
+                val display = CheckoutCommitments.Display(vendor.vendorName, sale.reference, BigInteger.ONE, sale.description, sale.assetSymbol, sale.assetDecimals)
+                PaymentIntentProtocol.verifyForSigning(
+                    intent,
+                    PaymentIntentProtocol.Expectation(
+                        context.chainId, context.router, context.eventId, context.asset, context.terminalInstanceId,
+                        context.terminalKeyVersion, gross,
+                        CheckoutCommitments.orderReferenceHash(sale.reference, BigInteger.ONE),
+                        CheckoutCommitments.receiptCommitment(display, gross),
+                    ),
+                    BigInteger.ONE, nowMs / 1_000,
+                )
+                intent
+            } catch (error: InvalidOfflineExchange) {
+                app.repository.transitionOnlineSale(sale.orderId, UNSIGNED + "CUSTOMER_PAYING", "DECLINED", nowMs)
+                return
+            }
+            val digest = PaymentIntentProtocol.digest(intent)
+            // The server also sends the digest it computed; a mismatch means the two sides disagree about
+            // what is being signed, so nothing is signed.
+            if (order.intentDigest != null && !OfflineProtocol.hex(digest).equals(order.intentDigest, ignoreCase = true)) {
+                app.repository.transitionOnlineSale(sale.orderId, UNSIGNED + "CUSTOMER_PAYING", "DECLINED", nowMs)
+                return
+            }
+            val signature = "0x" + app.keys.signDigest(digest).joinToString("") { "%02x".format(it.toInt() and 0xff) }
+            try {
+                app.onlineCheckout.attachSignature(config, sale.orderId, signature)
+            } catch (error: OnlineCheckoutException) {
+                // Already signed (a retry after a lost answer) is fine; anything else is retried next round.
+                if (error.kind != OnlineCheckoutException.Kind.REFUSED) throw error
+            }
+            app.repository.transitionOnlineSale(
+                sale.orderId, UNSIGNED + "CUSTOMER_PAYING", "SIGNED", System.currentTimeMillis(),
+                paymentId = intent.paymentId, expiresAt = intent.expiresAt,
+            )
+        }
+    }
+
+    /** Withdraws an offline request nobody has answered, so the cashier can charge again at once. */
+    fun cancelSale(requestId: String) = viewModelScope.launch(Dispatchers.IO) {
+        runBusy("Cancelling") {
+            app.repository.cancelUnansweredRequest(requestId, System.currentTimeMillis())
+            _state.value.copy(
+                orders = app.repository.orderViews(), sales = app.repository.recoverSales(_state.value.salesLimit),
+                focusedSaleId = null, message = "", busy = false,
+            )
+        }
+    }
+
+    /** Withdraws an online sale before the terminal has signed it. After that the customer may still pay. */
+    fun cancelOnlineSale(orderId: String) = viewModelScope.launch(Dispatchers.IO) {
+        onlineLock.withLock {
+            app.repository.transitionOnlineSale(orderId, listOf("WAITING", "CUSTOMER_PAYING"), "CANCELLED", System.currentTimeMillis())
+        }
+        _state.update { it.copy(onlineSales = loadOnlineSales(), focusedOnlineId = null) }
     }
 
     fun setKeypadCents(cents: Long) {
@@ -393,8 +628,11 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
         runCatching { operation() }.onSuccess { _state.value = it }.onFailure(::fail)
     }
 
+    /** Clears the current error once it has been on screen long enough to read. */
+    private var errorClear: Job? = null
+
     private fun fail(error: Throwable) {
-        _state.value = _state.value.copy(
+        val next = _state.value.copy(
             // Waiting for the organizer is a normal setup step, not a failure.
             busy = false, scanOpen = false, scanPurpose = null, error = error !is TerminalPairingPending,
             // A dropped connection while waiting keeps the waiting card; the next check retries.
@@ -402,6 +640,15 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
             message = if (error is TerminalPairingPending) "Waiting for the organizer to approve this phone. It checks again by itself."
             else error.message ?: "That did not work. Try again",
         )
+        _state.value = next
+        errorClear?.cancel()
+        if (next.error) {
+            errorClear = viewModelScope.launch {
+                delay(ERROR_VISIBLE_MS)
+                // Only this error: a newer message or action has already replaced it otherwise.
+                _state.update { if (it.error && it.message == next.message) it.copy(error = false, message = "") else it }
+            }
+        }
     }
 
     /** Plain summary of a relay run; silent counters are left out. */
@@ -426,11 +673,27 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
 
     private companion object {
         const val JOURNAL_REFRESH_MS = 20_000L
+        /** How long an error stays on screen; the next action replaces it sooner. */
+        const val ERROR_VISIBLE_MS = 8_000L
         const val PAIRING_RECHECK_MS = 10_000L
         /** How often the automatic clock check looks at the sample. */
         const val CLOCK_POLL_MS = 15_000L
         /** While online, renew a trusted-time sample once it is this old. */
         const val CLOCK_REFRESH_AGE_MS = 10 * 60 * 1_000L
         const val KEYPAD_DESCRIPTION = "Custom amount"
+        /** Orders opened here for online payments carry this prefix; the server keeps them out of POS imports. */
+        const val ONLINE_REFERENCE_PREFIX = "OL-"
+        /** How long the code on screen is offered to a customer, as long as an offline request lives. */
+        const val ONLINE_CODE_SECONDS = 180L
+        /** After a signed payment's window ends, how long a late finalization is still waited for. */
+        const val ONLINE_LATE_GRACE_SECONDS = 120L
+        const val ONLINE_POLL_MS = 2_000L
+        /** Lets a fresh connection settle before the first upload attempt. */
+        const val RECONNECT_UPLOAD_DELAY_MS = 1_500L
+        const val ONLINE_IDLE_POLL_MS = 10_000L
+        const val CONTEXT_RECHECK_MS = 15_000L
+        val UNSIGNED = listOf("WAITING", "CUSTOMER_PAYING")
+        val onlineReferenceFormat: java.time.format.DateTimeFormatter =
+            java.time.format.DateTimeFormatter.ofPattern("yyMMdd-HHmmss").withZone(java.time.ZoneOffset.UTC)
     }
 }

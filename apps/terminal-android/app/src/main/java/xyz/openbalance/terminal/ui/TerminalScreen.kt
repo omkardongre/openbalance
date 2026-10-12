@@ -67,6 +67,7 @@ import androidx.compose.material.icons.rounded.Warning
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.IconButton
@@ -90,6 +91,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -125,6 +127,7 @@ import xyz.openbalance.terminal.camera.QrScanner
 import xyz.openbalance.terminal.camera.RequestQr
 import xyz.openbalance.terminal.data.ChannelView
 import xyz.openbalance.terminal.data.OfflineLimits
+import xyz.openbalance.terminal.data.OnlineSaleView
 import xyz.openbalance.terminal.data.OrderView
 import xyz.openbalance.terminal.data.SaleView
 import xyz.openbalance.terminal.ui.theme.MonoSmall
@@ -140,13 +143,14 @@ import java.time.format.DateTimeFormatter
 private const val CHANNEL_ASSET_DECIMALS = 6
 private const val CHANNEL_ASSET_SYMBOL = "USDC"
 
-private const val RESERVE_PAGE_SIZE = 10
 
 /** A reserve this close to its acceptance deadline is flagged so the cashier can switch or sync. */
 private const val RESERVE_CLOSING_SECONDS = 10 * 60L
 
 /** Offline sales this close to their submission deadline must be uploaded now or they will not settle. */
 private const val UPLOAD_URGENT_SECONDS = 5 * 60L
+/** Outside the Sales tab the upload warning appears only this close to the deadline. */
+private const val UPLOAD_NUDGE_SECONDS = 10 * 60L
 
 @Composable
 fun TerminalScreen(model: TerminalViewModel = viewModel()) {
@@ -157,31 +161,32 @@ fun TerminalScreen(model: TerminalViewModel = viewModel()) {
         label = "scanner",
     ) { scanning ->
         val focused = state.focusedSaleId?.let { id -> state.sales.firstOrNull { it.requestId == id } }
+        val focusedOnline = state.focusedOnlineId?.let { id -> state.onlineSales.firstOrNull { it.orderId == id } }
         when {
             scanning -> ScannerScreen(state, model)
             // One payment owns the whole screen while it is live, as card terminals do: the cashier and
             // attendee see a single amount, a single code and a single next step.
             focused != null -> PaymentScreen(focused, state, model)
+            focusedOnline != null -> OnlinePaymentScreen(focusedOnline, state, model)
             else -> HomeScreen(state, model)
         }
     }
 }
 
 // ---------------------------------------------------------------------------------------------
-// Home: three destinations instead of one long scroll
+// Home: two destinations, selling and the record of what was sold
 // ---------------------------------------------------------------------------------------------
 
 private enum class Tab(val label: String, val icon: ImageVector) {
     Checkout("Checkout", Icons.Rounded.ShoppingCart),
     Sales("Sales", Icons.AutoMirrored.Rounded.List),
-    Terminal("Terminal", Icons.Rounded.Settings),
 }
 
 @Composable
 private fun HomeScreen(state: TerminalUiState, model: TerminalViewModel) {
-    // Checkout first: its readiness card routes to setup when the terminal is not enrolled yet.
+    // Checkout first: its readiness card carries setup, pairing and clock actions until the phone is ready.
     var tab by rememberSaveable { mutableStateOf(Tab.Checkout) }
-    val pendingSales = state.sales.count { isPendingSale(it, state.nowSeconds) }
+    val pendingSales = state.sales.count { isPendingSale(it, state.nowSeconds) } + state.onlineSales.count { it.active }
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         bottomBar = {
@@ -215,9 +220,8 @@ private fun HomeScreen(state: TerminalUiState, model: TerminalViewModel) {
             modifier = Modifier.padding(padding),
         ) { current ->
             when (current) {
-                Tab.Checkout -> CheckoutTab(state, model) { tab = Tab.Terminal }
+                Tab.Checkout -> CheckoutTab(state, model)
                 Tab.Sales -> SalesTab(state, model)
-                Tab.Terminal -> TerminalTab(state, model)
             }
         }
     }
@@ -241,22 +245,45 @@ private fun chargeableOrders(state: TerminalUiState) =
 private fun usableChannels(state: TerminalUiState) =
     state.channels.filter { it.isChargeable(state.nowSeconds) }.sortedByDescending { it.acceptUntil }
 
+/** The phone can open an online sale right now: working internet and a terminal that has synced once. */
+private fun canTakeOnline(state: TerminalUiState) =
+    state.online && state.onlineReady && state.configured && !state.pairing && state.vendor != null
+
+/** The terminal can charge: online, or offline against a reserve with the clock checked. */
+private fun isReady(state: TerminalUiState) = state.configured && !state.pairing &&
+    (canTakeOnline(state) || (state.trustedTime != null && usableChannels(state).isNotEmpty()))
+
+/** One plain line under "Ready to charge": how customers can pay right now. */
+private fun readySubtitle(state: TerminalUiState): String {
+    val offline = usableChannels(state).size
+    val offlineText = "$offline customer${if (offline == 1) "" else "s"} can pay offline"
+    return when {
+        canTakeOnline(state) && offline > 0 -> "Customers scan and pay. $offlineText"
+        canTakeOnline(state) -> "Customers scan and pay with their passkey"
+        else -> offlineText
+    }
+}
+
 /** A request the attendee can still answer. Expired ones hold nothing and are released on the next charge. */
 private fun isLiveRequest(sale: SaleView, nowSeconds: Long) =
     (sale.state == "PREPARED" && sale.expiresAt > nowSeconds) || sale.state == "ATTENDEE_SIGNED"
 
 @Composable
-private fun CheckoutTab(state: TerminalUiState, model: TerminalViewModel, openTerminal: () -> Unit) {
+private fun CheckoutTab(state: TerminalUiState, model: TerminalViewModel) {
     val orders = chargeableOrders(state)
     val live = state.sales.firstOrNull { isLiveRequest(it, state.nowSeconds) }
+    val liveOnline = state.onlineSales.firstOrNull { it.active }
     TabList {
         item { TopBar(state, model) }
-        item { ReadinessCard(state, model, openTerminal = openTerminal) }
-        if (state.pending.waitingCount > 0 || state.pending.needsAttentionCount > 0) {
-            item(key = "pending") { PendingUploadBanner(state, model) }
+        item { ReadinessCard(state, model) }
+        if (uploadNeedsNudge(state)) {
+            item(key = "pending") { PendingUploadBanner(state, model, onSales = false) }
+        }
+        liveOnline?.let { sale ->
+            item(key = "liveOnline") { OnlinePaymentBanner(sale, state, model) }
         }
         live?.let { sale ->
-            item(key = "live") { LivePaymentBanner(sale, state) { model.focusSale(sale.requestId) } }
+            item(key = "live") { LivePaymentBanner(sale, state, model) }
         }
         // Keying in the amount is the primary way to sell, as on card terminals; orders pushed by a
         // connected POS appear below it only when there are some.
@@ -268,37 +295,39 @@ private fun CheckoutTab(state: TerminalUiState, model: TerminalViewModel, openTe
     }
 }
 
+/** One row in the Sales list: a sale taken offline against a reserve, or online from the customer's balance. */
+private sealed interface SaleItem {
+    val key: String
+    val createdAt: Long
+
+    class Offline(val sale: SaleView) : SaleItem {
+        override val key get() = "sale:${sale.requestId}"
+        override val createdAt get() = sale.createdAt
+    }
+
+    class Online(val sale: OnlineSaleView) : SaleItem {
+        override val key get() = "online:${sale.orderId}"
+        override val createdAt get() = sale.createdAt
+    }
+}
+
+/** Online sales worth listing: still moving, paid, or refused by this terminal. Cancelled and lapsed ones moved no money. */
+private fun isListedOnline(sale: OnlineSaleView) = sale.active || sale.state == "PAID" || sale.state == "DECLINED"
+
 @Composable
 private fun SalesTab(state: TerminalUiState, model: TerminalViewModel) {
-    val pending = state.sales.count { isPendingSale(it, state.nowSeconds) }
-    val settled = state.sales.count { it.relayState == "SETTLED" }
-    val haptics = LocalHapticFeedback.current
+    // Charges the customer never answered moved no money, so they are not sales.
+    val items = (
+        state.sales.filterNot { isUnansweredRequest(it, state.nowSeconds) }.map { SaleItem.Offline(it) } +
+            state.onlineSales.filter(::isListedOnline).map { SaleItem.Online(it) }
+        ).sortedByDescending { it.createdAt }
     var filter by rememberSaveable { mutableStateOf(SaleFilter.All) }
     TabList {
         item {
             Text("Sales", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.padding(top = 4.dp).semantics { heading() })
         }
-        item {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                SummaryTile("Pending", pending, TerminalColors.Amber, Modifier.weight(1f))
-                SummaryTile("Settled", settled, TerminalColors.Mint, Modifier.weight(1f))
-            }
-        }
-        item {
-            FilledTonalButton(
-                onClick = { haptics.performHapticFeedback(HapticFeedbackType.LongPress); model.synchronizeReceipts() },
-                enabled = state.configured && !state.busy,
-                shape = MaterialTheme.shapes.medium,
-                contentPadding = PaddingValues(vertical = 14.dp),
-                modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
-            ) {
-                Icon(Icons.Rounded.Send, null, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(8.dp))
-                Text("Upload sales", style = MaterialTheme.typography.labelLarge)
-            }
-        }
         if (state.pending.waitingCount > 0 || state.pending.needsAttentionCount > 0) {
-            item(key = "pending") { PendingUploadBanner(state, model) }
+            item(key = "pending") { PendingUploadBanner(state, model, onSales = true) }
         }
         if (state.pending.settlingCount > 0) {
             item {
@@ -310,21 +339,12 @@ private fun SalesTab(state: TerminalUiState, model: TerminalViewModel) {
                 )
             }
         }
-        if (state.pending.missedCount > 0) {
-            item {
-                Text(
-                    "${state.pending.missedCount} sale${if (state.pending.missedCount == 1) "" else "s"} " +
-                        "(${formatUnits(state.pending.missedUnits.toString(), CHANNEL_ASSET_DECIMALS)} $CHANNEL_ASSET_SYMBOL) " +
-                        "were not uploaded in time and will not be paid. The customer gets the money back.",
-                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        }
-        item { MessageLine(state) }
+        // Errors only; routine progress ("Payment accepted…") is shown where it happened.
+        if (state.error) item { MessageLine(state) }
         item(key = "filters") {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 SaleFilter.entries.forEach { entry ->
-                    val count = state.sales.count { entry.matches(it, state.nowSeconds) }
+                    val count = items.count { entry.matches(it, state.nowSeconds) }
                     FilterChip(
                         selected = filter == entry,
                         onClick = { filter = entry },
@@ -337,19 +357,22 @@ private fun SalesTab(state: TerminalUiState, model: TerminalViewModel) {
                 }
             }
         }
-        val shown = state.sales.filter { filter.matches(it, state.nowSeconds) }
+        val shown = items.filter { filter.matches(it, state.nowSeconds) }
         if (shown.isEmpty()) {
             item {
                 EmptyCard(
                     Icons.AutoMirrored.Rounded.List,
-                    if (state.sales.isEmpty()) "No sales yet" else "No ${filter.label.lowercase()} sales",
-                    if (state.sales.isEmpty()) "Payments you take appear here."
+                    if (items.isEmpty()) "No sales yet" else "No ${filter.label.lowercase()} sales",
+                    if (items.isEmpty()) "Payments you take appear here."
                     else "Try another filter, or load older sales below.",
                 )
             }
         }
-        items(shown, key = { "sale:${it.requestId}" }) { sale ->
-            SaleRow(sale, state) { model.focusSale(sale.requestId) }
+        items(shown, key = { it.key }) { item ->
+            when (item) {
+                is SaleItem.Offline -> SaleRow(item.sale, state) { model.focusSale(item.sale.requestId) }
+                is SaleItem.Online -> OnlineSaleRow(item.sale) { model.focusOnlineSale(item.sale.orderId) }
+            }
         }
         // The journal is read a page at a time; a full page means there may be older sales.
         if (state.sales.size >= state.salesLimit) {
@@ -361,22 +384,33 @@ private fun SalesTab(state: TerminalUiState, model: TerminalViewModel) {
                     modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
                 ) { Text("Show older sales") }
             }
-        } else if (state.sales.isNotEmpty()) {
+        } else if (items.isNotEmpty()) {
             item(key = "end") {
                 Text(
-                    "${state.sales.size} sale${if (state.sales.size == 1) "" else "s"} on this terminal",
+                    "${items.size} sale${if (items.size == 1) "" else "s"} on this terminal",
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
                 )
             }
         }
+        item(key = "footer") { Footer() }
     }
 }
 
 private enum class SaleFilter(val label: String) {
-    All("All"), Pending("Pending"), Settled("Settled"), Other("Not paid");
+    All("All"), Pending("Pending"), Settled("Paid"), Other("Not paid");
 
-    fun matches(sale: SaleView, nowSeconds: Long) = when (this) {
+    fun matches(item: SaleItem, nowSeconds: Long) = when (item) {
+        is SaleItem.Offline -> matches(item.sale, nowSeconds)
+        is SaleItem.Online -> when (this) {
+            All -> true
+            Pending -> item.sale.active
+            Settled -> item.sale.state == "PAID"
+            Other -> item.sale.state == "DECLINED"
+        }
+    }
+
+    private fun matches(sale: SaleView, nowSeconds: Long) = when (this) {
         All -> true
         Pending -> isPendingSale(sale, nowSeconds) || isLiveRequest(sale, nowSeconds)
         Settled -> sale.relayState == "SETTLED"
@@ -384,87 +418,35 @@ private enum class SaleFilter(val label: String) {
     }
 }
 
-@Composable
-private fun TerminalTab(state: TerminalUiState, model: TerminalViewModel) {
-    val enrolled = state.configured
-    val timeReady = state.trustedTime != null
-    var showClosed by rememberSaveable { mutableStateOf(false) }
-    var visible by rememberSaveable { mutableStateOf(RESERVE_PAGE_SIZE) }
-    TabList {
-        item { TopBar(state, model) }
-        item { StatusHero(state, enrolled, timeReady) }
-        item { ActionDeck(state, model, enrolled, timeReady) }
-        val open = usableChannels(state)
-        val closed = state.channels.filterNot { it.isChargeable(state.nowSeconds) }.sortedByDescending { it.acceptUntil }
-        val list = if (showClosed) closed else open
-        item { SectionHeader("Reserves", open.size, "Money customers set aside to pay this stall") }
-        item(key = "reserveFilter") {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                listOf(false to "Open ${open.size}", true to "Closed ${closed.size}").forEach { (value, label) ->
-                    FilterChip(
-                        selected = showClosed == value,
-                        onClick = { showClosed = value; visible = RESERVE_PAGE_SIZE },
-                        label = { Text(label) },
-                        colors = FilterChipDefaults.filterChipColors(
-                            selectedContainerColor = TerminalColors.Mint.copy(alpha = 0.18f),
-                            selectedLabelColor = TerminalColors.MintDeep,
-                        ),
-                    )
-                }
-            }
-        }
-        if (list.isEmpty()) {
-            item {
-                if (showClosed) EmptyCard(Icons.Rounded.Lock, "No closed reserves", "Spent or expired reserves are listed here.")
-                else EmptyCard(Icons.Rounded.Lock, "No open reserves", "Money customers set aside for this stall appears after you tap Refresh.")
-            }
-        }
-        items(list.take(visible), key = { "channel:${it.channelId}" }) { channel ->
-            // Informational: the customer's phone picks which of its reserves pays.
-            ChannelCard(channel, selected = false, enabled = false) {}
-        }
-        if (list.size > visible) {
-            item(key = "moreReserves") {
-                OutlinedButton(
-                    onClick = { visible += RESERVE_PAGE_SIZE },
-                    shape = MaterialTheme.shapes.medium,
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
-                ) { Text("Show ${minOf(RESERVE_PAGE_SIZE, list.size - visible)} more") }
-            }
-        }
-        item { Footer() }
-    }
-}
-
 /**
  * The one card a cashier needs before charging: can I take a payment right now, for how long, and
- * against which reserve. Everything else lives on the Terminal tab.
+ * against which reserve. Until the phone is ready it also carries the one next step (setup,
+ * approval, clock), so no separate settings screen is needed.
  */
 @Composable
-private fun ReadinessCard(state: TerminalUiState, model: TerminalViewModel, openTerminal: () -> Unit) {
+private fun ReadinessCard(state: TerminalUiState, model: TerminalViewModel) {
     val haptics = LocalHapticFeedback.current
     val usable = usableChannels(state)
     val timeReady = state.trustedTime != null
-    val ready = state.configured && !state.pairing && timeReady && usable.isNotEmpty()
-    var details by rememberSaveable { mutableStateOf(false) }
+    val ready = isReady(state)
     val (title, action) = when {
-        !state.configured -> "Set up this terminal" to ("Start setup" to openTerminal)
+        !state.configured -> "Set up this terminal" to ("Scan setup code" to { model.beginEnrollmentScan(); Unit })
         state.pairing -> "Waiting for approval" to ("Check again" to { model.synchronize(); Unit })
+        ready -> "Ready to charge" to null
         // The clock is checked by itself while online; a button appears only when that failed.
         !timeReady && state.clockFailed -> "Connect to the internet" to ("Try again" to { model.refreshTime(); Unit })
         !timeReady -> "Getting the time…" to null
         usable.isEmpty() && state.channels.any { it.acceptUntil > state.nowSeconds } ->
-            "Reserves used up" to ("Refresh for new reserves" to { model.synchronize(); Unit })
-        usable.isEmpty() -> "Waiting for reserves" to ("Refresh" to { model.synchronize(); Unit })
-        else -> "Ready to charge" to null
+            "Customers' money used up" to ("Refresh" to { model.synchronize(); Unit })
+        else -> "Waiting for customers" to ("Refresh" to { model.synchronize(); Unit })
     }
     val subtitle = when {
-        !state.configured -> "Scan the setup code from the stall owner or organizer."
+        !state.configured -> "Scan the setup code from the organizer."
         state.pairing -> "The organizer still has to approve this phone."
+        ready -> readySubtitle(state)
         !timeReady && state.clockFailed -> "The phone needs the internet once to check the time before selling."
         !timeReady -> "This takes a few seconds."
-        usable.isEmpty() -> "No open reserves right now. One appears when a customer sets money aside for this stall."
-        else -> null
+        else -> "Nobody can pay offline here yet. This changes when a customer sets money aside for this stall."
     }
     Surface(
         shape = MaterialTheme.shapes.large,
@@ -480,32 +462,12 @@ private fun ReadinessCard(state: TerminalUiState, model: TerminalViewModel, open
                 )
                 Spacer(Modifier.width(10.dp))
                 Text(title, style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f).semantics { heading() })
-                if (ready) {
-                    TextButton(onClick = { details = !details }) { Text(if (details) "Hide details" else "Details") }
-                }
             }
-            subtitle?.let {
-                Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            if (ready) {
-                Text(
-                    "${usable.size} customer${if (usable.size == 1) "" else "s"} can pay offline",
-                    style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                AnimatedVisibility(details, enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
-                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        DetailLine(
-                            "Most one customer can pay",
-                            "${formatUnits(OfflineLimits.bestCover(usable).toString(), CHANNEL_ASSET_DECIMALS)} $CHANNEL_ASSET_SYMBOL",
-                        )
-                        usable.minOfOrNull { it.acceptUntil }?.let { DetailLine("First reserve closes at", clock(it)) }
-                    }
-                }
-            }
-            // Errors always show; routine progress only appears in Details.
+            Text(subtitle, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            // Errors always show; routine progress is shown where it happened.
             if (state.error) MessageLine(state)
             action?.let { (label, onClick) ->
-                PrimaryAction(label, if (label == "Start setup" || label == "Choose reserve") null else Icons.Rounded.Refresh, enabled = !state.busy) {
+                PrimaryAction(label, if (label == "Scan setup code") null else Icons.Rounded.Refresh, enabled = !state.busy) {
                     haptics.performHapticFeedback(HapticFeedbackType.LongPress); onClick()
                 }
             }
@@ -519,16 +481,9 @@ private fun ReadinessCard(state: TerminalUiState, model: TerminalViewModel, open
     }
 }
 
+/** A payment in progress: what it is, how long is left, and a way to open it or call it off. */
 @Composable
-private fun DetailLine(label: String, value: String) {
-    Row(Modifier.fillMaxWidth()) {
-        Text(label, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f))
-        Text(value, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurface)
-    }
-}
-
-@Composable
-private fun LivePaymentBanner(sale: SaleView, state: TerminalUiState, onOpen: () -> Unit) {
+private fun PaymentBanner(title: String, detail: String, onCancel: (() -> Unit)?, onOpen: () -> Unit) {
     Surface(
         shape = MaterialTheme.shapes.medium,
         color = TerminalColors.Amber.copy(alpha = 0.12f),
@@ -536,18 +491,51 @@ private fun LivePaymentBanner(sale: SaleView, state: TerminalUiState, onOpen: ()
         modifier = Modifier.fillMaxWidth().clip(MaterialTheme.shapes.medium)
             .clickable(role = Role.Button, onClickLabel = "Open payment", onClick = onOpen),
     ) {
-        Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.padding(start = 16.dp, top = 8.dp, bottom = 8.dp, end = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
-                Text("Payment in progress", style = MaterialTheme.typography.titleSmall, color = TerminalColors.Amber)
-                Text(
-                    "${formatUnits(sale.grossUnits, CHANNEL_ASSET_DECIMALS)} $CHANNEL_ASSET_SYMBOL · " +
-                        if (sale.state == "ATTENDEE_SIGNED") "response received" else "expires in ${countdown(sale.expiresAt - state.nowSeconds)}",
-                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurface,
-                )
+                Text(title, style = MaterialTheme.typography.titleSmall, color = TerminalColors.Amber)
+                Text(detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurface)
             }
-            Text("Open", style = MaterialTheme.typography.labelLarge, color = TerminalColors.Amber)
+            if (onCancel != null) {
+                TextButton(onClick = onCancel) { Text("Cancel", color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            }
+            TextButton(onClick = onOpen) { Text("Open", color = TerminalColors.Amber) }
         }
     }
+}
+
+@Composable
+private fun LivePaymentBanner(sale: SaleView, state: TerminalUiState, model: TerminalViewModel) {
+    PaymentBanner(
+        "Payment in progress",
+        "${formatUnits(sale.grossUnits, CHANNEL_ASSET_DECIMALS)} $CHANNEL_ASSET_SYMBOL · " +
+            if (sale.state == "ATTENDEE_SIGNED") "response received" else "expires in ${countdown(sale.expiresAt - state.nowSeconds)}",
+        // Once the customer's answer is in, the payment is being accepted and cannot be called off.
+        onCancel = if (sale.state == "PREPARED") ({ model.cancelSale(sale.requestId) }) else null,
+        onOpen = { model.focusSale(sale.requestId) },
+    )
+}
+
+@Composable
+private fun OnlinePaymentBanner(sale: OnlineSaleView, state: TerminalUiState, model: TerminalViewModel) {
+    PaymentBanner(
+        "Payment in progress",
+        "${formatUnits(sale.grossUnits, sale.assetDecimals)} ${sale.assetSymbol} · " + when (sale.state) {
+            "WAITING" -> "waiting for the customer · ${countdown(sale.expiresAt - state.nowSeconds)}"
+            else -> "the customer is paying"
+        },
+        onCancel = if (sale.state == "WAITING" || sale.state == "CUSTOMER_PAYING") ({ model.cancelOnlineSale(sale.orderId) }) else null,
+        onOpen = { model.focusOnlineSale(sale.orderId) },
+    )
+}
+
+/** Off the Sales tab the warning shows only when time is short or the stall needs to act. */
+private fun uploadNeedsNudge(state: TerminalUiState): Boolean {
+    val pending = state.pending
+    if (pending.needsAttentionCount > 0) return true
+    if (pending.waitingCount == 0) return false
+    val left = pending.uploadBy?.let { it - state.nowSeconds } ?: return false
+    return left <= UPLOAD_NUDGE_SECONDS
 }
 
 /**
@@ -555,7 +543,7 @@ private fun LivePaymentBanner(sale: SaleView, state: TerminalUiState, onOpen: ()
  * reserve's submission deadline, so the warning names the deadline and escalates as it nears.
  */
 @Composable
-private fun PendingUploadBanner(state: TerminalUiState, model: TerminalViewModel) {
+private fun PendingUploadBanner(state: TerminalUiState, model: TerminalViewModel, onSales: Boolean) {
     val pending = state.pending
     val uploadBy = pending.uploadBy
     val left = uploadBy?.let { it - state.nowSeconds }
@@ -586,9 +574,9 @@ private fun PendingUploadBanner(state: TerminalUiState, model: TerminalViewModel
             if (uploadBy != null && left != null) {
                 Text(
                     if (missed) {
-                        "The upload deadline passed at ${clock(uploadBy)}. Upload now; anything that misses its deadline will not be paid."
+                        "The upload deadline passed at ${clock(uploadBy)}. Connect to the internet now; sales that miss it are not paid."
                     } else {
-                        "Upload before ${clock(uploadBy)} (${countdown(left)} left) to get paid. Connect to the internet and tap Upload now."
+                        "Uploads by itself when online. Upload before ${clock(uploadBy)} (${countdown(left)} left) to get paid."
                     },
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurface,
                 )
@@ -599,31 +587,18 @@ private fun PendingUploadBanner(state: TerminalUiState, model: TerminalViewModel
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurface,
                 )
             }
-            if (pending.waitingCount > 0) {
-                FilledTonalButton(
+            // Upload runs by itself once online, so the button is only a fallback and lives on Sales.
+            if (onSales && pending.waitingCount > 0) {
+                TextButton(
                     onClick = { haptics.performHapticFeedback(HapticFeedbackType.LongPress); model.synchronizeReceipts() },
                     enabled = state.configured && !state.busy,
-                    shape = MaterialTheme.shapes.medium,
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
                 ) {
-                    Icon(Icons.Rounded.Send, null, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(8.dp))
+                    Icon(Icons.Rounded.Send, null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(6.dp))
                     Text("Upload now", style = MaterialTheme.typography.labelLarge)
                 }
             }
         }
-    }
-}
-
-@Composable
-private fun SummaryTile(label: String, count: Int, color: Color, modifier: Modifier = Modifier) {
-    Column(
-        modifier.clip(MaterialTheme.shapes.medium).background(color.copy(alpha = 0.10f))
-            .padding(horizontal = 16.dp, vertical = 12.dp)
-            .semantics(mergeDescendants = true) { contentDescription = "$count $label" },
-    ) {
-        Text("$count", style = MaterialTheme.typography.headlineSmall, color = color)
-        Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 
@@ -644,25 +619,25 @@ private fun TopBar(state: TerminalUiState, model: TerminalViewModel) {
             )
         }
 
-        StatusPill(
-            text = when {
-                state.busy -> "Working"
-                state.configured -> "Set up"
-                else -> "Setup"
-            },
-            color = when {
-                state.busy -> TerminalColors.Amber
-                state.configured -> TerminalColors.Mint
-                else -> TerminalColors.Muted
-            },
-            pulsing = state.busy,
-        )
-        // The one place the setup steps point to, on every tab: "Tap ⋮, then Scan setup code".
+        // Shown only when it adds something: the cards below already say when the phone is ready.
+        when {
+            state.busy -> StatusPill("Working", TerminalColors.Amber, pulsing = true)
+            !state.configured -> StatusPill("Not set up", TerminalColors.Muted, pulsing = false)
+        }
+        // Rare actions, on every tab: refresh, and "Tap ⋮, then Scan setup code" to pair or re-pair.
         Box {
             IconButton(onClick = { menuOpen = true }, enabled = !state.busy) {
                 Icon(Icons.Rounded.MoreVert, contentDescription = "More options")
             }
             DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                // Everything syncs by itself; this is only a nudge, so it sits in the menu.
+                if (state.configured) {
+                    DropdownMenuItem(
+                        text = { Text("Refresh") },
+                        leadingIcon = { Icon(Icons.Rounded.Refresh, null, modifier = Modifier.size(18.dp)) },
+                        onClick = { menuOpen = false; model.synchronize() },
+                    )
+                }
                 DropdownMenuItem(
                     text = { Text("Scan setup code") },
                     leadingIcon = { ScanGlyph(18.dp, MaterialTheme.colorScheme.onSurface) },
@@ -732,83 +707,6 @@ private fun StatusPill(text: String, color: Color, pulsing: Boolean) {
 }
 
 @Composable
-private fun StatusHero(state: TerminalUiState, enrolled: Boolean, timeReady: Boolean) {
-    val openCount = state.channels.count { it.isChargeable(state.nowSeconds) }
-    val ready = enrolled && timeReady && openCount > 0
-    val title = when {
-        !enrolled -> "Set up this terminal"
-        state.pairing -> "Waiting for approval"
-        !timeReady -> "Clock check needed"
-        !state.synced && state.channels.isEmpty() -> "Tap Refresh to go live"
-        openCount == 0 -> "Waiting for reserves"
-        else -> "Ready for offline payments"
-    }
-    Surface(
-        shape = MaterialTheme.shapes.large,
-        color = MaterialTheme.colorScheme.surfaceContainer,
-        border = BorderStroke(1.dp, if (ready) TerminalColors.Mint.copy(alpha = 0.35f) else MaterialTheme.colorScheme.outlineVariant),
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        Box {
-            // Soft glow in the corner; brighter once the terminal can take payments.
-            val glow by animateFloatAsState(if (ready) 0.22f else 0.10f, spring(stiffness = Spring.StiffnessVeryLow), label = "glow")
-            Box(
-                Modifier.matchParentSize().background(
-                    Brush.radialGradient(
-                        listOf(TerminalColors.Mint.copy(alpha = glow), Color.Transparent),
-                        center = Offset(900f, 0f), radius = 900f,
-                    ),
-                ),
-            )
-            Column(Modifier.padding(20.dp).animateContentSize(spring(stiffness = Spring.StiffnessMediumLow))) {
-                AnimatedContent(targetState = title, label = "heroTitle",
-                    transitionSpec = { fadeIn(tween(200)) togetherWith fadeOut(tween(120)) }) { value ->
-                    Text(value, style = MaterialTheme.typography.headlineMedium, modifier = Modifier.semantics { heading() })
-                }
-                Spacer(Modifier.height(4.dp))
-                Spacer(Modifier.height(18.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                    ReadinessStep("Set up", enrolled, Modifier.weight(1f))
-                    ReadinessStep("Clock", timeReady, Modifier.weight(1f))
-                    ReadinessStep(if (openCount == 0) "Reserves" else "$openCount open",
-                        openCount > 0, Modifier.weight(1f))
-                }
-                Spacer(Modifier.height(16.dp))
-                MessageLine(state)
-                AnimatedVisibility(state.busy, enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
-                    LinearProgressIndicator(
-                        modifier = Modifier.fillMaxWidth().padding(top = 12.dp).height(4.dp).clip(CircleShape),
-                        color = TerminalColors.Mint, trackColor = MaterialTheme.colorScheme.surfaceContainerHighest,
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun ReadinessStep(label: String, done: Boolean, modifier: Modifier = Modifier) {
-    val background by animateColorAsState(
-        if (done) TerminalColors.Mint.copy(alpha = 0.14f) else MaterialTheme.colorScheme.surfaceContainerHighest,
-        spring(stiffness = Spring.StiffnessMediumLow), label = "stepBg",
-    )
-    val content by animateColorAsState(
-        if (done) TerminalColors.Mint else MaterialTheme.colorScheme.onSurfaceVariant,
-        spring(stiffness = Spring.StiffnessMediumLow), label = "stepFg",
-    )
-    Row(
-        modifier.clip(MaterialTheme.shapes.small).background(background).padding(horizontal = 10.dp, vertical = 10.dp)
-            .semantics(mergeDescendants = true) { contentDescription = "$label ${if (done) "complete" else "pending"}" },
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        if (done) Icon(Icons.Rounded.CheckCircle, null, tint = content, modifier = Modifier.size(16.dp))
-        else Box(Modifier.size(16.dp).border(1.5.dp, content, CircleShape))
-        Spacer(Modifier.width(6.dp))
-        Text(label, style = MaterialTheme.typography.labelMedium, color = content, maxLines = 1, overflow = TextOverflow.Ellipsis)
-    }
-}
-
-@Composable
 private fun MessageLine(state: TerminalUiState) {
     val color = if (state.error) TerminalColors.Coral else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f)
     AnimatedContent(targetState = state.message to state.error, label = "message",
@@ -826,57 +724,6 @@ private fun MessageLine(state: TerminalUiState) {
 // ---------------------------------------------------------------------------------------------
 // Actions
 // ---------------------------------------------------------------------------------------------
-
-@Composable
-private fun ActionDeck(state: TerminalUiState, model: TerminalViewModel, enrolled: Boolean, timeReady: Boolean) {
-    val haptics = LocalHapticFeedback.current
-    val act: (() -> Unit) -> () -> Unit = { action -> { haptics.performHapticFeedback(HapticFeedbackType.LongPress); action() } }
-    // The single most useful next step is promoted to a large primary button; everything else stays
-    // one tap away as a compact tonal action.
-    val primary: Triple<String, ImageVector?, () -> Unit> = when {
-        !enrolled -> Triple("Scan setup code", null, model::beginEnrollmentScan)
-        state.pairing -> Triple("Check again", Icons.Rounded.Refresh, { model.synchronize(); Unit })
-        // The clock syncs by itself while online; a retry appears only when that failed.
-        !timeReady && state.clockFailed -> Triple("Try again", Icons.Rounded.Refresh, { model.refreshTime(); Unit })
-        else -> Triple("Refresh", Icons.Rounded.Refresh, { model.synchronize(); Unit })
-    }
-    var confirmReenroll by remember { mutableStateOf(false) }
-    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        PrimaryAction(primary.first, primary.second, enabled = !state.busy, onClick = act(primary.third))
-        if (enrolled) {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                if (primary.first != "Refresh") {
-                    ChipAction("Refresh", Icons.Rounded.Refresh, !state.busy, act { model.synchronize() })
-                }
-                ChipAction("Upload sales", Icons.Rounded.Send, !state.busy, act { model.synchronizeReceipts() })
-            }
-            // A real (outlined) button, quieter than Refresh / Upload sales but clearly tappable.
-            OutlinedButton(
-                onClick = { confirmReenroll = true },
-                enabled = !state.busy,
-                shape = MaterialTheme.shapes.extraLarge,
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
-                contentPadding = PaddingValues(horizontal = 20.dp, vertical = 14.dp),
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                ScanGlyph(18.dp, MaterialTheme.colorScheme.onSurface)
-                Spacer(Modifier.width(10.dp))
-                Text("Scan a new setup code", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurface)
-            }
-        }
-    }
-    if (confirmReenroll) {
-        AlertDialog(
-            onDismissRequest = { confirmReenroll = false },
-            title = { Text("Set up this terminal again?") },
-            text = { Text("Scan the setup code for your stall. Your sales stay on this phone.") },
-            confirmButton = {
-                TextButton(onClick = { confirmReenroll = false; model.beginEnrollmentScan() }) { Text("Scan code") }
-            },
-            dismissButton = { TextButton(onClick = { confirmReenroll = false }) { Text("Cancel") } },
-        )
-    }
-}
 
 /** Press feedback shared by every tappable surface: a quick spring squash, like a physical key. */
 @Composable
@@ -909,23 +756,6 @@ private fun PrimaryAction(label: String, icon: ImageVector?, enabled: Boolean, o
         if (icon != null) Icon(icon, null, modifier = Modifier.size(22.dp)) else ScanGlyph(22.dp, TerminalColors.OnMint)
         Spacer(Modifier.width(10.dp))
         Text(label, style = MaterialTheme.typography.titleMedium)
-    }
-}
-
-@Composable
-private fun RowScope.ChipAction(label: String, icon: ImageVector?, enabled: Boolean, onClick: () -> Unit) {
-    val source = remember { MutableInteractionSource() }
-    FilledTonalButton(
-        onClick = onClick,
-        enabled = enabled,
-        interactionSource = source,
-        shape = MaterialTheme.shapes.medium,
-        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 12.dp),
-        modifier = Modifier.weight(1f).heightIn(min = 52.dp).scale(pressScale(source)),
-    ) {
-        if (icon != null) Icon(icon, null, modifier = Modifier.size(18.dp)) else ScanGlyph(18.dp, MaterialTheme.colorScheme.onSecondaryContainer)
-        Spacer(Modifier.width(6.dp))
-        Text(label, style = MaterialTheme.typography.labelLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 
@@ -1010,10 +840,12 @@ private fun KeypadCard(state: TerminalUiState, model: TerminalViewModel) {
     val symbol = state.vendor?.assetSymbol ?: CHANNEL_ASSET_SYMBOL
     val units = if (decimals >= 2) BigInteger.valueOf(cents).multiply(BigInteger.TEN.pow(decimals - 2)) else BigInteger.ZERO
     val reserves = usableChannels(state)
-    val block = if (cents > 0 && reserves.isNotEmpty()) OfflineLimits.chargeBlock(units, reserves) else null
+    // Online, the customer pays from their own balance: no reserve, clock or offline limit applies.
+    val onlineMode = canTakeOnline(state)
+    val block = if (!onlineMode && cents > 0 && reserves.isNotEmpty()) OfflineLimits.chargeBlock(units, reserves) else null
     val live = state.sales.any { isLiveRequest(it, state.nowSeconds) }
-    val canCharge = cents > 0 && reserves.isNotEmpty() && block == null && state.vendor != null &&
-        state.trustedTime != null && !state.busy && !live
+    val canCharge = cents > 0 && state.vendor != null && !state.busy &&
+        (onlineMode || (reserves.isNotEmpty() && block == null && state.trustedTime != null && !live))
     // Most stall prices are a few round amounts, so those are one tap; the full keypad opens only
     // for anything else and stays out of the way otherwise.
     var keypadOpen by rememberSaveable { mutableStateOf(false) }
@@ -1206,37 +1038,35 @@ private fun OrderRow(order: OrderView, state: TerminalUiState, model: TerminalVi
 }
 
 @Composable
-private fun ChannelCard(channel: ChannelView, selected: Boolean, enabled: Boolean, onSelect: () -> Unit) {
-    val border by animateColorAsState(
-        if (selected) TerminalColors.Mint else MaterialTheme.colorScheme.outlineVariant,
-        spring(stiffness = Spring.StiffnessMediumLow), label = "channelBorder",
-    )
-    val source = remember { MutableInteractionSource() }
+private fun OnlineSaleRow(sale: OnlineSaleView, onOpen: () -> Unit) {
     Surface(
         shape = MaterialTheme.shapes.medium,
-        color = if (selected) TerminalColors.Mint.copy(alpha = 0.07f) else MaterialTheme.colorScheme.surfaceContainerLow,
-        border = BorderStroke(if (selected) 1.5.dp else 1.dp, border),
-        modifier = Modifier.fillMaxWidth().scale(pressScale(source))
-            .clip(MaterialTheme.shapes.medium)
-            .selectable(selected = selected, enabled = enabled, role = Role.RadioButton, interactionSource = source, indication = null, onClick = onSelect),
+        color = MaterialTheme.colorScheme.surfaceContainer,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        modifier = Modifier.fillMaxWidth().clip(MaterialTheme.shapes.medium)
+            .clickable(role = Role.Button, onClickLabel = "Open sale", onClick = onOpen),
     ) {
-        Row(Modifier.padding(18.dp), verticalAlignment = Alignment.CenterVertically) {
-            Box(
-                Modifier.size(22.dp).clip(CircleShape).border(2.dp, border, CircleShape),
-                contentAlignment = Alignment.Center,
-            ) { if (selected) Box(Modifier.size(11.dp).clip(CircleShape).background(TerminalColors.Mint)) }
-            Spacer(Modifier.width(14.dp))
+        Row(Modifier.padding(horizontal = 16.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
-                Row(verticalAlignment = Alignment.Bottom) {
-                    Text(formatUnits(channel.remainingUnits, CHANNEL_ASSET_DECIMALS), style = MaterialTheme.typography.titleLarge)
-                    Spacer(Modifier.width(6.dp))
-                    Text("$CHANNEL_ASSET_SYMBOL left", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(bottom = 3.dp))
+                Text("${formatUnits(sale.grossUnits, sale.assetDecimals)} ${sale.assetSymbol}", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "${sale.description} · ${clock(sale.createdAt)}",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis,
+                )
+                if (sale.state == "DECLINED") {
+                    Text("The payment request did not match", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
             }
-            Column(horizontalAlignment = Alignment.End) {
-                Text("Open until", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text(clock(channel.acceptUntil), style = MaterialTheme.typography.labelLarge)
-            }
+            Spacer(Modifier.width(12.dp))
+            StateBadge(
+                when (sale.state) {
+                    "WAITING" -> "PREPARED"
+                    "CUSTOMER_PAYING", "SIGNED" -> "PAYING"
+                    "PAID" -> "PAID"
+                    else -> "MISSED"
+                },
+            )
         }
     }
 }
@@ -1262,8 +1092,12 @@ private fun SaleRow(sale: SaleView, state: TerminalUiState, onOpen: () -> Unit) 
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1, overflow = TextOverflow.Ellipsis,
                 )
-                sale.lastUploadError?.let {
-                    Text("Upload failed. It will retry", color = TerminalColors.Coral, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                // Past the upload deadline nothing retries any more; say what happened instead.
+                when {
+                    saleBadge(sale, state.nowSeconds) == "MISSED" ->
+                        Text("Not uploaded in time", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    sale.lastUploadError != null ->
+                        Text("Upload failed. It will retry", color = TerminalColors.Coral, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
             }
             Spacer(Modifier.width(12.dp))
@@ -1271,6 +1105,10 @@ private fun SaleRow(sale: SaleView, state: TerminalUiState, onOpen: () -> Unit) 
         }
     }
 }
+
+/** A charge whose request ran out before the customer answered: nothing was signed or charged. */
+private fun isUnansweredRequest(sale: SaleView, nowSeconds: Long) =
+    (sale.state == "PREPARED" && sale.expiresAt <= nowSeconds) || sale.state == "EXPIRED"
 
 private fun isPendingSale(sale: SaleView, nowSeconds: Long) =
     sale.state == "ACCEPTED" && sale.relayState != "SETTLED" &&
@@ -1320,10 +1158,13 @@ private fun PaymentScreen(sale: SaleView, state: TerminalUiState, model: Termina
                 Spacer(Modifier.width(8.dp))
                 Text(CHANNEL_ASSET_SYMBOL, style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(bottom = 8.dp))
             }
-            Text(
-                listOfNotNull(order?.description, order?.orderReference).joinToString(" · ").ifBlank { "Sale at ${clock(sale.createdAt)}" },
-                style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            // A typed amount has no name worth showing; a POS order shows what it is.
+            order?.takeIf { !it.orderReference.startsWith("KP-") }?.let {
+                Text(
+                    "${it.description} · ${it.orderReference}",
+                    style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
 
             when {
                 accepted -> {
@@ -1353,7 +1194,7 @@ private fun PaymentScreen(sale: SaleView, state: TerminalUiState, model: Termina
                 }
             }
 
-            MessageLine(state)
+            if (state.error) MessageLine(state)
 
             val source = remember { MutableInteractionSource() }
             val (label, action) = when {
@@ -1372,6 +1213,95 @@ private fun PaymentScreen(sale: SaleView, state: TerminalUiState, model: Termina
             ) {
                 if (sale.state == "PREPARED" && !expired) { ScanGlyph(20.dp, TerminalColors.OnMint); Spacer(Modifier.width(10.dp)) }
                 Text(label, style = MaterialTheme.typography.titleMedium)
+            }
+            // Before the customer has answered nothing is held, so the cashier can simply start over.
+            if (sale.state == "PREPARED" && !expired) {
+                TextButton(onClick = { model.cancelSale(sale.requestId) }, enabled = !state.busy) {
+                    Text("Cancel sale", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
+    }
+}
+
+/**
+ * The full screen for one online sale: the code for the customer to scan, then a plain status
+ * until the money has arrived. The customer does everything on their own phone; the cashier only
+ * shows the code and sees "Paid".
+ */
+@Composable
+private fun OnlinePaymentScreen(sale: OnlineSaleView, state: TerminalUiState, model: TerminalViewModel) {
+    val haptics = LocalHapticFeedback.current
+    BackHandler(onBack = model::dismissFocusedSale)
+    // A short buzz the moment the money has arrived, for a cashier who is watching the customer.
+    LaunchedEffect(sale.state) {
+        if (sale.state == "PAID") haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+    }
+    val finished = !sale.active
+    Scaffold(containerColor = MaterialTheme.colorScheme.background) { padding ->
+        Column(
+            Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()).padding(horizontal = 20.dp, vertical = 12.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    when (sale.state) {
+                        "PAID" -> "Paid"
+                        "WAITING" -> "Collect payment"
+                        "CUSTOMER_PAYING", "SIGNED" -> "Customer is paying"
+                        "DECLINED" -> "Payment not accepted"
+                        "CANCELLED" -> "Sale cancelled"
+                        else -> "Nothing was charged"
+                    },
+                    style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f).semantics { heading() },
+                )
+                IconButton(onClick = model::dismissFocusedSale) { Icon(Icons.Rounded.Close, "Close payment") }
+            }
+            Row(verticalAlignment = Alignment.Bottom) {
+                Text(formatUnits(sale.grossUnits, sale.assetDecimals), style = MaterialTheme.typography.displayMedium)
+                Spacer(Modifier.width(8.dp))
+                Text(sale.assetSymbol, style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(bottom = 8.dp))
+            }
+            when (sale.state) {
+                "WAITING" -> {
+                    val left = sale.expiresAt - state.nowSeconds
+                    StatusPill("Expires in ${countdown(left)}", if (left <= 30) TerminalColors.Coral else TerminalColors.Amber, pulsing = true)
+                    if (sale.checkoutUrl != null) {
+                        QrPanel(sale.checkoutUrl, "Customer scans this code", "They sign in with their passkey and pay. This screen updates by itself.")
+                    } else {
+                        CircularProgressIndicator(color = TerminalColors.Mint)
+                    }
+                }
+                "CUSTOMER_PAYING", "SIGNED" -> {
+                    CircularProgressIndicator(color = TerminalColors.Mint, modifier = Modifier.padding(vertical = 24.dp))
+                    Text("Waiting for the customer to approve on their phone", style = MaterialTheme.typography.bodyLarge, textAlign = TextAlign.Center)
+                }
+                "PAID" -> Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 24.dp)) {
+                    Icon(Icons.Rounded.CheckCircle, null, tint = TerminalColors.Mint, modifier = Modifier.size(56.dp))
+                    Spacer(Modifier.width(12.dp))
+                    Text("Payment received", style = MaterialTheme.typography.headlineSmall, color = TerminalColors.Mint)
+                }
+                "DECLINED" -> EmptyCard(Icons.Rounded.Warning, "This payment was not signed", "The request did not match this sale. Charge again.")
+                "CANCELLED" -> EmptyCard(Icons.Rounded.Warning, "Nothing was charged", "You cancelled this sale.")
+                else -> EmptyCard(Icons.Rounded.Warning, "Nothing was charged", "The customer did not finish in time. Charge again to retry.")
+            }
+            if (state.error) MessageLine(state)
+            if (finished) {
+                val source = remember { MutableInteractionSource() }
+                Button(
+                    onClick = { haptics.performHapticFeedback(HapticFeedbackType.LongPress); model.dismissFocusedSale() },
+                    interactionSource = source,
+                    shape = MaterialTheme.shapes.large,
+                    colors = ButtonDefaults.buttonColors(containerColor = TerminalColors.Mint, contentColor = TerminalColors.OnMint),
+                    contentPadding = PaddingValues(vertical = 18.dp),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 60.dp).scale(pressScale(source)),
+                ) { Text("Done", style = MaterialTheme.typography.titleMedium) }
+            } else if (sale.state == "WAITING" || sale.state == "CUSTOMER_PAYING") {
+                // Until this terminal has signed, nothing can be paid, so the cashier can start over.
+                TextButton(onClick = { model.cancelOnlineSale(sale.orderId) }) {
+                    Text("Cancel sale", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
             }
         }
     }
@@ -1397,7 +1327,8 @@ private fun StateBadge(raw: String) {
         "PREPARED" -> "Waiting" to TerminalColors.Amber
         "ATTENDEE_SIGNED" -> "Approved" to TerminalColors.Amber
         "PENDING" -> "Pending" to TerminalColors.Amber
-        "SETTLED" -> "Settled" to TerminalColors.Mint
+        "PAYING" -> "Paying" to TerminalColors.Amber
+        "SETTLED", "PAID" -> "Paid" to TerminalColors.Mint
         "MISSED" -> "Not paid" to TerminalColors.Muted
         else -> raw.lowercase().replaceFirstChar { it.uppercase() }.replace('_', ' ') to TerminalColors.Muted
     }
