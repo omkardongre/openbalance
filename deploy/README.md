@@ -36,7 +36,8 @@ Build `deploy/Dockerfile.web` separately for the public interface. It copies onl
 standalone server, static assets, and public assets into its runtime stage.
 Supply `NEXT_PUBLIC_API_URL`, `NEXT_PUBLIC_RELAYER_URL`, `NEXT_PUBLIC_FINANCIAL_RPC_URL`,
 `NEXT_PUBLIC_WEBAUTHN_RP_ID`, `NEXT_PUBLIC_TERMINAL_RELAY_URL` (the relayer's deterministic Cloud Run
-URL, which terminal setup codes carry) and `NEXT_PUBLIC_SETTLEMENT_ASSET` (the event's settlement token, read
+origin, e.g. `https://openbalance-testnet-relayer-<number>.<region>.run.app`; terminal setup codes
+carry it with `/v1/vouchers`, which the web adds itself) and `NEXT_PUBLIC_SETTLEMENT_ASSET` (the event's settlement token, read
 for the balance on `/account`) as public build arguments for a configured release. Never use private
 RPC credentials in these browser-visible values. An image built without them is a build check only.
 
