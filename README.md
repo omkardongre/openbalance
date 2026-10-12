@@ -18,8 +18,9 @@ with the terminal uploading straight to the cloud relayer (no laptop, no CLI). O
 payment request moved to version 2 (the customer's phone picks which of its reserves pays), the
 attendee app became installable offline from any page, reserves got a 2-hour spend window (event
 config v2) and the CRE reserve-return workflow started running on a schedule. These are built,
-unit-tested and deployed; a two-phone sale with the version 2 request and the offline app on a phone
-are not yet tested. The integration worker
+unit-tested and deployed. Also on 11 Oct, both phones in airplane mode, a 0.50 USDC sale with the
+version 2 request went through and settled on its own once the stall phone was back online, and the
+customer app opened with no signal from its saved copy. The integration worker
 is not deployed. The venue relay is optional on-site fallback rather than a required component; see
 the root checklist.
 
@@ -43,7 +44,7 @@ Use a browser with a platform passkey (Chrome, Safari, or Edge on a phone or lap
    The page reads the chain directly and never calls our API.
 
 **Set aside for outages** on `/account` opens a reserve for one stall: pick the stall (from the
-public `GET /v1/reserve-terms`) and 1, 2 or 5 USDC, then approve with the passkey. *Pay offline*
+public `GET /v1/reserve-terms`) and 1, 2 or 5 USDC, then approve with the passkey. *Scan to pay*
 (`/offline`) then pays that stall by scanning the terminal's code, even with no signal. Paying needs
 the registered stall terminal (the Android app), so that step is shown in the demo video. Demo
 reserves accept payments for 2 hours and give the stall 30 more minutes to upload, so unspent
@@ -58,10 +59,25 @@ phone picks one of its own reserves for that stall (the one closing soonest, or 
 several can pay), builds the voucher and signs it. The terminal rebuilds the same voucher from its
 own records before countersigning, so nothing the phone claims about the reserve is trusted.
 
-One visit to any page while online saves the Wallet and *Pay offline* pages on the phone (a service
+One visit to any page while online saves the Wallet and Pay pages on the phone (a service
 worker versioned per build, so each release replaces the saved copy). With no signal the Wallet
 shows *No signal* with a *Pay offline* button instead of the sign-in screen; signing in itself needs
 the server.
+
+With signal, the same *Charge* on the stall phone takes the payment online instead: it shows a
+link as a QR, the customer scans it, signs in with their passkey and pays from their wallet
+balance, and the stall sees *Paid* once the payment is final. No reserve is involved and the
+customer scans nothing back. The phone opens the order through `POST /v1/terminal/checkout-orders`
+with its stall credential and signs the payment only after checking the server-built intent
+against the amount it typed and the deployment it pinned. Without signal it falls back to the
+offline flow below.
+
+Only the stall phone has to come online, and only to upload, before the reserve's upload deadline
+(end of the spend window plus 30 minutes; the terminal shows it). The customer's phone never needs
+to. A sale never uploaded in time is not paid, and that money goes back to the customer with the
+rest of the reserve. A sale the stall never scanned the answer for is not charged.
+
+The Wallet is one short page: balance, *Scan to pay*, a one-line "set a little aside", test money and the latest payments (address and sign-out sit behind the ⋯ menu; the balance refreshes by itself). Signed in on the Wallet, an online payment asks for one fingerprint, the payment itself.
 
 The attendee pages and the terminal use plain words only: no addresses, hashes, "channel",
 "voucher" or "testnet" in the main flow. Errors pass through one translator (`friendlyError` in
