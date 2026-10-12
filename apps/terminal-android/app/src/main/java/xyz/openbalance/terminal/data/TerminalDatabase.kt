@@ -74,6 +74,29 @@ data class OrderEntity(
     val updatedAt: Long,
 )
 
+/**
+ * A sale taken online: the customer scanned the stall's code and paid from their own balance. It
+ * holds no money and no secrets (the order link is kept in memory only), just what the Sales list
+ * and the payment screen need.
+ */
+@Entity(tableName = "online_sales", indices = [Index(value = ["createdAt"], name = "index_online_sales_created")])
+data class OnlineSaleEntity(
+    @PrimaryKey val orderId: String,
+    val reference: String,
+    val description: String,
+    val grossUnits: String,
+    val assetSymbol: String,
+    val assetDecimals: Int,
+    /** WAITING, CUSTOMER_PAYING, SIGNED, PAID, CANCELLED, EXPIRED or DECLINED. */
+    val state: String,
+    val paymentId: String?,
+    val transactionHash: String?,
+    /** Epoch seconds. While WAITING it is when the code stops being offered; once SIGNED, when the payment lapses. */
+    val expiresAt: Long,
+    val createdAt: Long,
+    val updatedAt: Long,
+)
+
 @Dao
 interface TerminalDao {
     @Query("SELECT * FROM channels WHERE channelId = :channelId") suspend fun channel(channelId: String): ChannelEntity?
@@ -118,11 +141,19 @@ interface TerminalDao {
     @Query("SELECT * FROM orders WHERE orderId = :orderId") suspend fun order(orderId: String): OrderEntity?
     @Query("SELECT * FROM orders ORDER BY importedAt DESC,orderId LIMIT :limit") suspend fun orders(limit: Int = 100): List<OrderEntity>
     @Insert(onConflict = OnConflictStrategy.IGNORE) suspend fun insertOrder(order: OrderEntity): Long
+    @Insert(onConflict = OnConflictStrategy.ABORT) suspend fun insertOnlineSale(sale: OnlineSaleEntity)
+    @Query("SELECT * FROM online_sales ORDER BY createdAt DESC LIMIT :limit") suspend fun onlineSales(limit: Int): List<OnlineSaleEntity>
+    @Query("SELECT * FROM online_sales WHERE orderId=:orderId") suspend fun onlineSale(orderId: String): OnlineSaleEntity?
+    /** Sales still moving, plus recently lapsed ones that a late-finalizing payment could still settle. */
+    @Query("SELECT * FROM online_sales WHERE state IN ('WAITING','CUSTOMER_PAYING','SIGNED') OR (state='EXPIRED' AND paymentId IS NOT NULL AND updatedAt>:since) ORDER BY createdAt")
+    suspend fun pollableOnlineSales(since: Long): List<OnlineSaleEntity>
+    @Query("UPDATE online_sales SET state=:state,paymentId=COALESCE(:paymentId,paymentId),transactionHash=COALESCE(:transactionHash,transactionHash),expiresAt=COALESCE(:expiresAt,expiresAt),updatedAt=:now WHERE orderId=:orderId AND state IN (:from)")
+    suspend fun transitionOnlineSale(orderId: String, from: List<String>, state: String, paymentId: String?, transactionHash: String?, expiresAt: Long?, now: Long): Int
     @Query("UPDATE orders SET state='REQUESTED',requestId=:requestId,updatedAt=:now WHERE orderId=:orderId AND state='IMPORTED' AND expiresAt>:nowSeconds")
     suspend fun markOrderRequested(orderId: String, requestId: String, nowSeconds: Long, now: Long): Int
 }
 
-@Database(entities = [ChannelEntity::class, SaleEntity::class, OrderEntity::class], version = 3, exportSchema = true)
+@Database(entities = [ChannelEntity::class, SaleEntity::class, OrderEntity::class, OnlineSaleEntity::class], version = 4, exportSchema = true)
 abstract class TerminalDatabase : RoomDatabase() {
     abstract fun terminalDao(): TerminalDao
 
@@ -163,12 +194,34 @@ abstract class TerminalDatabase : RoomDatabase() {
             }
         }
 
+        private val migration3To4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """CREATE TABLE IF NOT EXISTS online_sales (
+                      orderId TEXT NOT NULL PRIMARY KEY,
+                      reference TEXT NOT NULL,
+                      description TEXT NOT NULL,
+                      grossUnits TEXT NOT NULL,
+                      assetSymbol TEXT NOT NULL,
+                      assetDecimals INTEGER NOT NULL,
+                      state TEXT NOT NULL,
+                      paymentId TEXT,
+                      transactionHash TEXT,
+                      expiresAt INTEGER NOT NULL,
+                      createdAt INTEGER NOT NULL,
+                      updatedAt INTEGER NOT NULL
+                    )""".trimIndent(),
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_online_sales_created ON online_sales(createdAt)")
+            }
+        }
+
         fun open(context: Context): TerminalDatabase = Room.databaseBuilder(
             context.applicationContext,
             TerminalDatabase::class.java,
             "openbalance-terminal.db",
         ).setJournalMode(JournalMode.WRITE_AHEAD_LOGGING)
-            .addMigrations(migration1To2, migration2To3)
+            .addMigrations(migration1To2, migration2To3, migration3To4)
             .addCallback(object : Callback() {
                 override fun onOpen(db: SupportSQLiteDatabase) {
                     db.execSQL("PRAGMA synchronous=FULL")

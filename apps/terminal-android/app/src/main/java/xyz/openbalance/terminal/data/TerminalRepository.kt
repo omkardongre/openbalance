@@ -69,6 +69,31 @@ data class OrderView(
     /** The payment request charged against this order, once one exists. */
     val requestId: String? = null,
 )
+/** A sale taken online (the customer pays from their own balance with one scan). */
+data class OnlineSaleView(
+    val orderId: String,
+    val reference: String,
+    val description: String,
+    val grossUnits: String,
+    val assetSymbol: String,
+    val assetDecimals: Int,
+    val state: String,
+    val paymentId: String?,
+    val transactionHash: String?,
+    val expiresAt: Long,
+    /** Creation time, epoch milliseconds. */
+    val createdAt: Long,
+    /** The link the customer scans. Held in memory only; null after a restart until the server is asked again. */
+    val checkoutUrl: String? = null,
+) {
+    /** Still moving: the customer may yet scan, sign in or pay. */
+    val active: Boolean get() = state in ACTIVE_STATES
+
+    companion object {
+        val ACTIVE_STATES = listOf("WAITING", "CUSTOMER_PAYING", "SIGNED")
+    }
+}
+
 data class ChannelView(
     val channelId: String,
     val remainingUnits: String,
@@ -366,6 +391,41 @@ class TerminalRepository(
     }
 
     suspend fun recoverSales(limit: Int = 100): List<SaleView> = dao.sales(limit).map(::view)
+
+    /**
+     * Withdraws a payment request nobody has answered yet, so the cashier can charge again at once.
+     * Once the customer's answer has been taken the payment is accepted and this does nothing.
+     */
+    suspend fun cancelUnansweredRequest(requestId: String, now: Long): Boolean = database.withTransaction {
+        val deleted = dao.deleteUnansweredSale(requestId) == 1
+        if (deleted) dao.expireRequestedOrder(requestId, now)
+        deleted
+    }
+
+    suspend fun onlineSaleViews(limit: Int): List<OnlineSaleView> = dao.onlineSales(limit).map(::onlineView)
+    suspend fun onlineSaleView(orderId: String): OnlineSaleView? = dao.onlineSale(orderId)?.let(::onlineView)
+
+    /** Online sales worth asking the server about: still moving, or lapsed within the last few minutes. */
+    suspend fun pollableOnlineSales(nowMs: Long): List<OnlineSaleView> =
+        dao.pollableOnlineSales(nowMs - ONLINE_LATE_PAYMENT_MS).map(::onlineView)
+
+    suspend fun createOnlineSale(
+        orderId: String, reference: String, description: String, grossUnits: BigInteger,
+        assetSymbol: String, assetDecimals: Int, expiresAt: Long, now: Long,
+    ) = dao.insertOnlineSale(
+        OnlineSaleEntity(orderId, reference, description, grossUnits.toString(), assetSymbol, assetDecimals, "WAITING", null, null, expiresAt, now, now),
+    )
+
+    /** Moves an online sale along, only from the listed states; returns whether it moved. */
+    suspend fun transitionOnlineSale(
+        orderId: String, from: List<String>, state: String, now: Long,
+        paymentId: String? = null, transactionHash: String? = null, expiresAt: Long? = null,
+    ): Boolean = dao.transitionOnlineSale(orderId, from, state, paymentId, transactionHash, expiresAt, now) == 1
+
+    private fun onlineView(row: OnlineSaleEntity) = OnlineSaleView(
+        row.orderId, row.reference, row.description, row.grossUnits, row.assetSymbol, row.assetDecimals,
+        row.state, row.paymentId, row.transactionHash, row.expiresAt, row.createdAt,
+    )
     suspend fun pendingRelayCount(): Int = dao.pendingRelayCount()
     suspend fun channels(): List<ChannelEntity> = dao.channels()
     suspend fun channelViews(): List<ChannelView> = dao.channels().map { row ->
@@ -529,7 +589,9 @@ class TerminalRepository(
     private companion object {
         const val KEYPAD_ORDER_SECONDS = 600L
         /** How long a customer has to answer a payment request. */
-        const val REQUEST_SECONDS = 120L
+        const val REQUEST_SECONDS = 180L
+        /** How long after an online payment lapsed the server is still asked whether it finalized. */
+        const val ONLINE_LATE_PAYMENT_MS = 10 * 60 * 1_000L
         /** channelId placeholder for a request the customer has not answered (no reserve chosen yet). */
         const val UNBOUND = "unbound:"
         val keypadReferenceFormat: java.time.format.DateTimeFormatter =

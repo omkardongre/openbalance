@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Base64
 import org.json.JSONObject
 import xyz.openbalance.terminal.security.EncryptedJournalPayloads
+import java.math.BigInteger
 import java.net.URL
 
 data class ProvisioningConfig(
@@ -50,6 +51,8 @@ class ProvisioningStore(context: Context) {
                 // A new enrollment may belong to another vendor; its profile arrives on the next sync.
                 .remove("vendorNonce")
                 .remove("vendorCiphertext")
+                .remove("contextNonce")
+                .remove("contextCiphertext")
                 .commit(),
         ) { "Terminal enrollment was not durably stored" }
         return config
@@ -81,6 +84,45 @@ class ProvisioningStore(context: Context) {
     }
 
     private val vendorAad = "openbalance:terminal-vendor:v1".toByteArray()
+    private val contextAad = "openbalance:terminal-context:v1".toByteArray()
+
+    /** The deployment and terminal identity from the last successful sync; null before the first one. */
+    fun context(): TerminalContext? {
+        val nonce = preferences.getString("contextNonce", null) ?: return null
+        val ciphertext = preferences.getString("contextCiphertext", null) ?: return null
+        val json = JSONObject(
+            String(payloads.open(Base64.decode(nonce, Base64.NO_WRAP), Base64.decode(ciphertext, Base64.NO_WRAP), contextAad)),
+        )
+        return TerminalContext(
+            chainId = BigInteger(json.getString("chainId")),
+            eventId = json.getString("eventId"),
+            asset = json.getString("asset"),
+            router = json.getString("router"),
+            terminalInstanceId = json.getString("terminalInstanceId"),
+            terminalKeyVersion = BigInteger(json.getString("terminalKeyVersion")),
+            terminalSigner = json.getString("terminalSigner"),
+        )
+    }
+
+    fun saveContext(deployment: DeploymentPin, terminal: TerminalPin) {
+        val json = JSONObject()
+            .put("chainId", deployment.chainId.toString())
+            .put("eventId", deployment.eventId)
+            .put("asset", deployment.asset)
+            .put("router", deployment.router.address)
+            .put("terminalInstanceId", terminal.terminalInstanceId)
+            .put("terminalKeyVersion", terminal.terminalKeyVersion.toString())
+            .put("terminalSigner", terminal.terminalSigner)
+            .toString()
+        val sealed = payloads.seal(json.toByteArray(), contextAad)
+        check(
+            preferences.edit()
+                .putString("contextNonce", Base64.encodeToString(sealed.first, Base64.NO_WRAP))
+                .putString("contextCiphertext", Base64.encodeToString(sealed.second, Base64.NO_WRAP))
+                .commit(),
+        ) { "Terminal context was not durably stored" }
+    }
+
 
     private fun decode(value: String): ProvisioningConfig {
         val json = JSONObject(value)

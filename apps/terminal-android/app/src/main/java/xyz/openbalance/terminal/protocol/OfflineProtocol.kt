@@ -495,24 +495,24 @@ object OfflineProtocol {
 
     private fun requireHex32(value: String) { if (!HEX_32.matches(value)) throw InvalidOfflineExchange("Invalid bytes32 value") }
     private fun JSONObject.requireString(name: String): String = if (has(name) && get(name) is String) getString(name) else throw InvalidOfflineExchange("Missing $name")
-    private fun hashSlots(vararg values: ByteArray): ByteArray = Keccak.digest(concatSlots(*values))
-    private fun concatSlots(vararg values: ByteArray): ByteArray = values.fold(ByteArray(0)) { all, value ->
+    internal fun hashSlots(vararg values: ByteArray): ByteArray = Keccak.digest(concatSlots(*values))
+    internal fun concatSlots(vararg values: ByteArray): ByteArray = values.fold(ByteArray(0)) { all, value ->
         if (value.size != 32) throw InvalidOfflineExchange("Invalid ABI slot")
         all + value
     }
-    private fun uint(value: Long) = uint(BigInteger.valueOf(value))
-    private fun uint(value: BigInteger): ByteArray {
+    internal fun uint(value: Long) = uint(BigInteger.valueOf(value))
+    internal fun uint(value: BigInteger): ByteArray {
         if (value < BigInteger.ZERO || value.bitLength() > 256) throw InvalidOfflineExchange("Invalid uint")
         val raw = value.toByteArray()
         val significant = raw.copyOfRange(maxOf(0, raw.size - 32), raw.size)
         return ByteArray(32).also { significant.copyInto(it, 32 - significant.size) }
     }
-    private fun address(value: String): ByteArray = fromHex(value).let { if (it.size != 20) throw InvalidOfflineExchange("Invalid address") else ByteArray(12) + it }
-    private fun bytes32(value: String): ByteArray = fromHex(value).also { if (it.size != 32) throw InvalidOfflineExchange("Invalid bytes32") }
-    private fun fromHex(value: String): ByteArray {
+    internal fun address(value: String): ByteArray = fromHex(value).let { if (it.size != 20) throw InvalidOfflineExchange("Invalid address") else ByteArray(12) + it }
+    internal fun bytes32(value: String): ByteArray = fromHex(value).also { if (it.size != 32) throw InvalidOfflineExchange("Invalid bytes32") }
+    internal fun fromHex(value: String): ByteArray {
         val clean = value.removePrefix("0x")
         if (clean.length % 2 != 0 || !clean.matches(Regex("^[0-9a-fA-F]+$"))) throw InvalidOfflineExchange("Invalid hex")
         return ByteArray(clean.length / 2) { clean.substring(it * 2, it * 2 + 2).toInt(16).toByte() }
     }
-    private fun hex(value: ByteArray) = "0x" + value.joinToString("") { "%02x".format(it.toInt() and 0xff) }
+    internal fun hex(value: ByteArray) = "0x" + value.joinToString("") { "%02x".format(it.toInt() and 0xff) }
 }

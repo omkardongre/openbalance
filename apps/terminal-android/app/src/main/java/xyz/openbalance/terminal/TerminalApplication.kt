@@ -1,8 +1,10 @@
 package xyz.openbalance.terminal
 
 import android.app.Application
+import xyz.openbalance.terminal.checkout.OnlineCheckoutClient
 import xyz.openbalance.terminal.data.TerminalDatabase
 import xyz.openbalance.terminal.data.TerminalRepository
+import xyz.openbalance.terminal.net.ConnectivityMonitor
 import xyz.openbalance.terminal.security.TerminalKeyStore
 import xyz.openbalance.terminal.provisioning.ProvisioningStore
 import xyz.openbalance.terminal.relay.RelayUploadClient
@@ -14,6 +16,8 @@ class TerminalApplication : Application() {
     val repository by lazy { TerminalRepository(database, keys) }
     val provisioning by lazy { ProvisioningStore(this) }
     val relay by lazy { RelayUploadClient(repository, keys) }
+    val onlineCheckout by lazy { OnlineCheckoutClient() }
+    val connectivity by lazy { ConnectivityMonitor(this) }
 
     override fun onCreate() {
         super.onCreate()
