@@ -37,6 +37,12 @@ const idempotencyPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$/;
 const capabilityPattern = /^[A-Za-z0-9_-]{43}$/;
 const signaturePattern = /^0x[0-9a-fA-F]{130}$/;
 const provisioningChallengePattern = /^[A-Za-z0-9_-]{43}$/;
+/**
+ * Orders a stall phone opens itself for an online (one-scan) payment carry this reference prefix.
+ * They are never handed to a terminal as POS orders to charge offline: the phone that created one
+ * is already waiting on it, and importing would move it out of the state the customer binds to.
+ */
+export const ONLINE_ORDER_PREFIX = "OL-";
 const terminalProvisioningDomain = keccak256(stringToHex("openbalance:terminal-provisioning:v1"));
 
 function hasControlCharacters(value: string) {
@@ -265,6 +271,7 @@ export class CheckoutService {
         `SELECT * FROM checkout_orders
            WHERE stream_id=$1 AND event_id=$2 AND vendor_id=$3 AND terminal_instance_id=$4
              AND state IN ('CREATED','OFFLINE_IMPORTED') AND expires_at>clock_timestamp()
+             AND left(display->>'orderReference', ${ONLINE_ORDER_PREFIX.length}) <> '${ONLINE_ORDER_PREFIX}'
            ORDER BY created_at,order_id LIMIT 101 FOR UPDATE`,
         [identity.streamId, event.eventId, vendor.vendorId, vendor.terminal.instanceId],
       );
@@ -568,10 +575,15 @@ export class CheckoutService {
     return publicOrder(row);
   }
 
+  /**
+   * The stall's view of one order. Once a customer is bound it also says whether the payment has
+   * been finalized on chain, so a stall phone can show "Paid" without reading statements. A bound
+   * order stays readable after its intent expires: the payment may finalize just after.
+   */
   async cashier(identity: OperationsIdentity, orderId: string) {
     const result = await this.pool.query<OrderRow>(
       `SELECT * FROM checkout_orders WHERE order_id=$1 AND stream_id=$2 AND event_id=$3
-         AND vendor_id=$4 AND expires_at>clock_timestamp()`,
+         AND vendor_id=$4 AND (expires_at>clock_timestamp() OR payment_id IS NOT NULL)`,
       [
         orderId,
         identity.streamId,
@@ -581,7 +593,31 @@ export class CheckoutService {
     );
     const row = result.rows[0];
     if (!row) throw new CheckoutNotFound();
-    return { capability: this.capability(row.order_id), ...publicOrder(row) };
+    return {
+      capability: this.capability(row.order_id),
+      ...publicOrder(row),
+      settlement: await this.settlement(row),
+    };
+  }
+
+  private async settlement(row: OrderRow) {
+    if (!row.payment_id) return null;
+    const paid = await this.pool.query<{ transaction_hash: Hex; block_number: string }>(
+      `SELECT transaction_hash,block_number FROM payment_projections
+         WHERE stream_id=$1 AND payment_id=$2 AND vendor_id=$3`,
+      [row.stream_id, row.payment_id, row.vendor_id],
+    );
+    if (paid.rows[0])
+      return {
+        status: "PAID" as const,
+        transactionHash: paid.rows[0].transaction_hash,
+        blockNumber: String(paid.rows[0].block_number),
+      };
+    const cancelled = await this.pool.query(
+      "SELECT 1 FROM payment_cancellations WHERE stream_id=$1 AND payment_id=$2",
+      [row.stream_id, row.payment_id],
+    );
+    return cancelled.rowCount ? { status: "CANCELLED" as const } : null;
   }
 
   async attachSignature(identity: OperationsIdentity, orderId: string, terminalSignature: Hex) {

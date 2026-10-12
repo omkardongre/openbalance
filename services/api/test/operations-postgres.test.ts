@@ -242,6 +242,14 @@ postgresIt("keeps cashier checkout issuance exact, scoped, and idempotent", asyn
       idempotencyKey: "checkout-postgres-0002",
     });
     orderIds.push(offline.orderId);
+    // An order a stall phone opens for a one-scan online payment must never be handed to a
+    // terminal as a POS order, or it could no longer be bound by the customer who scans it.
+    const online = await service.create(identity, {
+      ...request,
+      orderReference: "OL-261011-0001",
+      idempotencyKey: "checkout-postgres-0003",
+    });
+    orderIds.push(online.orderId);
     await pool.query(
       `INSERT INTO indexer_cursors
        (stream_id,chain_id,deployment_block,block_number,block_hash)
@@ -279,6 +287,52 @@ postgresIt("keeps cashier checkout issuance exact, scoped, and idempotent", asyn
       projection: { finalizedBlockNumber: "10", finalizedBlockHash: hex("d") },
       orders: [{ orderId: offline.orderId, state: "OFFLINE_IMPORTED" }],
     });
+    expect(provisioned.orders).toHaveLength(1);
+    const stillOnline = await service.cashier(identity, online.orderId);
+    expect(stillOnline).toMatchObject({ state: "CREATED", settlement: null });
+    const onlineBound = await service.bind(
+      { enrollmentId: randomUUID(), account: address("6") },
+      online.orderId,
+      online.capability,
+    );
+    if (!("paymentId" in onlineBound) || !onlineBound.paymentId)
+      throw new Error("Online checkout did not bind");
+    const onlineSigned = await service.attachSignature(
+      identity,
+      online.orderId,
+      await terminal.sign({
+        hash: paymentIntentDigest(decodePaymentIntent(onlineBound.encodedIntent as `0x${string}`)),
+      }),
+    );
+    expect(onlineSigned.state).toBe("READY");
+    expect(await service.cashier(identity, online.orderId)).toMatchObject({ settlement: null });
+    // Once the payment is final on chain, the stall's view says so, and it keeps saying so even
+    // after the order itself has expired.
+    const transitionId = `payment:${randomUUID()}`;
+    await pool.query(
+      `INSERT INTO finalized_chain_logs
+        (transition_id,stream_id,chain_id,event_id,contract_address,block_number,block_hash,
+         transaction_hash,transaction_index,log_index,transition_kind,payload)
+       VALUES ($1,$2,10143,$3,$4,10,$5,$6,0,0,'PAYMENT_COMMITTED','{}')`,
+      [transitionId, streamId, eventId, address("4"), hex("d"), hex("9")],
+    );
+    await pool.query(
+      `INSERT INTO payment_projections
+        (stream_id,payment_id,mode,payer,vendor_id,gross_units,organizer_fee_units,
+         platform_fee_units,allocation_status,transition_id,transaction_hash,block_number)
+       VALUES ($1,$2,'ONLINE',$3,$4,12500000,500000,125000,'EVENT_VERIFIED',$5,$6,10)`,
+      [streamId, onlineBound.paymentId, address("6"), vendorId, transitionId, hex("9")],
+    );
+    expect(await service.cashier(identity, online.orderId)).toMatchObject({
+      settlement: { status: "PAID", transactionHash: hex("9"), blockNumber: "10" },
+    });
+    await pool.query(
+      "UPDATE checkout_orders SET expires_at=clock_timestamp()-interval '1 hour' WHERE order_id=$1",
+      [online.orderId],
+    );
+    expect(await service.cashier(identity, online.orderId)).toMatchObject({
+      settlement: { status: "PAID" },
+    });
     await expect(
       service.bind(
         { enrollmentId: randomUUID(), account: address("5") },
@@ -289,9 +343,17 @@ postgresIt("keeps cashier checkout issuance exact, scoped, and idempotent", asyn
     await expect(
       service.terminalProvisioning(identity, challenge.challenge, provisioningSignature),
     ).rejects.toThrow("Terminal proof expired or was replayed");
+    // An unbound order that expired is gone for the stall.
+    await pool.query(
+      "UPDATE checkout_orders SET expires_at=clock_timestamp()-interval '1 hour' WHERE order_id=$1",
+      [offline.orderId],
+    );
+    await expect(service.cashier(identity, offline.orderId)).rejects.toThrow();
   } finally {
     if (orderIds.length)
       await pool.query("DELETE FROM checkout_orders WHERE order_id=ANY($1::uuid[])", [orderIds]);
+    await pool.query("DELETE FROM payment_projections WHERE stream_id=$1", [streamId]);
+    await pool.query("DELETE FROM finalized_chain_logs WHERE stream_id=$1", [streamId]);
     await pool.query("DELETE FROM indexer_cursors WHERE stream_id=$1", [streamId]);
     await pool.query("DELETE FROM terminal_provisioning_challenges WHERE stream_id=$1", [streamId]);
     await pool.end();

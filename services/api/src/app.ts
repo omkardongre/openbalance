@@ -1,8 +1,9 @@
 import cors from "@fastify/cors";
 import rateLimit from "@fastify/rate-limit";
 import { attachHttpOperations, type ReadinessCheck } from "@openbalance/observability";
+import { encodeCheckoutCapability } from "@openbalance/protocol";
 import type { AuthenticationResponseJSON, RegistrationResponseJSON } from "@simplewebauthn/server";
-import Fastify, { type FastifyReply } from "fastify";
+import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import { z } from "zod";
 import { AccountAccessRejected, type AccountAccessService } from "./account-access.js";
 import {
@@ -556,7 +557,15 @@ export async function buildApp(
         return checkout.reserveTerms();
       });
       const orderId = z.object({ id: z.string().uuid() }).strict();
-      app.post("/v1/checkout-orders", async (request, reply) => {
+      // The link a customer opens to pay: the attendee site's /checkout page, with the order and its
+      // capability in the fragment so neither reaches a server log. A stall phone shows it as a QR.
+      const checkoutUrl = (id: string, capability: string) =>
+        origin
+          ? `${origin.replace(/\/$/, "")}/checkout#request=${encodeURIComponent(
+              encodeCheckoutCapability({ schemaVersion: 1, orderId: id, capability }),
+            )}`
+          : null;
+      const createOrder = async (request: FastifyRequest, reply: FastifyReply) => {
         const parsed = z
           .object({
             orderReference: z.string().min(1).max(160),
@@ -573,7 +582,9 @@ export async function buildApp(
           const identity = await control.access.authenticate(request.headers.authorization);
           control.access.assertRole(identity, ["VENDOR"]);
           const result = await checkout.create(identity, { ...parsed.data, idempotencyKey });
-          return reply.code(result.created ? 201 : 200).send(result);
+          return reply
+            .code(result.created ? 201 : 200)
+            .send({ ...result, checkoutUrl: checkoutUrl(result.orderId, result.capability) });
         } catch (error) {
           if (error instanceof CheckoutConflict)
             return reply.code(409).send({ error: "checkout_conflict", retryable: false });
@@ -581,9 +592,13 @@ export async function buildApp(
             return reply.code(422).send({ error: "checkout_rejected", retryable: false });
           return operationsError(reply, error);
         }
-      });
+      };
+      app.post("/v1/checkout-orders", operatorRate, createOrder);
+      // The same order, opened by a stall phone. It authenticates with its bearer credential, not a
+      // browser session, so like the other /v1/terminal/ routes it is not origin-checked.
+      app.post("/v1/terminal/checkout-orders", operatorRate, createOrder);
 
-      app.get("/v1/checkout-orders/:id/cashier", async (request, reply) => {
+      app.get("/v1/checkout-orders/:id/cashier", operatorRate, async (request, reply) => {
         reply.header("Cache-Control", "private, no-store");
         const params = orderId.safeParse(request.params);
         if (!params.success)
@@ -591,7 +606,8 @@ export async function buildApp(
         try {
           const identity = await control.access.authenticate(request.headers.authorization);
           control.access.assertRole(identity, ["VENDOR"]);
-          return await checkout.cashier(identity, params.data.id);
+          const order = await checkout.cashier(identity, params.data.id);
+          return { ...order, checkoutUrl: checkoutUrl(order.orderId, order.capability) };
         } catch (error) {
           if (error instanceof CheckoutNotFound)
             return reply.code(404).send({ error: "checkout_not_found", retryable: false });
@@ -651,7 +667,7 @@ export async function buildApp(
       });
 
       if (access) {
-        app.post("/v1/checkout-orders/:id/bindings", async (request, reply) => {
+        app.post("/v1/checkout-orders/:id/bindings", operatorRate, async (request, reply) => {
           const params = orderId.safeParse(request.params);
           const body = z
             .object({ checkoutCapability: z.string().regex(/^[A-Za-z0-9_-]{43}$/) })
@@ -678,7 +694,7 @@ export async function buildApp(
         });
       }
 
-      app.post("/v1/checkout-orders/:id/terminal-signature", async (request, reply) => {
+      const attachSignature = async (request: FastifyRequest, reply: FastifyReply) => {
         const params = orderId.safeParse(request.params);
         const body = z
           .object({ terminalSignature: z.string().regex(/^0x[0-9a-fA-F]{130}$/) })
@@ -703,9 +719,15 @@ export async function buildApp(
             return reply.code(422).send({ error: "terminal_signature_rejected", retryable: false });
           return operationsError(reply, error);
         }
-      });
+      };
+      app.post("/v1/checkout-orders/:id/terminal-signature", operatorRate, attachSignature);
+      app.post(
+        "/v1/terminal/checkout-orders/:id/terminal-signature",
+        operatorRate,
+        attachSignature,
+      );
 
-      app.get("/v1/checkout-orders/:id", async (request, reply) => {
+      app.get("/v1/checkout-orders/:id", operatorRate, async (request, reply) => {
         reply.header("Cache-Control", "private, no-store");
         const params = orderId.safeParse(request.params);
         if (!params.success)

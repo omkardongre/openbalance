@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it } from "vitest";
 
 import { AccountAccessRejected, type AccountAccessService } from "../src/account-access.js";
-import { buildApp } from "../src/app.js";
+import { buildApp, type OperationsControl } from "../src/app.js";
+import type { CheckoutService } from "../src/checkout.js";
 import type { EnrollmentService } from "../src/enrollment.js";
 import { type OperationalReadService, ProjectionNotFound } from "../src/operations.js";
 
@@ -122,5 +123,79 @@ describe("authenticated projection reads", () => {
 
     expect(response.statusCode).toBe(401);
     expect(response.json()).toEqual({ error: "session_invalid", retryable: false });
+  });
+  it("lets a stall phone open and sign an online order without a browser origin", async () => {
+    const orderUuid = "6f1c2b3a-4d5e-4f60-8a7b-9c0d1e2f3a4b";
+    const capability = "c".repeat(43);
+    const calls: string[] = [];
+    const checkout = {
+      create: async () => {
+        calls.push("create");
+        return {
+          created: true,
+          capability,
+          schemaVersion: 1,
+          orderId: orderUuid,
+          state: "CREATED",
+        };
+      },
+      attachSignature: async () => {
+        calls.push("sign");
+        return { capability, schemaVersion: 1, orderId: orderUuid, state: "READY" };
+      },
+    } as unknown as CheckoutService;
+    const control = {
+      access: {
+        authenticate: async () => ({ role: "VENDOR" }),
+        assertRole: () => undefined,
+      },
+      checkout,
+    } as unknown as OperationsControl;
+    const app = await buildApp(
+      enrollment,
+      "https://app.example",
+      undefined,
+      undefined,
+      undefined,
+      control,
+    );
+    openApps.push(app);
+    const headers = { authorization: "Bearer token", "idempotency-key": "ol-0123456789abcdef" };
+    const payload = {
+      orderReference: "OL-1",
+      orderVersion: "1",
+      description: "Custom amount",
+      grossUnits: "500000",
+    };
+
+    const phone = await app.inject({
+      method: "POST",
+      url: "/v1/terminal/checkout-orders",
+      headers,
+      payload,
+    });
+    expect(phone.statusCode).toBe(201);
+    // The customer opens this link on the attendee site; the order and capability stay in the fragment.
+    expect(phone.json().checkoutUrl).toBe(
+      `https://app.example/checkout#request=${encodeURIComponent(
+        JSON.stringify({ schemaVersion: 1, orderId: orderUuid, capability }),
+      )}`,
+    );
+    const signed = await app.inject({
+      method: "POST",
+      url: `/v1/terminal/checkout-orders/${orderUuid}/terminal-signature`,
+      headers: { authorization: "Bearer token" },
+      payload: { terminalSignature: `0x${"ab".repeat(65)}` },
+    });
+    expect(signed.statusCode).toBe(200);
+    // The browser route keeps its origin check.
+    const browser = await app.inject({
+      method: "POST",
+      url: "/v1/checkout-orders",
+      headers,
+      payload,
+    });
+    expect(browser.statusCode).toBe(403);
+    expect(calls).toEqual(["create", "sign"]);
   });
 });
