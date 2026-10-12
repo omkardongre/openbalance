@@ -1,8 +1,7 @@
 "use client";
 
 import { type ReserveChannelConfig, resilienceVaultAbi } from "@openbalance/protocol";
-import Link from "next/link";
-import { useEffect, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import {
   createPublicClient,
   encodeAbiParameters,
@@ -23,7 +22,7 @@ import {
   createOfflineChannelKey,
   stageOfflineChannel,
 } from "../../lib/offline-wallet";
-import { loadReserveTerms, type ReserveTerms, type Stall } from "../../lib/reserve-terms";
+import { type ReserveTerms, type Stall, useReserveTerms } from "../../lib/reserve-terms";
 
 /** Quick amounts offered when the stall allows them; larger ones are hidden, not refused later. */
 const QUICK_AMOUNTS = ["1", "2", "5"];
@@ -34,6 +33,8 @@ type Operation = { operationId: string; state: string; transactionHash: string |
 
 const TERMINAL_STATES = ["FINALIZED", "FAILED", "QUARANTINED"];
 
+/** How long "Money added" stays before it clears itself; the new money is listed below. */
+const SUCCESS_NOTICE_MS = 5_000;
 /** Covers passkey approval plus sponsored submission; the reserve is spendable after this lead. */
 const RESERVE_START_LEAD_SECONDS = 60;
 
@@ -59,10 +60,16 @@ export function OpenReserve(props: {
   identity: PasskeyIdentity;
   disabled: boolean;
   onOpened: (channelId: Hex) => Promise<void>;
+  /** The offline money already added, listed below the form when the card is opened. */
+  children?: ReactNode;
 }) {
   const relayer = process.env.NEXT_PUBLIC_RELAYER_URL;
-  const [choices, setChoices] = useState<Choice[]>([]);
-  const [chainId, setChainId] = useState<number>();
+  const { terms, failed: termsFailed } = useReserveTerms();
+  const chainId = terms?.chainId;
+  const choices: Choice[] = (terms?.events ?? []).flatMap((event) =>
+    event.vendors.filter((stall) => stall.listed !== false).map((stall) => ({ event, stall })),
+  );
+  const [expanded, setExpanded] = useState(false);
   const [selected, setSelected] = useState(0);
   const [amount, setAmount] = useState("1");
   const [busy, setBusy] = useState(false);
@@ -75,23 +82,13 @@ export function OpenReserve(props: {
     setTone(nextTone);
   }
 
+  // A success is confirmed by the reserve appearing in the list, so the note clears itself and the
+  // customer can add money for another stall straight away.
   useEffect(() => {
-    loadReserveTerms()
-      .then((terms: ReserveTerms) => {
-        setChainId(terms.chainId);
-        setChoices(
-          terms.events.flatMap((event) =>
-            event.vendors
-              .filter((stall) => stall.listed !== false)
-              .map((stall) => ({ event, stall })),
-          ),
-        );
-      })
-      .catch(() => {
-        setMessage("Stalls are unavailable right now. Try again in a moment.");
-        setTone("error");
-      });
-  }, []);
+    if (tone !== "success" || !message) return;
+    const timer = setTimeout(() => setMessage(""), SUCCESS_NOTICE_MS);
+    return () => clearTimeout(timer);
+  }, [tone, message]);
 
   const choice = choices[selected];
   const amounts = choice
@@ -117,9 +114,9 @@ export function OpenReserve(props: {
         if (next.state === "FINALIZED") {
           await activateOfflineChannel(pending.channelId);
           await props.onOpened(pending.channelId);
-          say("Reserve ready. You can pay at this stall even with no network.", "success");
+          say("Money added. You can pay at this stall even with no network.", "success");
         } else if (TERMINAL_STATES.includes(next.state)) {
-          say("The reserve did not open. Your balance is unchanged.", "error");
+          say("The money could not be added. Your balance is unchanged.", "error");
         }
       } catch {
         // A transient status failure keeps the open in place; the next tick asks again.
@@ -196,7 +193,7 @@ export function OpenReserve(props: {
           account,
         })
         .catch(() => {
-          throw new Error("This stall is not accepting reserves right now.");
+          throw new Error("This stall is not accepting offline money right now.");
         });
       const idempotencyKey = financialIdempotencyKey("RESERVE_OPEN", channelId);
       await stageOfflineChannel({
@@ -231,10 +228,10 @@ export function OpenReserve(props: {
         body: JSON.stringify({ kind: "RESERVE_OPEN", calldata }),
       });
       setPending({ channelId, operation });
-      say("Setting aside your reserve. This takes a few seconds.");
+      say("Adding your money. This takes a few seconds.");
     } catch (error) {
       say(
-        passkeyErrorMessage(error, "The reserve could not be opened. Your balance is unchanged."),
+        passkeyErrorMessage(error, "The money could not be added. Your balance is unchanged."),
         "error",
       );
     } finally {
@@ -244,70 +241,75 @@ export function OpenReserve(props: {
 
   const waiting = pending && !TERMINAL_STATES.includes(pending.operation.state);
   return (
-    <section className="card" aria-labelledby="reserve-heading">
-      <div className="section-heading">
-        <h2 id="reserve-heading">Set aside for outages</h2>
-        <p>Optional</p>
-      </div>
-      <p className="muted">
-        Lock a small amount for one stall so you can still pay there if the network drops. Whatever
-        you do not spend can be returned to you{" "}
-        {choice
-          ? `after about ${duration(
-              choice.stall.reservePolicy.acceptanceDurationSeconds +
-                choice.stall.reservePolicy.submissionDelaySeconds,
-            )}`
-          : "later"}
-        .
-      </p>
-      {choices.length > 1 && (
-        <label>
-          Stall
-          <select
-            value={selected}
-            disabled={busy || Boolean(waiting)}
-            onChange={(event) => setSelected(Number(event.target.value))}
-          >
-            {choices.map((choice, index) => (
-              <option key={`${choice.event.eventId}:${choice.stall.vendorId}`} value={index}>
-                {choice.stall.vendorName}
-              </option>
-            ))}
-          </select>
-        </label>
-      )}
-      <fieldset className="amount-row">
-        <legend className="visually-hidden">Reserve amount</legend>
-        {amounts.map((value) => (
-          <button
-            key={value}
-            type="button"
-            className="secondary-button"
-            aria-pressed={chosen === value}
-            disabled={busy || Boolean(waiting)}
-            onClick={() => setAmount(value)}
-          >
-            {value} {choice?.event.assetSymbol ?? "USDC"}
-          </button>
-        ))}
-      </fieldset>
-      <button
-        type="button"
-        className="block-button"
-        disabled={props.disabled || busy || Boolean(waiting) || !choice}
-        onClick={open}
+    <section className="card set-aside" aria-label="Offline payments">
+      {/* One line until the customer opens it; it stays open while money is being added. */}
+      <details
+        open={expanded || Boolean(waiting) || tone === "error"}
+        onToggle={(event) => setExpanded(event.currentTarget.open)}
       >
-        {busy || waiting
-          ? "Setting aside…"
-          : `Set aside ${chosen} ${choice?.event.assetSymbol ?? "USDC"}`}
-      </button>
-      <p role="status" aria-live="polite" className={`notice ${tone === "info" ? "" : tone}`}>
-        {message}
-      </p>
-      {tone === "success" && (
-        <Link className="secondary-action block-button" href="/offline">
-          Go to Pay offline
-        </Link>
+        <summary>Add money in advance for offline payments</summary>
+        <div className="set-aside-form">
+          <p className="muted">
+            Pay a stall even with no network. Unspent money comes back{" "}
+            {choice
+              ? `after about ${duration(
+                  choice.stall.reservePolicy.acceptanceDurationSeconds +
+                    choice.stall.reservePolicy.submissionDelaySeconds,
+                )}`
+              : "later"}
+            .
+          </p>
+          {termsFailed && (
+            <p className="notice error">Stalls are unavailable right now. Try again in a moment.</p>
+          )}
+          {choices.length > 1 && (
+            <label>
+              Stall
+              <select
+                value={selected}
+                disabled={busy || Boolean(waiting)}
+                onChange={(event) => setSelected(Number(event.target.value))}
+              >
+                {choices.map((choice, index) => (
+                  <option key={`${choice.event.eventId}:${choice.stall.vendorId}`} value={index}>
+                    {choice.stall.vendorName}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+          <fieldset className="amount-row">
+            <legend className="visually-hidden">Amount to add</legend>
+            {amounts.map((value) => (
+              <button
+                key={value}
+                type="button"
+                className="secondary-button"
+                aria-pressed={chosen === value}
+                disabled={busy || Boolean(waiting)}
+                onClick={() => setAmount(value)}
+              >
+                {value} {choice?.event.assetSymbol ?? "USDC"}
+              </button>
+            ))}
+          </fieldset>
+          <button
+            type="button"
+            className="block-button"
+            disabled={props.disabled || busy || Boolean(waiting) || !choice}
+            onClick={open}
+          >
+            {busy || waiting
+              ? "Adding…"
+              : `Add ${chosen} ${choice?.event.assetSymbol ?? "USDC"}${choice ? ` for ${choice.stall.vendorName}` : ""}`}
+          </button>
+        </div>
+        {props.children}
+      </details>
+      {message && (
+        <p role="status" aria-live="polite" className={`notice ${tone === "info" ? "" : tone}`}>
+          {message}
+        </p>
       )}
     </section>
   );

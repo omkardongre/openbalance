@@ -14,11 +14,11 @@ import {
 } from "../../lib/account-display";
 import { explorerTx } from "../../lib/format";
 import { useVendorNames } from "../../lib/reserve-terms";
-import { AttendeeNav } from "../attendee-nav";
 import { BrandMark } from "../brand-mark";
 import { useOnline } from "../offline-shell";
 import { useSession } from "../session-provider";
 import { type ActivityItem, ActivityList } from "./activity-list";
+import { OfflinePending } from "./offline-pending";
 import { OpenReserve } from "./open-reserve";
 import { type ReserveBalance, ReserveBalances, type ReturnOperation } from "./reserve-balances";
 
@@ -28,7 +28,15 @@ type ReserveCursor = { openedBlock: string; channelId: string };
 
 /** Rows per page; small enough that a phone shows a page without endless scrolling. */
 const ACTIVITY_PAGE = 10;
-const RESERVE_PAGE = 5;
+/** Payments shown before the customer asks for more. */
+const ACTIVITY_PREVIEW = 3;
+/** Reserves last a few hours, so one page this size always holds every one still open. */
+const RESERVE_PAGE = 20;
+/** After setting money aside, how often and how long to look for it while the network records it. */
+const NEW_RESERVE_POLL_MS = 3_000;
+const NEW_RESERVE_POLL_TRIES = 20;
+/** Success notes clear themselves; what they confirm is visible on the page. */
+const SUCCESS_NOTICE_MS = 5_000;
 
 class SessionEnded extends Error {}
 
@@ -58,7 +66,10 @@ export default function AccountPage() {
   const [returning, setReturning] = useState<string>();
   const [activity, setActivity] = useState<Page<ActivityItem, ActivityCursor>>();
   const [reserves, setReserves] = useState<Page<ReserveBalance, ReserveCursor>>();
-  const [loadingMore, setLoadingMore] = useState<"activity" | "reserves">();
+  const [activityShown, setActivityShown] = useState(ACTIVITY_PREVIEW);
+  const [loadingMore, setLoadingMore] = useState<"activity">();
+  /** A reserve just set aside that the list does not show yet, and how many looks are left. */
+  const [awaiting, setAwaiting] = useState<{ channelId: string; tries: number }>();
   const [returns, setReturns] = useState<Record<string, ReturnOperation>>({});
   const [nowSeconds, setNowSeconds] = useState(() => Math.floor(Date.now() / 1_000));
   const [fundAmount, setFundAmount] = useState("5");
@@ -124,6 +135,15 @@ export default function AccountPage() {
     }
   }, []);
 
+  const loadReserves = useCallback(async () => {
+    setReserves(
+      (await authorized(`/v1/accounts/me/reserves?limit=${RESERVE_PAGE}`)) as Page<
+        ReserveBalance,
+        ReserveCursor
+      >,
+    );
+  }, [authorized]);
+
   const loadFirstPages = useCallback(async () => {
     const [nextActivity, nextReserves] = await Promise.all([
       authorized(`/v1/accounts/me/activity?limit=${ACTIVITY_PAGE}`) as Promise<
@@ -150,6 +170,54 @@ export default function AccountPage() {
     const timer = setInterval(() => setNowSeconds(Math.floor(Date.now() / 1_000)), 15_000);
     return () => clearInterval(timer);
   }, []);
+
+  // The balance keeps itself current: a light read every 15 s, and a full reload whenever the
+  // customer comes back to the tab (after paying at a stall, for example).
+  useEffect(() => {
+    if (!session) return;
+    const timer = setInterval(() => {
+      void loadBalance(session.account);
+      loadReserves().catch(() => undefined);
+    }, 15_000);
+    const onVisible = () => {
+      if (document.visibilityState !== "visible") return;
+      void loadBalance(session.account);
+      loadFirstPages().catch(() => undefined);
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [session, loadBalance, loadFirstPages, loadReserves]);
+
+  // The network records a new reserve a few seconds after it is final, so a single read right
+  // after setting it aside can miss it. Keep looking briefly; no page reload is ever needed.
+  useEffect(() => {
+    if (!awaiting || !session) return;
+    if (reserves?.items.some((item) => item.channelId.toLowerCase() === awaiting.channelId)) {
+      setAwaiting(undefined);
+      return;
+    }
+    if (awaiting.tries <= 0) {
+      setAwaiting(undefined);
+      return;
+    }
+    const timer = setTimeout(() => {
+      loadReserves()
+        .catch(() => undefined)
+        .finally(() =>
+          setAwaiting((current) => current && { ...current, tries: current.tries - 1 }),
+        );
+    }, NEW_RESERVE_POLL_MS);
+    return () => clearTimeout(timer);
+  }, [awaiting, reserves, session, loadReserves]);
+
+  useEffect(() => {
+    if (tone !== "success" || !status) return;
+    const timer = setTimeout(() => setStatus(""), SUCCESS_NOTICE_MS);
+    return () => clearTimeout(timer);
+  }, [tone, status]);
 
   async function relayerRequest(path: string, init: RequestInit) {
     const relayer = process.env.NEXT_PUBLIC_RELAYER_URL;
@@ -239,22 +307,16 @@ export default function AccountPage() {
     }
   }
 
-  async function refresh() {
-    if (!session) return;
-    setBusy(true);
-    try {
-      await Promise.all([loadFirstPages(), loadBalance(session.account)]);
-      report("");
-    } catch (error) {
-      failed(error, "Activity is temporarily unavailable. Your account is unchanged.");
-    } finally {
-      setBusy(false);
+  async function showMoreActivity() {
+    const loaded = activity?.items.length ?? 0;
+    // Reveal what is already loaded first; fetch the next page only when that runs out.
+    if (loaded > activityShown) {
+      setActivityShown((count) => count + ACTIVITY_PAGE);
+      return;
     }
-  }
-
-  async function moreActivity() {
     const cursor = activity?.nextCursor;
     if (!cursor) return;
+    setActivityShown((count) => count + ACTIVITY_PAGE);
     setLoadingMore("activity");
     try {
       const next = (await authorized(
@@ -266,25 +328,6 @@ export default function AccountPage() {
       }));
     } catch (error) {
       failed(error, "More activity is unavailable right now.");
-    } finally {
-      setLoadingMore(undefined);
-    }
-  }
-
-  async function moreReserves() {
-    const cursor = reserves?.nextCursor;
-    if (!cursor) return;
-    setLoadingMore("reserves");
-    try {
-      const next = (await authorized(
-        `/v1/accounts/me/reserves?limit=${RESERVE_PAGE}&beforeOpenedBlock=${cursor.openedBlock}&beforeChannelId=${cursor.channelId}`,
-      )) as Page<ReserveBalance, ReserveCursor>;
-      setReserves((current) => ({
-        items: [...(current?.items ?? []), ...next.items],
-        nextCursor: next.nextCursor,
-      }));
-    } catch (error) {
-      failed(error, "More reserves are unavailable right now.");
     } finally {
       setLoadingMore(undefined);
     }
@@ -385,7 +428,7 @@ export default function AccountPage() {
   // Signing in needs the server. With no signal the Wallet points to the one thing that works.
   if (!session && (!online || unreachable))
     return (
-      <main className="with-tabbar">
+      <main>
         <section className="shell narrow">
           <div className="brand-bar">
             <BrandMark />
@@ -409,13 +452,12 @@ export default function AccountPage() {
             </button>
           )}
         </section>
-        <AttendeeNav />
       </main>
     );
 
   if (!session)
     return (
-      <main className="with-tabbar">
+      <main>
         <section className="shell narrow">
           <div className="brand-bar">
             <BrandMark />
@@ -432,7 +474,6 @@ export default function AccountPage() {
             New here? <Link href="/enroll">Create an account</Link>
           </p>
         </section>
-        <AttendeeNav />
       </main>
     );
 
@@ -440,15 +481,17 @@ export default function AccountPage() {
   const reserveItems = reserves?.items ?? [];
 
   return (
-    <main className="with-tabbar">
+    <main>
       <section className="shell narrow account-shell">
         <div className="account-header">
-          <div className="identity">
-            <span className="avatar" aria-hidden="true">
-              OB
-            </span>
-            <div>
-              <small>Your account · test network</small>
+          <BrandMark />
+          {/* Account details and sign-out are rarely needed, so they sit behind one small menu. */}
+          <details className="account-menu">
+            <summary aria-label="Account menu">
+              <span aria-hidden="true">⋯</span>
+            </summary>
+            <div className="account-menu-panel">
+              <small>Account</small>
               <span className="address-chip" title={account}>
                 {shortAddress(account)}
                 <button
@@ -460,41 +503,20 @@ export default function AccountPage() {
                   {copied ? "Copied" : "Copy"}
                 </button>
               </span>
+              <button
+                type="button"
+                className="secondary-button block-button"
+                disabled={busy}
+                onClick={signOut}
+              >
+                Sign out
+              </button>
             </div>
-          </div>
-          <button
-            type="button"
-            className="secondary-button sign-out"
-            disabled={busy}
-            onClick={signOut}
-          >
-            Sign out
-          </button>
+          </details>
         </div>
 
         <div className="balance-card">
-          <div className="balance-top">
-            <span>Available balance</span>
-            <button
-              type="button"
-              className="icon-button"
-              disabled={busy}
-              onClick={refresh}
-              aria-label="Refresh balance and activity"
-            >
-              <svg
-                width="18"
-                height="18"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                aria-hidden="true"
-              >
-                <path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v5h-5" strokeLinecap="round" />
-              </svg>
-            </button>
-          </div>
+          <span>Available balance</span>
           <strong>
             {balance !== undefined
               ? `${formatAmount(balance)} ${SETTLEMENT_ASSET.symbol}`
@@ -502,16 +524,55 @@ export default function AccountPage() {
                 ? "Unavailable"
                 : "…"}
           </strong>
-          <small>Test {SETTLEMENT_ASSET.symbol}, read straight from the network.</small>
         </div>
 
-        {notice}
+        <Link className="primary-action block-button scan-button" href="/offline?scan=1">
+          <svg
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            aria-hidden="true"
+          >
+            <path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3M4 12h16" />
+          </svg>
+          Scan to pay
+        </Link>
 
-        <section className="card" aria-labelledby="funding-heading">
-          <div className="section-heading">
-            <h2 id="funding-heading">Add test money</h2>
-            <p>Not real money</p>
-          </div>
+        {status && notice}
+
+        <OpenReserve
+          identity={{
+            account: getAddress(account),
+            credentialId: session.credentialId,
+            sessionToken: session.sessionToken,
+          }}
+          disabled={busy}
+          onOpened={async (channelId) => {
+            setAwaiting({ channelId: channelId.toLowerCase(), tries: NEW_RESERVE_POLL_TRIES });
+            await Promise.all([loadFirstPages(), loadBalance(account)]).catch(() => undefined);
+          }}
+        >
+          <ReserveBalances
+            reserves={reserveItems}
+            vendors={vendors}
+            operations={returns}
+            nowSeconds={nowSeconds}
+            busy={busy}
+            returning={returning}
+            onReturn={returnReserve}
+          />
+        </OpenReserve>
+
+        {/* Demo only. Open by itself while the balance is empty, otherwise one quiet line. */}
+        <details
+          className="card test-money"
+          key={balance === 0n ? "empty" : "funded"}
+          open={balance === 0n || undefined}
+        >
+          <summary>Add test money</summary>
+          <p className="muted">Not real money.</p>
           <fieldset className="amount-row">
             <legend className="visually-hidden">Test amount</legend>
             {["1", "2", "5"].map((value) => (
@@ -535,83 +596,40 @@ export default function AccountPage() {
               View on explorer
             </a>
           )}
-        </section>
+        </details>
 
-        <OpenReserve
-          identity={{
-            account: getAddress(account),
-            credentialId: session.credentialId,
-            sessionToken: session.sessionToken,
-          }}
-          disabled={busy}
-          onOpened={async () => {
-            await Promise.all([loadFirstPages(), loadBalance(account)]).catch(() => undefined);
-          }}
-        />
-
-        <section className="activity" aria-labelledby="balances-heading">
-          <div className="section-heading">
-            <div>
-              <p className="eyebrow">For when the network drops</p>
-              <h2 id="balances-heading">Offline reserves</h2>
-            </div>
-            <Link className="text-button" href="/offline">
-              Pay offline
-            </Link>
-          </div>
-          {!reserves ? (
-            <p className="empty-state">Loading…</p>
-          ) : (
-            <ReserveBalances
-              reserves={reserveItems}
-              vendors={vendors}
-              operations={returns}
-              nowSeconds={nowSeconds}
-              busy={busy}
-              returning={returning}
-              onReturn={returnReserve}
-            />
-          )}
-          {reserves?.nextCursor && (
-            <button
-              type="button"
-              className="secondary-button block-button"
-              disabled={loadingMore === "reserves"}
-              onClick={moreReserves}
-            >
-              {loadingMore === "reserves" ? "Loading…" : "Show older reserves"}
-            </button>
-          )}
-        </section>
-
-        <section className="activity" aria-labelledby="activity-heading">
-          <div className="section-heading">
-            <h2 id="activity-heading">Activity</h2>
-            {activityItems.length > 0 && (
-              <p>
-                {activityItems.length}
-                {activity?.nextCursor ? "+" : ""} shown
-              </p>
-            )}
-          </div>
+        {/* History is rarely needed: one closed row, last, that opens on the latest few payments. */}
+        <details className="card activity">
+          <summary>Recent payments</summary>
+          <OfflinePending online={online} />
           {!activity ? (
             <p className="empty-state">Loading…</p>
           ) : (
-            <ActivityList items={activityItems} vendors={vendors} />
+            <ActivityList items={activityItems.slice(0, activityShown)} vendors={vendors} />
           )}
-          {activity?.nextCursor && (
-            <button
-              type="button"
-              className="secondary-button block-button"
-              disabled={loadingMore === "activity"}
-              onClick={moreActivity}
-            >
-              {loadingMore === "activity" ? "Loading…" : "Show older activity"}
-            </button>
-          )}
-        </section>
+          <div className="show-row">
+            {(activityItems.length > activityShown || activity?.nextCursor) && (
+              <button
+                type="button"
+                className="text-button show-toggle"
+                disabled={loadingMore === "activity"}
+                onClick={showMoreActivity}
+              >
+                {loadingMore === "activity" ? "Loading…" : "Show more"}
+              </button>
+            )}
+            {activityShown > ACTIVITY_PREVIEW && activityItems.length > ACTIVITY_PREVIEW && (
+              <button
+                type="button"
+                className="text-button show-toggle"
+                onClick={() => setActivityShown(ACTIVITY_PREVIEW)}
+              >
+                Show less
+              </button>
+            )}
+          </div>
+        </details>
       </section>
-      <AttendeeNav />
     </main>
   );
 }

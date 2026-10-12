@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { Address, Hex } from "viem";
 
 export type Stall = {
@@ -55,26 +55,46 @@ export function loadReserveTerms(): Promise<ReserveTerms> {
   return pending;
 }
 
-/** Vendor id (lowercase) → stall name; empty until the listing loads. */
-export function useVendorNames() {
-  const [names, setNames] = useState<Map<string, string>>(new Map());
+/**
+ * The stall listing for a component, retried whenever the browser comes back online. A page opened
+ * with no signal (the saved offline copy) would otherwise never learn the stall names once the
+ * phone reconnects, and every row would read "a stall".
+ */
+export function useReserveTerms(): { terms: ReserveTerms | undefined; failed: boolean } {
+  const [terms, setTerms] = useState<ReserveTerms>();
+  const [failed, setFailed] = useState(false);
   useEffect(() => {
     let active = true;
-    loadReserveTerms()
-      .then((terms) => {
-        if (!active) return;
-        setNames(
-          new Map(
-            terms.events.flatMap((event) =>
-              event.vendors.map((stall) => [stall.vendorId.toLowerCase(), stall.vendorName]),
-            ),
-          ),
-        );
-      })
-      .catch(() => undefined);
+    const load = () =>
+      loadReserveTerms()
+        .then((next) => {
+          if (!active) return;
+          setTerms(next);
+          setFailed(false);
+        })
+        .catch(() => {
+          if (active) setFailed(true);
+        });
+    void load();
+    window.addEventListener("online", load);
     return () => {
       active = false;
+      window.removeEventListener("online", load);
     };
   }, []);
-  return names;
+  return { terms, failed: failed && !terms };
+}
+
+/** Vendor id (lowercase) → stall name; empty until the listing loads. */
+export function useVendorNames() {
+  const { terms } = useReserveTerms();
+  return useMemo(
+    () =>
+      new Map(
+        (terms?.events ?? []).flatMap((event) =>
+          event.vendors.map((stall) => [stall.vendorId.toLowerCase(), stall.vendorName] as const),
+        ),
+      ),
+    [terms],
+  );
 }

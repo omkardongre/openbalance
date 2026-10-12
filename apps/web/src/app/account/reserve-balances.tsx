@@ -1,3 +1,6 @@
+"use client";
+
+import { useState } from "react";
 import { money } from "../../lib/format";
 
 export type ReserveBalance = {
@@ -61,6 +64,19 @@ function relative(epochSeconds: number, nowSeconds: number) {
   return rest === 0 ? `in ${hours} h` : `in ${hours} h ${rest} min`;
 }
 
+/** Reserves listed before the customer asks for more. */
+const RESERVE_PREVIEW = 3;
+
+/** Reserves that still hold money, soonest deadline first: what "Your offline money" counts. */
+export function currentReserves(reserves: ReserveBalance[], nowSeconds: number) {
+  return reserves
+    .filter((reserve) => {
+      const kind = reservePhase(reserve, nowSeconds).kind;
+      return kind !== "returned" && kind !== "spent";
+    })
+    .sort((left, right) => Number(left.acceptUntil) - Number(right.acceptUntil));
+}
+
 export function ReserveBalances({
   reserves,
   vendors,
@@ -78,77 +94,78 @@ export function ReserveBalances({
   returning?: string | undefined;
   onReturn: (reserve: ReserveBalance) => void;
 }) {
-  // Only money that still needs the attendee's attention: spendable, closing, or ready to come
-  // back. Returned and fully spent reserves are finished and already listed in Activity.
-  const current = reserves.filter((reserve) => {
-    const kind = reservePhase(reserve, nowSeconds).kind;
-    return kind !== "returned" && kind !== "spent";
-  });
-  if (current.length === 0)
-    return (
-      <p className="empty-state">
-        {reserves.length === 0
-          ? "Nothing set aside yet. Set aside a small amount above to pay a stall when the network drops."
-          : "Nothing set aside right now. Past reserves are listed in Activity."}
-      </p>
-    );
+  const [expanded, setExpanded] = useState(false);
+  // Only money that still needs the customer: spendable, closing, or ready to come back. Returned
+  // and fully spent reserves are finished and already listed in Recent payments.
+  const current = currentReserves(reserves, nowSeconds);
+  if (current.length === 0) return null;
+  const shown = expanded ? current : current.slice(0, RESERVE_PREVIEW);
   return (
-    <ol className="activity-list">
-      {current.map((reserve) => {
-        const phase = reservePhase(reserve, nowSeconds);
-        const operation = operations[reserve.channelId];
-        const vendor = vendors.get(reserve.vendorId?.toLowerCase() ?? "") ?? "Stall";
-        return (
-          <li key={reserve.channelId} className="reserve-readback" data-phase={phase.kind}>
-            <span className="reserve-title">
-              <b>{vendor}</b>
-              <em>
-                {phase.kind === "returned"
-                  ? "Returned"
-                  : phase.kind === "spent"
-                    ? "Fully spent"
-                    : phase.kind === "spendable"
-                      ? "Spendable offline"
-                      : phase.kind === "settling"
-                        ? "Closed for spending"
-                        : "Ready to come back"}
-              </em>
-            </span>
-            <strong>
-              {phase.kind === "returned" ? amount(phase.units) : amount(reserve.remainingUnits)}{" "}
-              {phase.kind === "returned" ? "back in your account" : "left"}
-            </strong>
-            <small>
-              {phase.kind === "returned" && "Your unspent money was paid back to your account."}
-              {phase.kind === "spent" && `You spent all ${amount(reserve.reserveUnits)}.`}
-              {phase.kind === "spendable" &&
-                `Spend it at the event until ${time(phase.until)}. Whatever is left comes back to you from ${time(phase.backFrom)} (${relative(phase.backFrom, nowSeconds)}).`}
-              {phase.kind === "settling" &&
-                `Vendors are finishing offline sales. What is left comes back to you from ${time(phase.backFrom)} (${relative(phase.backFrom, nowSeconds)}).`}
-              {phase.kind === "due" && "It can only go back to your account."}
-            </small>
-            {phase.kind === "due" && (!operation || operation.state === "FAILED") && (
-              <button
-                type="button"
-                disabled={busy || returning === reserve.channelId}
-                aria-busy={returning === reserve.channelId}
-                onClick={() => onReturn(reserve)}
-              >
-                {returning === reserve.channelId
-                  ? "Returning…"
-                  : `Return ${amount(reserve.remainingUnits)} now`}
-              </button>
-            )}
-            {operation && phase.kind !== "returned" && (
-              <small role="status">
-                {operation.state === "FAILED"
-                  ? "The return did not go through. Try again."
-                  : "Return on its way. It shows here once the network confirms it."}
-              </small>
-            )}
-          </li>
-        );
-      })}
-    </ol>
+    <details className="offline-money">
+      <summary>Your offline money · {current.length}</summary>
+      <ol className="activity-list ledger reserve-list">
+        {shown.map((reserve) => {
+          const phase = reservePhase(reserve, nowSeconds);
+          const operation = operations[reserve.channelId];
+          const vendor = vendors.get(reserve.vendorId?.toLowerCase() ?? "") ?? "a stall";
+          // One line per reserve: whose it is, how much is left, and the one time that matters now.
+          const detail =
+            phase.kind === "spendable"
+              ? `Spend until ${time(phase.until)}`
+              : phase.kind === "settling"
+                ? `Back from ${time(phase.backFrom)}`
+                : "Ready to come back";
+          return (
+            <li key={reserve.channelId} data-phase={phase.kind}>
+              <div className="ledger-row">
+                <span className="stall-avatar" aria-hidden="true">
+                  {vendor.charAt(0).toUpperCase()}
+                </span>
+                <span className="stall-text">
+                  <strong>{vendor}</strong>
+                  <span>{detail}</span>
+                </span>
+                <strong className="stall-amount">{amount(reserve.remainingUnits)}</strong>
+              </div>
+              {phase.kind === "settling" && (
+                <small>
+                  Stalls are finishing offline sales. The rest comes back{" "}
+                  {relative(phase.backFrom, nowSeconds)}.
+                </small>
+              )}
+              {phase.kind === "due" && (!operation || operation.state === "FAILED") && (
+                <button
+                  type="button"
+                  className="secondary-button block-button"
+                  disabled={busy || returning === reserve.channelId}
+                  aria-busy={returning === reserve.channelId}
+                  onClick={() => onReturn(reserve)}
+                >
+                  {returning === reserve.channelId
+                    ? "Returning…"
+                    : `Return ${amount(reserve.remainingUnits)} now`}
+                </button>
+              )}
+              {operation && (
+                <small role="status">
+                  {operation.state === "FAILED"
+                    ? "The return did not go through. Try again."
+                    : "Return on its way. It shows here once the network confirms it."}
+                </small>
+              )}
+            </li>
+          );
+        })}
+      </ol>
+      {current.length > RESERVE_PREVIEW && (
+        <button
+          type="button"
+          className="text-button show-toggle"
+          onClick={() => setExpanded((value) => !value)}
+        >
+          {expanded ? "Show less" : `Show more (${current.length - RESERVE_PREVIEW})`}
+        </button>
+      )}
+    </details>
   );
 }

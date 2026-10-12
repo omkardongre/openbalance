@@ -1771,3 +1771,343 @@ a.inline-proof {
 .row-menu-list button:focus-visible {
   background: var(--surface-muted);
 }
+
+/* --- Customer pages, simplified (12 Oct 2026) --- */
+.back-link {
+  display: inline-block;
+  margin-bottom: 0.75rem;
+  color: var(--brand-strong);
+  font-weight: 600;
+  text-decoration: none;
+}
+.account-menu {
+  position: relative;
+  margin: 0;
+}
+.account-menu > summary {
+  display: grid;
+  width: 2.75rem;
+  height: 2.75rem;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text);
+  font-size: 1.4rem;
+  line-height: 1;
+  list-style: none;
+}
+.account-menu > summary::-webkit-details-marker {
+  display: none;
+}
+.account-menu-panel {
+  position: absolute;
+  z-index: 10;
+  top: calc(100% + 0.5rem);
+  right: 0;
+  display: grid;
+  gap: 0.6rem;
+  min-width: 15rem;
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface, #ffffff);
+  box-shadow: 0 16px 32px -18px rgb(15 23 42 / 40%);
+}
+.account-menu-panel small {
+  color: var(--text-muted);
+}
+.account-shell > .scan-button {
+  margin-top: 1rem;
+  text-align: center;
+}
+.ledger li:has(> .ledger-link) {
+  padding: 0;
+}
+.ledger-link {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.85rem 1rem;
+  color: inherit;
+  text-decoration: none;
+}
+.ledger-link > div:first-child {
+  display: grid;
+  gap: 0.2rem;
+  min-width: 0;
+}
+.tag,
+.activity-list .tag {
+  margin-left: 0.4rem;
+  padding: 0.05rem 0.45rem;
+  border-radius: 999px;
+  background: var(--surface-muted);
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+  vertical-align: middle;
+}
+.set-aside h2 {
+  margin-top: 0;
+}
+.set-aside > details,
+.test-money {
+  margin-top: 0.75rem;
+}
+.set-aside > details:first-child {
+  margin-top: 0;
+}
+.test-money > summary {
+  font-size: 0.95rem;
+}
+.offline-hint {
+  margin-top: 0.75rem;
+}
+
+/* --- Wallet, flatter (12 Oct 2026): one card per section, plain rows with thin dividers --- */
+.account-shell details.card > summary,
+.account-shell .set-aside > details > summary {
+  color: var(--text);
+  font-size: 1rem;
+}
+.account-shell details.card > summary ~ *,
+.account-shell .set-aside > details > summary ~ * {
+  margin-top: 0.75rem;
+}
+.account-shell .ledger {
+  margin-top: 0.5rem;
+}
+.account-shell .ledger li {
+  padding: 0.75rem 0;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  background: transparent;
+}
+.account-shell .ledger li:last-child {
+  border-bottom: 0;
+}
+.account-shell .ledger-link {
+  padding: 0;
+}
+.account-shell .ledger li:has(> .ledger-link) {
+  padding: 0.75rem 0;
+}
+.account-shell .reserve-list li {
+  display: grid;
+  gap: 0.4rem;
+}
+.ledger-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+}
+.ledger-row .ledger-amount {
+  display: grid;
+}
+.ledger-row .ledger-amount span,
+.reserve-list small {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+.show-row {
+  display: flex;
+  justify-content: center;
+  gap: 1rem;
+}
+.show-row:empty {
+  display: none;
+}
+.show-toggle {
+  display: block;
+  margin: 0.25rem auto 0;
+  font-weight: 600;
+}
+/* "Your offline money": a closed row under the form, same look as the other section rows. */
+.account-shell .offline-money {
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border);
+}
+.account-shell .offline-money > summary {
+  color: var(--text);
+  font-size: 0.95rem;
+}
+/* On a phone the page itself is not one more box around the cards. */
+@media (max-width: 40rem) {
+  .account-shell {
+    padding: 1rem 0.25rem;
+    border: 0;
+    background: transparent;
+    box-shadow: none;
+  }
+}
+/* Pay page: the stall's answer code is the first thing on screen after approving. */
+.response-qr img {
+  width: min(100%, 20rem);
+  height: auto;
+}
+.response-qr h2 {
+  margin-top: 0;
+}
+
+/* --- Wallet polish (12 Oct 2026): section rows with a trailing chevron, tidy offline money rows --- */
+.account-shell details.card > summary,
+.account-shell .set-aside > details > summary,
+.account-shell .offline-money > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  min-height: 2.75rem;
+  list-style: none;
+  font-weight: 650;
+  cursor: pointer;
+}
+.account-shell details.card > summary::-webkit-details-marker,
+.account-shell .set-aside > details > summary::-webkit-details-marker,
+.account-shell .offline-money > summary::-webkit-details-marker {
+  display: none;
+}
+/* Chevron drawn in CSS: points down when closed, up when open. */
+.account-shell details.card > summary::after,
+.account-shell .set-aside > details > summary::after,
+.account-shell .offline-money > summary::after {
+  content: "";
+  flex: none;
+  width: 0.55rem;
+  height: 0.55rem;
+  margin-right: 0.3rem;
+  border-right: 2px solid var(--text-muted);
+  border-bottom: 2px solid var(--text-muted);
+  transform: translateY(-0.15rem) rotate(45deg);
+  transition: transform 0.2s ease;
+}
+.account-shell details.card[open] > summary::after,
+.account-shell .set-aside > details[open] > summary::after,
+.account-shell .offline-money[open] > summary::after {
+  transform: translateY(0.1rem) rotate(225deg);
+}
+.account-shell details.card,
+.account-shell .set-aside {
+  transition:
+    box-shadow 0.2s ease,
+    border-color 0.2s ease;
+}
+.account-shell details.card:has(> summary:hover),
+.account-shell .set-aside:has(> details > summary:hover) {
+  border-color: color-mix(in srgb, var(--brand) 35%, var(--border));
+}
+.account-shell details > summary:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 4px;
+  border-radius: 0.5rem;
+}
+
+/* Offline money rows: stall on the left, amount and time right-aligned, on one line on phones too. */
+.account-shell .reserve-list li {
+  display: grid;
+  flex-direction: row;
+  align-items: stretch;
+  gap: 0.5rem;
+  padding: 0.75rem 0;
+}
+.account-shell .reserve-list .ledger-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+.account-shell .reserve-list .ledger-row > strong {
+  font-weight: 600;
+}
+.account-shell .reserve-list .ledger-amount {
+  display: grid;
+  justify-items: end;
+  text-align: right;
+}
+.account-shell .reserve-list .ledger-amount strong {
+  font-variant-numeric: tabular-nums;
+}
+.account-shell .offline-money .reserve-list {
+  margin-top: 0.25rem;
+}
+
+/* Scan to pay: icon plus label, a little depth. */
+.account-shell > .scan-button {
+  gap: 0.6rem;
+  box-shadow: 0 8px 20px -10px color-mix(in srgb, var(--brand) 70%, transparent);
+}
+.scan-button svg {
+  width: 1.4rem;
+  height: 1.4rem;
+  flex: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .account-shell details > summary::after {
+    transition: none;
+  }
+}
+
+/* --- Offline money rows, redesigned (12 Oct 2026): icon · name and time · amount, full width --- */
+.account-shell .reserve-list li {
+  /* The shared list rule sets space-between, which shrinks a one-column grid to its content. */
+  justify-content: normal;
+  grid-template-columns: minmax(0, 1fr);
+  margin: 0;
+  padding: 0.7rem 0.85rem;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: var(--surface-muted);
+}
+.account-shell .reserve-list li + li {
+  margin-top: 0.5rem;
+}
+.account-shell .reserve-list li:last-child {
+  border-bottom: 0;
+}
+.account-shell .reserve-list .ledger-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  width: 100%;
+}
+.stall-avatar {
+  display: grid;
+  flex: none;
+  width: 2.5rem;
+  height: 2.5rem;
+  place-items: center;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--brand) 14%, white);
+  color: var(--brand-strong);
+  font-weight: 700;
+}
+.stall-text {
+  display: grid;
+  flex: 1;
+  min-width: 0;
+  gap: 0.1rem;
+}
+.stall-text strong {
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.stall-text span {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+.stall-amount {
+  flex: none;
+  font-size: 1.05rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.reserve-list li[data-phase="due"] .stall-text span {
+  color: var(--brand-strong);
+  font-weight: 600;
+}

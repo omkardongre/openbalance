@@ -14,23 +14,23 @@ export type ActivityItem = {
 };
 
 /**
- * One finalized transition in the attendee's words. The direction says whether money left the
- * spendable balance (a payment or a reserve) or came back to it (a return or a refund).
+ * One finalized transition in the attendee's words, short enough for one line on a phone. The
+ * direction says whether money left the spendable balance or came back to it.
  */
 function describe(item: ActivityItem, vendor: string) {
   switch (item.kind) {
     case "PAYMENT_COMMITTED":
-      return { title: `Paid ${vendor}`, direction: "out" as const };
+      return { title: vendor, direction: "out" as const };
     case "VOUCHER_SETTLED":
-      return { title: `Paid ${vendor} offline`, direction: "out" as const };
+      return { title: vendor, tag: "offline", direction: "out" as const };
     case "PAYMENT_CANCELLED":
-      return { title: `Payment to ${vendor} cancelled`, direction: "none" as const };
+      return { title: vendor, tag: "cancelled", direction: "none" as const };
     case "CHANNEL_OPENED":
-      return { title: `Set aside for ${vendor}`, direction: "out" as const };
+      return { title: vendor, tag: "set aside", direction: "out" as const };
     case "CHANNEL_RECLAIMED":
-      return { title: `Unspent reserve returned from ${vendor}`, direction: "in" as const };
+      return { title: vendor, tag: "returned", direction: "in" as const };
     case "REFUND_COMMITTED":
-      return { title: `Refund from ${vendor}`, direction: "in" as const };
+      return { title: vendor, tag: "refund", direction: "in" as const };
     default:
       return {
         title: item.kind.charAt(0) + item.kind.slice(1).toLowerCase().replaceAll("_", " "),
@@ -52,24 +52,33 @@ export function ActivityList({
     <ol className="activity-list ledger">
       {items.map((item) => {
         const vendor = (item.vendorId && vendors.get(item.vendorId.toLowerCase())) ?? "a stall";
-        const { title, direction } = describe(item, vendor);
+        const { title, tag, direction } = describe(item, vendor);
         return (
           <li key={item.transitionId} data-direction={direction}>
-            <div>
-              <strong>{title}</strong>
-              <span>{when(new Date(item.recordedAt))}</span>
-            </div>
-            <div className="ledger-amount">
-              {item.amountUnits !== null && (
+            {/* The whole row opens the receipt, so there is no separate link to aim for. */}
+            <a
+              className="ledger-link"
+              href={explorerTx(item.transactionHash)}
+              target="_blank"
+              rel="noreferrer"
+              aria-label={`${title}${tag ? `, ${tag}` : ""}: open receipt`}
+            >
+              <div>
                 <strong>
-                  {direction === "in" ? "+" : direction === "out" ? "−" : ""}
-                  {money(item.amountUnits)}
+                  {title}
+                  {tag && <span className="tag">{tag}</span>}
                 </strong>
-              )}
-              <a href={explorerTx(item.transactionHash)} target="_blank" rel="noreferrer">
-                Receipt
-              </a>
-            </div>
+                <span>{when(new Date(item.recordedAt))}</span>
+              </div>
+              <div className="ledger-amount">
+                {item.amountUnits !== null && (
+                  <strong>
+                    {direction === "in" ? "+" : direction === "out" ? "−" : ""}
+                    {money(item.amountUnits)}
+                  </strong>
+                )}
+              </div>
+            </a>
           </li>
         );
       })}
