@@ -449,7 +449,7 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
 
     private suspend fun chargeOffline(grossUnits: BigInteger) {
         runBusy("Creating payment") {
-            val vendor = requireNotNull(_state.value.vendor) { "Open the Terminal tab and tap Refresh while online to load this stall" }
+            val vendor = requireNotNull(_state.value.vendor) { "Tap ⋮ then Refresh while online to load this stall" }
             val source = requireNotNull(timeSource) { "Trusted-time source is unavailable" }
             val sample = requireNotNull(_state.value.trustedTime) { "Check the clock first" }
             val window = source.current(sample)

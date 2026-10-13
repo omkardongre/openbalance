@@ -874,7 +874,7 @@ private fun KeypadCard(state: TerminalUiState, model: TerminalViewModel) {
                 Text(symbol, style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(bottom = 8.dp))
             }
             val hint = when {
-                state.vendor == null -> "Open the Terminal tab and tap Refresh while online to load this stall"
+                state.vendor == null -> "Tap ⋮ then Refresh while online to load this stall"
                 block is OfflineLimits.Block.OverPerSale ->
                     "Over the ${formatUnits(block.maxPerSaleUnits.toString(), CHANNEL_ASSET_DECIMALS)} offline limit per sale"
                 block is OfflineLimits.Block.OverRemaining ->
